@@ -2,14 +2,14 @@ import asyncio
 import time
 from blockchain_ingestion.rpc.erpc_client import ErpcClient, AdaptiveErpcScheduler, RpcErrorResult
 
-ERPC_URL = "http://erpc-service.erpc:4000/main/evm/56"
+ERPC_URL = "http://localhost:4000/main/evm/56"
 START_BLOCK = 90000001
 END_BLOCK = 90000100
 INITIAL_CONCURRENT = 20
 MAX_INFLIGHT = 50
 
 async def main():
-    # 1️⃣ 初始化客户端和 Scheduler
+    # init client and Scheduler
     client = ErpcClient(ERPC_URL, timeout_sec=5)
     scheduler = AdaptiveErpcScheduler(
         client,
@@ -24,7 +24,7 @@ async def main():
     async def task(block_number: int):
         nonlocal error_count
         method = "eth_getBlockByNumber"
-        params = [hex(block_number), True]  # BSC 兼容 ETH RPC
+        params = [hex(block_number), True] 
         meta_extra = {"block_number": block_number}
 
         result = await scheduler.submit(method, params, meta_extra)
@@ -37,11 +37,11 @@ async def main():
             success_latencies.append(latency)
             print(f"[Block {block_number}] OK, latency={latency}ms, hash={value.get('hash')}")
 
-    # 2️⃣ 并发调度所有 block
+    # parallel call all blocks
     tasks = [asyncio.create_task(task(b)) for b in range(START_BLOCK, END_BLOCK + 1)]
     await asyncio.gather(*tasks)
 
-    # 3️⃣ 全局统计
+    # global metrics
     elapsed = max(time.time() - start_ts, 1)
     total_requests = len(success_latencies) + error_count
     rps = total_requests / elapsed
@@ -60,9 +60,9 @@ async def main():
     print("\n=== Client telemetry ===")
     print(client.telemetry())
 
-    # 4️⃣ 关闭客户端
+    # close client
     await client.close()
 
 if __name__ == "__main__":
-    # asyncio.run(main())
-    await main()
+    asyncio.run(main())
+    #await main() # for notebook. ie. Jupyter Notebook / Marimo
