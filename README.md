@@ -166,7 +166,7 @@ blockchain-ingestion-engine/
 │   ├── logs.py                   # Logs-specific entry
 │   └── benchmark.py              # Benchmarking tool
 │
-├── blockchain-ingestion/             # Main package
+├── blockchain_ingestion/             # Main package
 │   │
 │   ├── adapters/                 # Chain adapter layer (core future extension layer)
 │   │   ├── evm/
@@ -415,9 +415,3 @@ It is designed as:
 > blockchain Ingestion runtime infrastructure
 
 for modern semantic data systems.
-
----
-
-# License
-
-Apache-2.0
