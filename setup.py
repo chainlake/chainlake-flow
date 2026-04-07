@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="blockchain_ingestion",
+    name="rpcstream",
     version="0.1",
     packages=find_packages(),
 )

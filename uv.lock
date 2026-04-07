@@ -205,62 +205,6 @@ wheels = [
 ]
 
 [[package]]
-name = "blockchain-ingestion-engine"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "aiokafka" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp" },
-    { name = "opentelemetry-sdk" },
-    { name = "orjson" },
-    { name = "prometheus-client" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "redis" },
-    { name = "rich" },
-    { name = "structlog" },
-    { name = "tenacity" },
-    { name = "typer" },
-    { name = "uvloop" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.10.0" },
-    { name = "aiokafka", specifier = ">=0.11.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
-    { name = "opentelemetry-api", specifier = ">=1.17.0" },
-    { name = "opentelemetry-exporter-otlp", specifier = ">=1.17.0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.17.0" },
-    { name = "orjson", specifier = ">=3.10.0" },
-    { name = "prometheus-client", specifier = ">=0.20.0" },
-    { name = "pydantic", specifier = ">=2.8.0" },
-    { name = "pydantic-settings", specifier = ">=2.4.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "redis", specifier = ">=5.0.7" },
-    { name = "rich", specifier = ">=13.7.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
-    { name = "structlog", specifier = ">=24.4.0" },
-    { name = "tenacity", specifier = ">=9.0.0" },
-    { name = "typer", specifier = ">=0.12.0" },
-    { name = "uvloop", specifier = ">=0.19.0" },
-]
-provides-extras = ["dev"]
-
-[[package]]
 name = "certifi"
 version = "2026.2.25"
 source = { registry = "https://pypi.org/simple" }
@@ -1445,6 +1389,62 @@ sdist = { url = "https://files.pythonhosted.org/packages/b3/c6/f3b320c27991c46f4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/14/25/b208c5683343959b670dc001595f2f3737e051da617f66c31f7c4fa93abc/rich-14.3.3-py3-none-any.whl", hash = "sha256:793431c1f8619afa7d3b52b2cdec859562b950ea0d4b6b505397612db8d5362d", size = 310458, upload-time = "2026-02-19T17:23:13.732Z" },
 ]
+
+[[package]]
+name = "rpcstream"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "aiokafka" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp" },
+    { name = "opentelemetry-sdk" },
+    { name = "orjson" },
+    { name = "prometheus-client" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "redis" },
+    { name = "rich" },
+    { name = "structlog" },
+    { name = "tenacity" },
+    { name = "typer" },
+    { name = "uvloop" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10.0" },
+    { name = "aiokafka", specifier = ">=0.11.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
+    { name = "opentelemetry-api", specifier = ">=1.17.0" },
+    { name = "opentelemetry-exporter-otlp", specifier = ">=1.17.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.17.0" },
+    { name = "orjson", specifier = ">=3.10.0" },
+    { name = "prometheus-client", specifier = ">=0.20.0" },
+    { name = "pydantic", specifier = ">=2.8.0" },
+    { name = "pydantic-settings", specifier = ">=2.4.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "redis", specifier = ">=5.0.7" },
+    { name = "rich", specifier = ">=13.7.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
+    { name = "structlog", specifier = ">=24.4.0" },
+    { name = "tenacity", specifier = ">=9.0.0" },
+    { name = "typer", specifier = ">=0.12.0" },
+    { name = "uvloop", specifier = ">=0.19.0" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "ruff"

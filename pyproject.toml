@@ -1,5 +1,5 @@
 [project]
-name = "blockchain-ingestion-engine"
+name = "rpcstream"
 version = "0.1.0"
 description = "High-throughput blockchain ingestion engine for realtime streaming and historical backfill."
 authors = [
