@@ -1,5 +1,3 @@
-from rpcstream.rpc.models import RpcTaskMeta, RpcErrorResult, ClientMetrics
-
 import asyncio
 import time
 import uuid
@@ -9,8 +7,9 @@ from typing import Any
 # OpenTelemetry
 from opentelemetry import trace
 from opentelemetry.trace import Tracer
+tracer = trace.get_tracer("rpcstream.rpc")
 
-tracer = trace.get_tracer(__name__)
+from rpcstream.rpc.models import RpcTaskMeta, RpcErrorResult, ClientMetrics
 
 # -------------------------
 # Client with trace hook

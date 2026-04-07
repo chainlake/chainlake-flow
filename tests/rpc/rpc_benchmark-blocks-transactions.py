@@ -4,20 +4,18 @@ import statistics
 import json
 import os
 
-from blockchain_ingestion.rpc.erpc_client import (
-    ErpcClient,
-    AdaptiveErpcScheduler,
-    RpcErrorResult,
-)
+from rpcstream.rpc.rpc_client import RpcClient
+from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
+from rpcstream.rpc.models import RpcErrorResult
 
-ERPC_URL = "http://localhost:30040/main/evm/56"
-START_BLOCK = 90000001
+RPC_URL = "http://localhost:30040/main/evm/56"
+START_BLOCK = 90000091
 END_BLOCK = 90000100
-INITIAL_CONCURRENT = 20
+INITIAL_CONCURRENT = 10
 MAX_INFLIGHT = 50
 
 # LOG LEVEL: debug / info / stats
-LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "debug").lower()
 
 
 def percentile(data, p):
@@ -30,9 +28,9 @@ def percentile(data, p):
 
 
 async def main():
-    client = ErpcClient(ERPC_URL, timeout_sec=5)
+    client = RpcClient(RPC_URL, timeout_sec=5)
 
-    scheduler = AdaptiveErpcScheduler(
+    scheduler = AdaptiveRpcScheduler(
         client,
         initial_inflight=INITIAL_CONCURRENT,
         max_inflight=MAX_INFLIGHT,
@@ -103,8 +101,7 @@ async def main():
                 f"[Block {block_number}] "
                 f"OK latency={latency:.2f}ms "
                 f"queue_wait={queue_wait:.2f}ms "
-                f"transactions={receipt_count} payload={payload_kb:.1f}KB "
-                f"hash={value.get('hash')}"
+                f"transactions={receipt_count} payload={payload_kb:.1f}KB"
             )
 
     async def telemetry_sampler():

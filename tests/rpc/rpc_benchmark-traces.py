@@ -4,13 +4,11 @@ import json
 import os
 import statistics
 
-from blockchain_ingestion.rpc.erpc_client import (
-    ErpcClient,
-    AdaptiveErpcScheduler,
-    RpcErrorResult,
-)
+from rpcstream.rpc.rpc_client import RpcClient
+from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
+from rpcstream.rpc.models import RpcErrorResult
 
-ERPC_URL = "http://localhost:30040/main/evm/56"
+RPC_URL = "http://localhost:30040/main/evm/56"
 START_BLOCK = 90000091
 END_BLOCK = 90000100
 INITIAL_CONCURRENT = 5
@@ -28,8 +26,8 @@ def percentile(data, p):
 
 
 async def main():
-    client = ErpcClient(ERPC_URL, timeout_sec=30)
-    scheduler = AdaptiveErpcScheduler(
+    client = RpcClient(RPC_URL, timeout_sec=30)
+    scheduler = AdaptiveRpcScheduler(
         client,
         initial_inflight=INITIAL_CONCURRENT,
         max_inflight=MAX_INFLIGHT,
