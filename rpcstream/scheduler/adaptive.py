@@ -5,6 +5,10 @@ from itertools import cycle
 from typing import Any
 
 from opentelemetry import trace
+from redis.asyncio import Redis
+
+from rpcstream.rpc.models import RpcErrorResult, RpcTaskMeta
+from rpcstream.scheduler.base import BaseRpcScheduler
 
 from rpcstream.rpc.models import RpcErrorResult, RpcTaskMeta
 from rpcstream.runtime.redis_queue import RedisDLQ, RedisOrderingBuffer
@@ -12,6 +16,85 @@ from rpcstream.scheduler.base import BaseRpcScheduler
 from rpcstream.scheduler.models import SchedulerTask
 
 tracer = trace.get_tracer("rpcstream.scheduler")
+
+
+@dataclass(slots=True)
+class SchedulerTask:
+    """Payload stored in Redis ordering buffer / DLQ."""
+
+    sequence: int
+    method: str
+    params: list[Any]
+    retries: int = 0
+    max_retries: int = 3
+    metadata: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "method": self.method,
+            "params": self.params,
+            "retries": self.retries,
+            "max_retries": self.max_retries,
+            "metadata": self.metadata or {},
+        }
+
+    @classmethod
+    def from_raw(cls, raw: bytes | str) -> "SchedulerTask":
+        payload = orjson.loads(raw)
+        return cls(
+            sequence=payload["sequence"],
+            method=payload["method"],
+            params=payload.get("params", []),
+            retries=payload.get("retries", 0),
+            max_retries=payload.get("max_retries", 3),
+            metadata=payload.get("metadata", {}),
+        )
+
+
+class RedisOrderingBuffer:
+    """FIFO buffer backed by Redis List, preserving task order by sequence."""
+
+    def __init__(self, redis: Redis, key: str = "rpc:ordering_buffer"):
+        self.redis = redis
+        self.key = key
+
+    async def push(self, task: SchedulerTask) -> None:
+        await self.redis.rpush(self.key, orjson.dumps(task.to_dict()))
+
+    async def pop(self, timeout_sec: int = 1) -> SchedulerTask | None:
+        result = await self.redis.blpop(self.key, timeout=timeout_sec)
+        if result is None:
+            return None
+        _, raw = result
+        return SchedulerTask.from_raw(raw)
+
+    async def length(self) -> int:
+        return int(await self.redis.llen(self.key))
+
+
+class RedisDLQ:
+    """Dead-letter queue for tasks that exceed retry limit."""
+
+    def __init__(self, redis: Redis, key: str = "rpc:dlq"):
+        self.redis = redis
+        self.key = key
+
+    async def push(self, task: SchedulerTask, error: str) -> None:
+        payload = task.to_dict()
+        payload["error"] = error
+        payload["failed_at"] = time.time()
+        await self.redis.rpush(self.key, orjson.dumps(payload))
+
+    async def pop(self, timeout_sec: int = 1) -> dict[str, Any] | None:
+        result = await self.redis.blpop(self.key, timeout=timeout_sec)
+        if result is None:
+            return None
+        _, raw = result
+        return orjson.loads(raw)
+
+    async def length(self) -> int:
+        return int(await self.redis.llen(self.key))
 
 
 class AdaptiveRpcScheduler(BaseRpcScheduler):
