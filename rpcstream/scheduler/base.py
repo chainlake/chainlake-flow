@@ -6,10 +6,10 @@ from opentelemetry import trace
 tracer = trace.get_tracer("rpcstream.scheduler")
 
 
-class BaseRpcScheduler:
+class BaseScheduler:
     """
     Base scheduler:
-    - true adaptive logical window
+    - adaptive logical window
     - semaphore as hard cap
     - EMA telemetry
     """
@@ -71,4 +71,5 @@ class BaseRpcScheduler:
             "success": self.success,
             "errors": self.errors,
             "rps": round((self.success + self.errors) / elapsed, 2),
+            "client": self.client.telemetry() if hasattr(self, "client") else None,
         }

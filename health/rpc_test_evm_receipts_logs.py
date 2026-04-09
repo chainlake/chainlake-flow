@@ -4,9 +4,10 @@ import statistics
 import json
 import os
 
-from rpcstream.rpc.rpc_client import RpcClient
+from rpcstream.client.jsonrpc import JsonRpcClient
+from rpcstream.client.models import RpcErrorResult
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
-from rpcstream.rpc.models import RpcErrorResult
+from rpcstream.adapters.evm.rpc_requests import build_get_block_receipts
 
 RPC_URL = "http://localhost:30040/main/evm/56"
 START_BLOCK = 90000091
@@ -31,7 +32,7 @@ def percentile(data, p):
 
 
 async def main():
-    client = RpcClient(RPC_URL, timeout_sec=5)
+    client = JsonRpcClient(RPC_URL, timeout_sec=5)
 
     scheduler = AdaptiveRpcScheduler(
         client,
@@ -58,11 +59,9 @@ async def main():
             print(f"[Block {block_number}] submitting...")
 
         try:
-            result = await scheduler.submit(
-                "eth_getBlockReceipts",
-                [hex(block_number)],
-                {"block_number": block_number},
-            )
+            req = build_get_block_receipts(block_number)
+            result = await scheduler.submit_request(req)
+            
         except Exception as e:
             print(f"[Block {block_number}] EXCEPTION during submit: {e}")
             error_count += 1

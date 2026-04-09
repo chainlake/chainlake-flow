@@ -1,24 +1,33 @@
 import asyncio
 import time
 
-from rpcstream.scheduler.base import BaseRpcScheduler
-from rpcstream.rpc.models import RpcTaskMeta, RpcErrorResult
-
+from rpcstream.client.base import BaseClient
+from rpcstream.client.models import RpcTaskMeta, RpcErrorResult
+from rpcstream.adapters.base import BaseRpcRequest  # Generic RPC request
+from rpcstream.scheduler.base import BaseScheduler
 from opentelemetry import trace
 
 tracer = trace.get_tracer("rpcstream.scheduler")
 
 
-class AdaptiveRpcScheduler(BaseRpcScheduler):
-    def __init__(self, client, **kwargs):
+class AdaptiveRpcScheduler(BaseScheduler):
+    def __init__(self, client: BaseClient, **kwargs):
         super().__init__(**kwargs)
         self.client = client
 
-    async def submit(self, method, params, meta_extra):
+    # ----------------------------
+    # Generic submit method for BaseRpcRequest
+    # ----------------------------
+    async def submit_request(self, request: BaseRpcRequest):
+        """
+        Submit a generic RPC request.
+        request: BaseRpcRequest instance
+        Returns (result, RpcTaskMeta) or RpcErrorResult
+        """
         enqueue_ts = time.time()
 
-        with tracer.start_as_current_span("scheduler.submit") as span:
-            span.set_attribute("rpc.method", method)
+        with tracer.start_as_current_span("scheduler.submit_request") as span:
+            span.set_attribute("rpc.method", request.operation_name())
 
             await self._acquire_slot()
 
@@ -30,7 +39,7 @@ class AdaptiveRpcScheduler(BaseRpcScheduler):
             meta = RpcTaskMeta(
                 task_id=id(asyncio.current_task()),
                 submit_ts=submit_ts,
-                extra=meta_extra,
+                extra=request.meta.copy(),
             )
 
             meta.extra["queue_wait_ms"] = wait_ms
@@ -39,7 +48,8 @@ class AdaptiveRpcScheduler(BaseRpcScheduler):
             span.set_attribute("scheduler.window", self.current_limit)
 
             try:
-                result = await self.client.call(method, params)
+                # The client only needs the request
+                result = await self.client.execute(request)
 
                 latency = (time.time() - submit_ts) * 1000
 
@@ -95,7 +105,7 @@ class AdaptiveRpcScheduler(BaseRpcScheduler):
         elif latency > self.latency_target_ms:
             self.current_limit = max(
                 self.min_inflight,
-                int(cur * mild_decrease_factor),
+                max(self.min_inflight, max(cur - 1, int(cur * mild_decrease_factor))), # smooth change
             )
 
         else:
