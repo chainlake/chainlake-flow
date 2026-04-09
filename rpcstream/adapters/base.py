@@ -9,15 +9,20 @@ class BaseRpcRequest:
 
     def __init__(
         self,
-        method: str,
-        params: List[Any],
+        method: str = None,
+        params: List[Any] = None,
         request_id: Any = None,
         meta: Dict = None,
+        stub_method: str = None,
+        payload: Any = None,
     ):
         self.method = method
-        self.params = params
+        self.params = params or []
         self.request_id = request_id
         self.meta = meta or {}
+
+        self.stub_method = stub_method
+        self.payload = payload
 
     def __repr__(self):
         """
@@ -35,7 +40,11 @@ class BaseRpcRequest:
         """
         Unified request name for tracing / scheduler telemetry.
         """
-        return getattr(self, "method", self.__class__.__name__)
+        return (
+            self.method
+            or self.stub_method
+            or self.__class__.__name__
+        )
 
     def transport_type(self) -> str:
         """
