@@ -1,0 +1,96 @@
+BLOCK_FIELDS = [
+    'number',
+    'hash',
+    'parent_hash',
+    'nonce',
+    'sha3_uncles',
+    'logs_bloom',
+    'transactions_root',
+    'state_root',
+    'receipts_root',
+    'miner',
+    'difficulty',
+    'total_difficulty',
+    'size',
+    'extra_data',
+    'gas_limit',
+    'gas_used',
+    'timestamp',
+    'transaction_count',
+    'base_fee_per_gas',
+    'withdrawals_root',
+    'withdrawals',
+    'blob_gas_used',
+    'excess_blob_gas'
+]
+
+TRANSACTION_FIELDS = [
+    'hash',
+    'nonce',
+    'block_hash',
+    'block_number',
+    'transaction_index',
+    'from_address',
+    'to_address',
+    'value',
+    'gas',
+    'gas_price',
+    'input',
+    'block_timestamp',
+    'max_fee_per_gas',
+    'max_priority_fee_per_gas',
+    'transaction_type',
+    'max_fee_per_blob_gas',
+    'blob_versioned_hashes'
+]
+
+RECEIPT_FIELDS = [
+    'transaction_hash',
+    'transaction_index',
+    'block_hash',
+    'block_number',
+    'cumulative_gas_used',
+    'gas_used',
+    'contract_address',
+    'root',
+    'status',
+    'effective_gas_price',
+    'l1_fee',
+    'l1_gas_used',
+    'l1_gas_price',
+    'l1_fee_scalar',
+    'blob_gas_price',
+    'blob_gas_used'
+]
+
+LOG_FIELDS = [
+    'log_index',
+    'transaction_hash',
+    'transaction_index',
+    'block_hash',
+    'block_number',
+    'address',
+    'data',
+    'topics'
+]
+
+TRACE_FIELDS = [
+    'block_number',
+    'transaction_hash',
+    'transaction_index',
+    'from_address',
+    'to_address',
+    'value',
+    'input',
+    'output',
+    'trace_type',
+    'call_type',
+    'reward_type',
+    'gas',
+    'gas_used',
+    'subtraces',
+    'trace_address',
+    'error',
+    'status',
+    'trace_id',
+]
