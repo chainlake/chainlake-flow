@@ -1,0 +1,19 @@
+RECEIPT_FIELDS = [
+    'chain_id',
+    'transaction_hash',
+    'transaction_index',
+    'block_hash',
+    'block_number',
+    'cumulative_gas_used',
+    'gas_used',
+    'contract_address',
+    'root',
+    'status',
+    'effective_gas_price',
+    'l1_fee',
+    'l1_gas_used',
+    'l1_gas_price',
+    'l1_fee_scalar',
+    'blob_gas_price',
+    'blob_gas_used'
+]

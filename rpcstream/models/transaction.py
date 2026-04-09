@@ -1,0 +1,20 @@
+TRANSACTION_FIELDS = [
+    'chain_id',
+    'hash',
+    'nonce',
+    'block_hash',
+    'block_number',
+    'transaction_index',
+    'from_address',
+    'to_address',
+    'value',
+    'gas',
+    'gas_price',
+    'input',
+    'block_timestamp',
+    'max_fee_per_gas',
+    'max_priority_fee_per_gas',
+    'transaction_type',
+    'max_fee_per_blob_gas',
+    'blob_versioned_hashes'
+]
