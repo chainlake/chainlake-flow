@@ -24,8 +24,8 @@ from rpcstream.adapters.evm.parser import (
 )
 
 RPC_URL = "http://localhost:30040/main/evm/56" # eRPC endpoint
-START_BLOCK = 90000100
-END_BLOCK = 90000100
+START_BLOCK = 90000091
+END_BLOCK = 90000099
 INITIAL_CONCURRENT = 10
 MAX_INFLIGHT = 50
 

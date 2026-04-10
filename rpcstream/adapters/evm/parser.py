@@ -3,41 +3,77 @@ def hex_to_dec(hex_string):
         return None
     try:
         return int(hex_string, 16)
-    except ValueError:
-        print("Not a hex string %s" % hex_string)
-        return hex_string
+    except Exception:
+        return None
 
 # parser - normalize / flatten / type cast
 
 # block (eth_getBlockByNumber)
 def parse_blocks(block: dict):
     return {
-        "number": int(block["number"], 16),
-        "hash": block["hash"],
-        "parent_hash": block["parentHash"],
-        "nonce": block.get("nonce"),
-        "sha3_uncles": block.get("sha3Uncles"),
-        "logs_bloom": block.get("logsBloom"),
-        "transactions_root": block.get("transactionsRoot"),
-        "state_root": block.get("stateRoot"),
-        "receipts_root": block.get("receiptsRoot"),
+        # --- Block Identity ---
+        "number": hex_to_dec(block["number"]),  # Block height (monotonically increasing identifier)
+        "hash": block["hash"],  # Current block hash
+        "parent_hash": block["parentHash"],  # Parent block hash (used for chain linkage / reorg detection)
+
+        # --- PoW Legacy Fields (mostly irrelevant in PoS chains) ---
+        "nonce": hex_to_dec(block.get("nonce")),  # PoW mining nonce (usually 0 or null in PoS)
+        "sha3_uncles": block.get("sha3Uncles"),  # Uncle block hash (largely unused in PoS era)
+
+        # --- State & Trie Roots (Merkle Patricia Trie) ---
+        "logs_bloom": block.get("logsBloom"),  # Bloom filter for fast log lookup (DO NOT decode)
+        "transactions_root": block.get("transactionsRoot"),  # Root of transactions trie
+        "state_root": block.get("stateRoot"),  # Global state trie root (core state commitment)
+        "receipts_root": block.get("receiptsRoot"),  # Root of receipts trie
+
+        # --- Block Producer Info ---
         "miner": block.get("miner"),
-        "difficulty": int(block.get("difficulty", "0x0"), 16),
-        "total_difficulty": int(block.get("totalDifficulty", "0x0"), 16),
-        "size": int(block.get("size", "0x0"), 16),
+        # PoW: miner address
+        # PoS: execution-layer fee recipient (not validator identity)
+
+        # --- Difficulty (no longer meaningful in PoS) ---
+        "difficulty": hex_to_dec(block.get("difficulty", "0x0")),
+        "total_difficulty": hex_to_dec(block.get("totalDifficulty", "0x0")),
+        # After PoS transition, these fields are mostly historical / frozen
+
+        # --- Block Size ---
+        "size": hex_to_dec(block.get("size", "0x0")),  # Block size in bytes
+
+        # --- Extra Data ---
         "extra_data": block.get("extraData"),
-        "gas_limit": int(block.get("gasLimit", "0x0"), 16),
-        "gas_used": int(block.get("gasUsed", "0x0"), 16),
-        "timestamp": int(block.get("timestamp", "0x0"), 16),
+        # Arbitrary client/validator metadata (often contains validator info in BSC)
+
+        # --- Gas Accounting ---
+        "gas_limit": hex_to_dec(block.get("gasLimit", "0x0")),  # Maximum gas allowed in block
+        "gas_used": hex_to_dec(block.get("gasUsed", "0x0")),  # Actual gas consumed
+        "timestamp": hex_to_dec(block.get("timestamp", "0x0")),  # Block timestamp (seconds since epoch)
+
+        # --- Transaction Statistics ---
         "transaction_count": len(block.get("transactions", [])),
-        "base_fee_per_gas": block.get("baseFeePerGas"),
+        # Depends on RPC mode:
+        # - full mode: list of transaction objects
+        # - hash mode: list of tx hashes only
+
+        # --- EIP-1559 Fee Market ---
+        "base_fee_per_gas": hex_to_dec(block.get("baseFeePerGas")),
+        # Present only in EIP-1559 compatible chains (Ethereum, BSC, Polygon, etc.)
+        # Absent in legacy blocks (None)
+
+        # --- Ethereum PoS Specific (EIP-4895 withdrawals) ---
         "withdrawals_root": block.get("withdrawalsRoot"),
         "withdrawals": block.get("withdrawals"),
-        "blob_gas_used": block.get("blobGasUsed"),
-        "excess_blob_gas": block.get("excessBlobGas"),
+        # Validator staking withdrawals (Beacon Chain → Execution Layer)
+        # Only present in Ethereum PoS
+        # Always None for BSC / most other EVM chains
+
+        # --- EIP-4844 (Proto-Danksharding / Blob Transactions) ---
+        "blob_gas_used": hex_to_dec(block.get("blobGasUsed")),
+        "excess_blob_gas": hex_to_dec(block.get("excessBlobGas")),
+        # Blob gas accounting for data availability (EIP-4844)
+        # Only supported on Ethereum (post-Dencun upgrade)
+        # Typically None on most other EVM chains
     }
     
-
 
 # transaction flatten
 def parse_transactions(block: dict):
@@ -46,35 +82,45 @@ def parse_transactions(block: dict):
     results = []
     for i, tx in enumerate(txs):
         results.append({
+            # --- identity ---
             "hash": tx["hash"],
-            "nonce": int(tx.get("nonce", "0x0"), 16),
             "block_hash": block["hash"],
-            "block_number": int(block["number"], 16),
             "transaction_index": i,
+
+            # --- addresses ---
             "from_address": tx.get("from"),
             "to_address": tx.get("to"),
-            "value": int(tx.get("value", "0x0"), 16),
-            "gas": int(tx.get("gas", "0x0"), 16),
-            "gas_price": int(tx.get("gasPrice", "0x0"), 16),
-            "input": tx.get("input"),
-            "block_timestamp": int(block.get("timestamp", "0x0"), 16),
+
+            # --- numeric core ---
+            "nonce": hex_to_dec(tx.get("nonce")),
+            "block_number": hex_to_dec(block.get("number")),
+            "block_timestamp": hex_to_dec(block.get("timestamp")),
+            "value": hex_to_dec(tx.get("value")),
+            "gas": hex_to_dec(tx.get("gas")),
+            "gas_price": hex_to_dec(tx.get("gasPrice")),
+
+            # --- EIP-1559 ---
+            "max_fee_per_gas": hex_to_dec(tx.get("maxFeePerGas")),
+            "max_priority_fee_per_gas": hex_to_dec(tx.get("maxPriorityFeePerGas")),
+
+            # --- blob (optional future) ---
+            "max_fee_per_blob_gas": hex_to_dec(tx.get("maxFeePerBlobGas")),
+
+            # --- tx type ---
             "transaction_type": hex_to_dec(tx.get("type")),
-            
+            "chain_id": hex_to_dec(tx.get("chainId")),
+            "v": hex_to_dec(tx.get("v")),
+
+            # --- signature (keep raw) ---
             "r": tx.get("r"),
             "s": tx.get("s"),
-            "v": hex_to_dec(tx.get("v")),
-            "chain_id": hex_to_dec(tx.get("chainId")),
-            
-            # optional
-            "max_fee_per_gas": tx.get("maxFeePerGas"),
-            "max_priority_fee_per_gas": tx.get("maxPriorityFeePerGas"),
-            "max_fee_per_blob_gas": tx.get("maxFeePerBlobGas"),
+
+            # --- data ---
+            "input": tx.get("input"),
             "blob_versioned_hashes": tx.get("blobVersionedHashes"),
         })
 
     return results
-
-
 
 
 # receipt + logs（eth_getBlockReceipts）
@@ -143,14 +189,14 @@ def parse_traces(traces: list, block_number: int):
             "transaction_index": t.get("transactionPosition"),
             "from_address": t.get("action", {}).get("from"),
             "to_address": t.get("action", {}).get("to"),
-            "value": t.get("action", {}).get("value"),
+            "value": hex_to_dec(t.get("action", {}).get("value")),
             "input": t.get("action", {}).get("input"),
             "output": t.get("result", {}).get("output"),
             "trace_type": t.get("type"),
             "call_type": t.get("action", {}).get("callType"),
             "reward_type": t.get("action", {}).get("rewardType"),
-            "gas": t.get("action", {}).get("gas"),
-            "gas_used": t.get("result", {}).get("gasUsed"),
+            "gas": hex_to_dec(t.get("action", {}).get("gas")),
+            "gas_used": hex_to_dec(t.get("result", {}).get("gasUsed")),
             "subtraces": t.get("subtraces"),
             "trace_address": t.get("traceAddress"),
             "error": t.get("error"),
