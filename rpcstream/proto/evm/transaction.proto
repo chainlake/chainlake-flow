@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package evm;
+
+message Transaction {
+  // identity
+  string hash = 1;
+  string block_hash = 2;
+  uint32 transaction_index = 3;
+
+  // addresses
+  string from_address = 4;
+  string to_address = 5;
+
+  // numeric core
+  uint64 nonce = 6;
+  uint64 block_number = 7;
+  uint64 block_timestamp = 8;
+  string value = 9;  // using string to avoid overflow issues with large numbers
+  uint64 gas = 10;
+  string gas_price = 11;
+
+  // EIP-1559
+  string max_fee_per_gas = 12;
+  string max_priority_fee_per_gas = 13;
+
+  // blob
+  string max_fee_per_blob_gas = 14;
+
+  // tx type
+  uint32 transaction_type = 15;
+  uint64 chain_id = 16;
+  uint64 v = 17;
+
+  // signature
+  string r = 18;
+  string s = 19;
+
+  // data
+  bytes input = 20;
+  repeated string blob_versioned_hashes = 21;
+}

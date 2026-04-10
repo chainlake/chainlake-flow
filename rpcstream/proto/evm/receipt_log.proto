@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package evm;
+
+message Log {
+  uint64 log_index = 1;
+  string transaction_hash = 2;
+  uint32 transaction_index = 3;
+  string block_hash = 4;
+  uint64 block_number = 5;
+
+  string address = 6;
+  bytes data = 7;
+  repeated string topics = 8;
+
+  bool removed = 9;
+}
+
+message Receipt {
+  string transaction_hash = 1;
+  uint32 transaction_index = 2;
+  string block_hash = 3;
+  uint64 block_number = 4;
+
+  string from_address = 5;
+  string to_address = 6;
+
+  uint64 cumulative_gas_used = 7;
+  uint64 gas_used = 8;
+
+  string contract_address = 9;
+  uint32 status = 10;
+
+  string effective_gas_price = 11;
+  uint32 transaction_type = 12;
+
+  // L2 fields
+  string l1_fee = 13;
+  string l1_gas_used = 14;
+  string l1_gas_price = 15;
+  string l1_fee_scalar = 16;
+
+  // blob
+  string blob_gas_price = 17;
+  string blob_gas_used = 18;
+
+  // logs（嵌套 or 可拆 topic）
+  repeated Log logs = 19;
+}

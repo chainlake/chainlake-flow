@@ -1,60 +1,103 @@
-import json
 import asyncio
-from aiokafka import AIOKafkaProducer
+from confluent_kafka import SerializingProducer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.protobuf import ProtobufSerializer
+
 
 class KafkaWriter:
     def __init__(
         self,
-        bootstrap_servers: str,
-        client_id: str = "chainlake",
-        enable_eos: bool = True
+        topic: str,
+        protobuf_cls,
+        bootstrap_servers="localhost:9092",
+        schema_registry_url="http://localhost:8081",
+        queue_size=100_000,
+        batch_size=1000,
+        linger_ms=5,
     ):
-        self.bootstrap_servers = bootstrap_servers
-        self.client_id = client_id
-        self.enable_eos = enable_eos
+        self.topic = topic
+        self.batch_size = batch_size
 
-        self.producer = None
-        self.transactional_id = f"{client_id}-txn"
-        
-        
+        # --- Schema Registry ---
+        self.schema_registry_client = SchemaRegistryClient({
+            "url": schema_registry_url
+        })
+
+        # --- Protobuf Serializer ---
+        self.value_serializer = ProtobufSerializer(
+            protobuf_cls,
+            self.schema_registry_client
+        )
+
+        # --- Producer ---
+        self.producer = SerializingProducer({
+            "bootstrap.servers": bootstrap_servers,
+            "value.serializer": self.value_serializer,
+            "linger.ms": linger_ms,
+            "batch.num.messages": batch_size,
+            "compression.type": "zstd",
+            "enable.idempotence": True,
+            "acks": "all",
+        })
+
+        # --- Async Queue ---
+        self.queue = asyncio.Queue(maxsize=queue_size)
+
+        self._running = False
+
+    # --- enqueue (non-blocking API) ---
+    async def write(self, key: str, message):
+        await self.queue.put((key, message))
+
+    # --- internal batch sender ---
+    async def _sender_loop(self):
+        loop = asyncio.get_running_loop()
+
+        while self._running:
+            batch = []
+
+            try:
+                # 等一个消息
+                item = await self.queue.get()
+                batch.append(item)
+
+                # 尽量攒 batch
+                for _ in range(self.batch_size - 1):
+                    try:
+                        item = self.queue.get_nowait()
+                        batch.append(item)
+                    except asyncio.QueueEmpty:
+                        break
+
+                # 发送（非阻塞）
+                for key, msg in batch:
+                    self.producer.produce(
+                        topic=self.topic,
+                        key=key,
+                        value=msg,
+                        on_delivery=self._delivery_callback
+                    )
+
+                # poll 触发 callback（必须）
+                self.producer.poll(0)
+
+            except Exception as e:
+                print("Kafka send error:", e)
+
+            # 控制 event loop
+            await asyncio.sleep(0)
+
+    def _delivery_callback(self, err, msg):
+        if err:
+            print(f"Delivery failed: {err}")
+
+    # --- start background worker ---
     async def start(self):
-        self.producer = AIOKafkaProducer(
-            bootstrap_servers=self.bootstrap_servers,
-            client_id=self.client_id,
-            enable_idempotence=True,
-            acks="all",
-            linger_ms=5,
-            compression_type="lz4",
-            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
-        )
+        self._running = True
+        self._task = asyncio.create_task(self._sender_loop())
 
-        await self.producer.start()
- 
-        
-    async def send(self, topic: str, key: str, value: dict):
-        await self.producer.send_and_wait(
-            topic,
-            value=value,
-            key=str(key).encode("utf-8")
-        )
-        
-    async def send_batch(self, topic: str, records: list, key_field: str):
-        for r in records:
-            key = r.get(key_field, "0")
-            await self.send(topic, key, r)
-            
-    
-    async def write_checkpoint(self, pipeline_id: str, block_number: int):
-        await self.send(
-            topic="evm.checkpoints",
-            key=pipeline_id,
-            value={
-                "pipeline_id": pipeline_id,
-                "block_number": block_number,
-                "timestamp": asyncio.get_event_loop().time()
-            }
-        )
-        
+    # --- graceful shutdown ---
     async def stop(self):
-        if self.producer:
-            await self.producer.stop()
+        self._running = False
+        await self._task
+        self.producer.flush()

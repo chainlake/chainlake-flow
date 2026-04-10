@@ -28,6 +28,7 @@ dependencies = [
   "grpcio>=1.80.0",
   "grpcio-tools>=1.80.0",
   "protobuf>=6.33.6",
+  "confluent-kafka[protobuf]>=2.14.0",
 ]
 
 [project.optional-dependencies]
