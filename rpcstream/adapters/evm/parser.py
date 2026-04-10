@@ -1,10 +1,11 @@
-from rpcstream.adapters.evm.schema import (
-    BLOCK_FIELDS,
-    TRANSACTION_FIELDS,
-    RECEIPT_FIELDS,
-    LOG_FIELDS,
-    TRACE_FIELDS
-)
+def hex_to_dec(hex_string):
+    if hex_string is None:
+        return None
+    try:
+        return int(hex_string, 16)
+    except ValueError:
+        print("Not a hex string %s" % hex_string)
+        return hex_string
 
 # parser - normalize / flatten / type cast
 
@@ -37,6 +38,7 @@ def parse_blocks(block: dict):
     }
     
 
+
 # transaction flatten
 def parse_transactions(block: dict):
     txs = block.get("transactions", [])
@@ -56,9 +58,16 @@ def parse_transactions(block: dict):
             "gas_price": int(tx.get("gasPrice", "0x0"), 16),
             "input": tx.get("input"),
             "block_timestamp": int(block.get("timestamp", "0x0"), 16),
+            "transaction_type": hex_to_dec(tx.get("type")),
+            
+            "r": tx.get("r"),
+            "s": tx.get("s"),
+            "v": hex_to_dec(tx.get("v")),
+            "chain_id": hex_to_dec(tx.get("chainId")),
+            
+            # optional
             "max_fee_per_gas": tx.get("maxFeePerGas"),
             "max_priority_fee_per_gas": tx.get("maxPriorityFeePerGas"),
-            "transaction_type": tx.get("type"),
             "max_fee_per_blob_gas": tx.get("maxFeePerBlobGas"),
             "blob_versioned_hashes": tx.get("blobVersionedHashes"),
         })
@@ -66,58 +75,54 @@ def parse_transactions(block: dict):
     return results
 
 
+
+
 # receipt + logs（eth_getBlockReceipts）
-def hex_to_int(x):
-    if x is None:
-        return None
-    return int(x, 16)
-
-
 def parse_receipts(receipts: list):
     receipt_rows = []
     log_rows = []
 
     for r in receipts:
-        block_number = hex_to_int(r["blockNumber"])
+        block_number = hex_to_dec(r["blockNumber"])
         block_hash = r["blockHash"]
 
         receipt_rows.append({
             "transaction_hash": r["transactionHash"],
-            "transaction_index": hex_to_int(r["transactionIndex"]),
+            "transaction_index": hex_to_dec(r["transactionIndex"]),
             "block_hash": block_hash,
             "block_number": block_number,
 
             "from_address": r.get("from"),
             "to_address": r.get("to"),
 
-            "cumulative_gas_used": hex_to_int(r.get("cumulativeGasUsed")),
-            "gas_used": hex_to_int(r.get("gasUsed")),
+            "cumulative_gas_used": hex_to_dec(r.get("cumulativeGasUsed")),
+            "gas_used": hex_to_dec(r.get("gasUsed")),
 
             "contract_address": r.get("contractAddress"),
-            "status": hex_to_int(r.get("status")),
+            "status": hex_to_dec(r.get("status")),
 
-            "effective_gas_price": hex_to_int(r.get("effectiveGasPrice")),
+            "effective_gas_price": hex_to_dec(r.get("effectiveGasPrice")),
 
-            "transaction_type": hex_to_int(r.get("type")),
+            "transaction_type": hex_to_dec(r.get("type")),
 
             # optional (L2 / blob)
-            "l1_fee": hex_to_int(r.get("l1Fee")),
-            "l1_gas_used": hex_to_int(r.get("l1GasUsed")),
-            "l1_gas_price": hex_to_int(r.get("l1GasPrice")),
+            "l1_fee": hex_to_dec(r.get("l1Fee")),
+            "l1_gas_used": hex_to_dec(r.get("l1GasUsed")),
+            "l1_gas_price": hex_to_dec(r.get("l1GasPrice")),
             "l1_fee_scalar": r.get("l1FeeScalar"),
 
-            "blob_gas_price": hex_to_int(r.get("blobGasPrice")),
-            "blob_gas_used": hex_to_int(r.get("blobGasUsed")),
+            "blob_gas_price": hex_to_dec(r.get("blobGasPrice")),
+            "blob_gas_used": hex_to_dec(r.get("blobGasUsed")),
         })
 
         # logs flatten
         for log in r.get("logs", []):
             log_rows.append({
-                "log_index": hex_to_int(log["logIndex"]),
+                "log_index": hex_to_dec(log["logIndex"]),
                 "transaction_hash": log["transactionHash"],
-                "transaction_index": hex_to_int(log["transactionIndex"]),
+                "transaction_index": hex_to_dec(log["transactionIndex"]),
                 "block_hash": log["blockHash"],
-                "block_number": hex_to_int(log["blockNumber"]),
+                "block_number": hex_to_dec(log["blockNumber"]),
                 "address": log["address"],
                 "data": log["data"],
                 "topics": log["topics"],
