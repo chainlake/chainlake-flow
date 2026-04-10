@@ -7,7 +7,7 @@ from rpcstream.client.base import BaseClient
 
 class JsonRpcClient(BaseClient):
     """
-    JSON-RPC transport client.
+    JSON-RPC transport light client.
     """
 
     def __init__(
@@ -16,7 +16,7 @@ class JsonRpcClient(BaseClient):
         timeout_sec: int = 10,
         pool_limit: int = 200,
         dns_ttl_sec: int = 300,
-        max_retries: int = 2,
+        max_retries: int = 0, # retry is handled by eRPC
     ):
         super().__init__(base_url, max_retries=max_retries)
 

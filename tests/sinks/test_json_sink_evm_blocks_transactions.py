@@ -1,3 +1,11 @@
+import json
+
+def write_jsonl(path, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
 import asyncio
 import time
 import statistics
@@ -9,8 +17,14 @@ from rpcstream.client.models import RpcErrorResult
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
 from rpcstream.adapters.evm.rpc_requests import build_get_block_by_number
 
+from rpcstream.adapters.evm.parser import (
+    parse_blocks,
+    parse_transactions,
+    parse_receipts
+)
+
 RPC_URL = "http://localhost:30040/main/evm/56" # eRPC endpoint
-START_BLOCK = 90000091
+START_BLOCK = 90000100
 END_BLOCK = 90000100
 INITIAL_CONCURRENT = 10
 MAX_INFLIGHT = 50
@@ -71,6 +85,7 @@ async def main():
             return
 
         value, meta = result
+                
         latency = meta.extra.get("latency_ms", 0)
         queue_wait = meta.extra.get("queue_wait_ms", 0)
 
@@ -102,6 +117,19 @@ async def main():
                 f"queue_wait={queue_wait:.2f}ms "
                 f"transactions={receipt_count} payload={payload_kb:.1f}KB"
             )
+
+        # -------------------------
+        # NEW: PARSE + SINK
+        # -------------------------
+        try:
+            block_row = parse_blocks(value)
+            tx_rows = parse_transactions(value)
+
+            write_jsonl("output/blocks.jsonl", [block_row])
+            write_jsonl("output/transactions.jsonl", tx_rows)
+
+        except Exception as e:
+            print(f"[Block {block_number}] parse error: {e}")
 
     async def telemetry_sampler():
         while True:

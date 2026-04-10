@@ -1,3 +1,11 @@
+import json
+
+def write_jsonl(path, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
 import asyncio
 import time
 import statistics
@@ -7,15 +15,24 @@ import os
 from rpcstream.client.jsonrpc import JsonRpcClient
 from rpcstream.client.models import RpcErrorResult
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
-from rpcstream.adapters.evm.rpc_requests import build_get_block_by_number
+from rpcstream.adapters.evm.rpc_requests import build_get_block_receipts
 
-RPC_URL = "http://localhost:30040/main/evm/56" # eRPC endpoint
-START_BLOCK = 90000091
+from rpcstream.adapters.evm.parser import (
+    parse_blocks,
+    parse_transactions,
+    parse_receipts
+)
+
+RPC_URL = "http://localhost:30040/main/evm/56"
+START_BLOCK = 90000100
 END_BLOCK = 90000100
-INITIAL_CONCURRENT = 10
+INITIAL_CONCURRENT = 20
 MAX_INFLIGHT = 50
 
-# LOG LEVEL: debug / info / stats
+# -------------------------
+# LOG LEVEL CONFIGURATION
+# debug / info / stats
+# -------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "info").lower()
 
 
@@ -56,14 +73,16 @@ async def main():
             print(f"[Block {block_number}] submitting...")
 
         try:
-            # build eth_getBlockByNumber, include transactions and request_id
-            req = build_get_block_by_number(block_number)
+            req = build_get_block_receipts(block_number)
             result = await scheduler.submit_request(req)
-
+            
         except Exception as e:
             print(f"[Block {block_number}] EXCEPTION during submit: {e}")
             error_count += 1
             return
+
+        if LOG_LEVEL == "debug":
+            print(f"[Block {block_number}] submit returned")
 
         if isinstance(result, RpcErrorResult):
             print(f"[Block {block_number}] ERROR: {result.error}")
@@ -74,8 +93,8 @@ async def main():
         latency = meta.extra.get("latency_ms", 0)
         queue_wait = meta.extra.get("queue_wait_ms", 0)
 
-        receipt_count = len(value.get("transactions", []))
-        logs_count = sum(len(tx.get("logs", [])) for tx in value.get("transactions", []))
+        receipt_count = len(value)
+        logs_count = sum(len(r.get("logs", [])) for r in value)
         payload_size = len(json.dumps(value))
         payload_kb = payload_size / 1024
 
@@ -90,18 +109,42 @@ async def main():
                 "block": block_number,
                 "latency": latency,
                 "queue_wait": queue_wait,
-                "transactions": receipt_count,
+                "receipts": receipt_count,
+                "logs": logs_count,
                 "payload_kb": payload_kb,
             }
         )
 
-        if LOG_LEVEL in ["debug", "info"]:
+        # print based on log level
+        if LOG_LEVEL == "debug":
             print(
                 f"[Block {block_number}] "
-                f"OK latency={latency:.2f}ms "
-                f"queue_wait={queue_wait:.2f}ms "
-                f"transactions={receipt_count} payload={payload_kb:.1f}KB"
+                f"latency={latency:.2f}ms "
+                f"queue={queue_wait:.2f}ms "
+                f"receipts={receipt_count} "
+                f"logs={logs_count} "
+                f"payload={payload_kb:.1f}KB"
             )
+        elif LOG_LEVEL == "info":
+            # info mode
+            print(
+                f"[Block {block_number}] latency={latency:.2f}ms "
+                f"receipts={receipt_count} logs={logs_count} "
+                f"payload={payload_kb:.1f}KB"
+            )
+
+        # -------------------------
+        # NEW: PARSE + SINK
+        # -------------------------
+        try:
+            receipt_rows, log_rows = parse_receipts(value)
+
+            write_jsonl("output/receipts.jsonl", receipt_rows)
+            write_jsonl("output/logs.jsonl", log_rows)
+
+        except Exception as e:
+            print(f"[Block {block_number}] parse error: {e}")
+
 
     async def telemetry_sampler():
         while True:
@@ -112,14 +155,17 @@ async def main():
 
     try:
         tasks = [asyncio.create_task(task(b)) for b in range(START_BLOCK, END_BLOCK + 1)]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if LOG_LEVEL == "debug":
+            for idx, r in enumerate(results):
+                if isinstance(r, Exception):
+                    print(f"[Block {START_BLOCK+idx}] gather exception: {r}")
     finally:
         sampler.cancel()
         await client.close()
 
     # -------------------------
-    # GLOBAL METRICS
-    # -------------------------
+    # GLOBAL METRICS (display for stats/debug/info mode)
     elapsed_sec = time.time() - start_ts
     elapsed_ms = elapsed_sec * 1000
 
@@ -150,14 +196,17 @@ async def main():
     print("\n==============================")
     print(" GLOBAL METRICS")
     print("==============================")
+
     print(f"Total requests      : {total_requests}")
     print(f"Success             : {len(success_latencies)}")
     print(f"Errors              : {error_count}")
     print(f"Total elapsed       : {elapsed_ms:.2f} ms ({elapsed_sec:.3f} s)")
     print(f"RPS                 : {rps:.2f}")
     print(f"Blocks/sec          : {bps:.2f}")
-    print(f"Transactions/sec    : {receipts_per_sec:.2f}")
+    print(f"Receipts/sec        : {total_receipts/elapsed_sec:.2f}")
+    print(f"Logs/sec            : {total_logs/elapsed_sec:.2f}")
     print(f"MB/sec              : {mb_sec:.2f}")
+
     print("\nLatency (ms)")
     print(f"avg                 : {avg_latency:.2f}")
     print(f"min                 : {min_latency:.2f}")
@@ -165,10 +214,13 @@ async def main():
     print(f"p50                 : {p50:.2f}")
     print(f"p95                 : {p95:.2f}")
     print(f"p99                 : {p99:.2f}")
+
     print("\nQueue wait")
     print(f"avg queue_wait      : {avg_queue:.2f} ms")
+
     print("\nPayload")
-    print(f"avg transactions    : {avg_receipts:.2f}")
+    print(f"avg receipts        : {avg_receipts:.2f}")
+    print(f"avg logs            : {avg_logs:.2f}")
     print(f"avg payload         : {avg_payload_kb:.2f} KB")
 
     if LOG_LEVEL in ["debug", "info"]:

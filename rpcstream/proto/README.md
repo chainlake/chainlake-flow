@@ -23,6 +23,7 @@ rm grpcurl_1.9.3_linux_x86_64.tar.gz LICENSE
 
 ## test grp connection using grpcurl
 ```bash
+# with proto
 grpcurl \
   -proto sui/rpc/v2/ledger_service.proto \
   -H "x-token: " \
@@ -30,7 +31,7 @@ grpcurl \
   fullnode.mainnet.sui.io:443 \
   sui.rpc.v2.LedgerService/GetServiceInfo
 
-# or
+# gRPC reflection by server
 grpcurl \
   -d '{}' \
   -H "x-token: " \
