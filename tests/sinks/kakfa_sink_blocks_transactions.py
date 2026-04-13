@@ -1,11 +1,3 @@
-import json
-
-def write_jsonl(path, rows):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
-
 import asyncio
 import time
 import statistics
