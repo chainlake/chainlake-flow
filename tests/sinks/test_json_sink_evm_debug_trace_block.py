@@ -133,12 +133,12 @@ async def main():
         # NEW: PARSE + SINK
         # -------------------------
         try:
-            trace_row = parse_traces_auto(value, block_number, trace_type="call_tracer")
+            trace_row = parse_traces_auto(value, block_number, trace_type="debug_trace")
             
             print(f"[Block {block_number}] parsed rows = {len(trace_row)}")
             
             if trace_row:
-                write_jsonl("output/debug_trace_bsc.jsonl", trace_row)
+                write_jsonl("output/unified_debug_trace_block.jsonl", trace_row)
             else:
                 print(f"[Block {block_number}] empty trace rows")
 

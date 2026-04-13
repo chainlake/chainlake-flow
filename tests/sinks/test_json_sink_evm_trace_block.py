@@ -21,7 +21,7 @@ from rpcstream.adapters.evm.parser import (
     parse_blocks,
     parse_transactions,
     parse_receipts,
-    parse_traces
+    parse_traces_auto
 )
 
 RPC_URL = "http://localhost:30040/main/evm/1" # eRPC endpoint
@@ -134,12 +134,12 @@ async def main():
         # NEW: PARSE + SINK
         # -------------------------
         try:
-            trace_row = parse_traces(value, block_number)
+            trace_row = parse_traces_auto(value, block_number, trace_type="trace_block")
             
             print(f"[Block {block_number}] parsed rows = {len(trace_row)}")
             
             if trace_row:
-                write_jsonl("output/traces.jsonl", trace_row)
+                write_jsonl("output/unified_trace_block.jsonl", trace_row)
             else:
                 print(f"[Block {block_number}] empty trace rows")
 
