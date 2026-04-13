@@ -50,7 +50,7 @@ def build_get_block_receipts(block_number: int) -> EvmRpcRequest:
         },
     )
 
-
+# trace_block method is only available for Ethereum
 def build_trace_block(block_number: int) -> EvmRpcRequest:
     """Create a request to trace a block using callTracer"""
     return EvmRpcRequest(
@@ -63,6 +63,17 @@ def build_trace_block(block_number: int) -> EvmRpcRequest:
         },
     )
 
+def build_debug_trace_block(block_number: int) -> EvmRpcRequest:
+    """Create a request to trace a block using callTracer"""
+    return EvmRpcRequest(
+        method="debug_traceBlockByNumber",
+        params=[hex(block_number), {'tracer': 'callTracer'}],
+        request_id=block_number,
+        meta={
+            "block_number": block_number,
+            "rpc": "trace",
+        },
+    )
 
 # --------------------------
 # Batch generators

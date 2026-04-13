@@ -178,30 +178,101 @@ def parse_receipts(receipts: list):
     return receipt_rows, log_rows
   
 
-# trace（trace_block）
-def parse_traces(traces: list, block_number: int):
+# trace (trace_block)
+def parse_trace_block(traces: list, block_number: int):
     rows = []
 
     for t in traces:
+        action = t.get("action") or {}
+        result = t.get("result") or {} # result being None is NORMAL behavior
+
         rows.append({
             "block_number": block_number,
             "transaction_hash": t.get("transactionHash"),
             "transaction_index": t.get("transactionPosition"),
-            "from_address": t.get("action", {}).get("from"),
-            "to_address": t.get("action", {}).get("to"),
-            "value": hex_to_dec(t.get("action", {}).get("value")),
-            "input": t.get("action", {}).get("input"),
-            "output": t.get("result", {}).get("output"),
+
+            "from_address": action.get("from"),
+            "to_address": action.get("to"),
+            
+            "value": hex_to_dec(action.get("value")),
+            "input": action.get("input"),
+            "output": result.get("output"),
+
             "trace_type": t.get("type"),
-            "call_type": t.get("action", {}).get("callType"),
-            "reward_type": t.get("action", {}).get("rewardType"),
-            "gas": hex_to_dec(t.get("action", {}).get("gas")),
-            "gas_used": hex_to_dec(t.get("result", {}).get("gasUsed")),
+            "call_type": action.get("callType"),
+            "reward_type": action.get("rewardType"),
+
+            "gas": hex_to_dec(action.get("gas")),
+            "gas_used": hex_to_dec(result.get("gasUsed")),
+
             "subtraces": t.get("subtraces"),
             "trace_address": t.get("traceAddress"),
             "error": t.get("error"),
-            "status": t.get("result", {}).get("status"),
+            "status": result.get("status"),
             "trace_id": t.get("traceId"),
         })
+    return rows
+
+
+# trace (debug_traceBlockByNumber)
+def parse_debug_trace_block(traces, block_number):
+    rows = []
+
+    for tx in traces:
+        tx_hash = tx.get("txHash") or tx.get("transactionHash")
+
+        result = tx.get("result")
+        if not result:
+            continue
+
+        rows.extend(
+            flatten_call(result, block_number, tx_hash)
+        )
 
     return rows
+
+def flatten_call(call, block_number, tx_hash, depth=0, parent_trace_id=None):
+    rows = []
+
+    trace_id = f"{tx_hash}_{depth}_{id(call)}"
+
+    rows.append({
+        "block_number": block_number,
+        "transaction_hash": tx_hash,
+
+        "from_address": call.get("from"),
+        "to_address": call.get("to"),
+        "value": call.get("value"),
+        "input": call.get("input"),
+        "output": call.get("output"),
+
+        "call_type": call.get("type"),
+        "gas": call.get("gas"),
+        "gas_used": call.get("gasUsed"),
+
+        "depth": depth,
+        "trace_id": trace_id,
+        "parent_trace_id": parent_trace_id,
+    })
+
+    for subcall in call.get("calls", []) or []:
+        rows.extend(
+            flatten_call(
+                subcall,
+                block_number,
+                tx_hash,
+                depth + 1,
+                trace_id
+            )
+        )
+
+    return rows
+
+# Trace parser dispatcher (clean entrypoint)
+def parse_traces_auto(value, block_number, trace_type):
+    if trace_type == "parity":
+        return parse_trace_block(value, block_number)
+    elif trace_type == "call_tracer":
+        return parse_debug_trace_block(value, block_number)
+    else:
+        raise ValueError(f"unknown trace_type: {trace_type}")
