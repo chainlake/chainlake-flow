@@ -6,17 +6,14 @@ class EventIdCalculator:
             return None
 
         item_type = item.get("type")
-        block_hash = item.get("block_hash")
-
-        if not block_hash:
-            # logging.warning(f"missing block_hash in item: {item}")
-            return None
 
         # ------------------------
         # BLOCK
         # ------------------------
         if item_type == "block":
-            return concat("block", block_hash)
+            block_hash = item.get("hash")
+            if block_hash:
+                return concat("block", block_hash)
 
         # ------------------------
         # TRANSACTION
@@ -24,7 +21,7 @@ class EventIdCalculator:
         elif item_type == "transaction":
             tx_hash = item.get("hash")
             if tx_hash:
-                return concat("tx", tx_hash)
+                return concat("transaction", tx_hash)
 
         # ------------------------
         # RECEIPT

@@ -14,12 +14,12 @@ from rpcstream.adapters.evm.parser.parse_blocks import parse_blocks
 from rpcstream.adapters.evm.parser.parse_transactions import parse_transactions
 
 from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
-from rpcstream.adapters.evm.identity.calculate_event_timestamp import EventTimeCalculator
+from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
 
 RPC_URL = "http://localhost:30040/main/evm/56" # eRPC endpoint
 KAFKA_BROKER = "localhost:30092"
 
-START_BLOCK = 90000096
+START_BLOCK = 90000100
 END_BLOCK = 90000100
 BLOCK_BATCH_SIZE = 10
 INITIAL_CONCURRENT = 10
@@ -49,7 +49,7 @@ def delivery_report(err, msg):
 
 def produce_json(topic, rows):
     for r in rows:
-        event_id = event_id_calculator.calculate(r)
+        event_id = id_calculator.calculate_event_id(r)
         if event_id is None:
             continue
 
@@ -163,7 +163,7 @@ async def main():
         try:
             block_row = parse_blocks(value)
             tx_rows = parse_transactions(value)
-            
+
             produce_json(BLOCK_TOPIC, [block_row])
             produce_json(TRANSACTION_TOPIC, tx_rows)
 
