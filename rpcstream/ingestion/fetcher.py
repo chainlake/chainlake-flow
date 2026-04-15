@@ -18,26 +18,33 @@ class RpcFetcher:
 
         elif self.pipeline_type == "trace":
             req = build_debug_trace_block(block_number)
+        
+        else:
+            raise ValueError(f"Unknown pipeline: {self.pipeline_type}")
 
         # log before response
-        if self.logger and self.logger.isEnabledFor(10):
-            self.logger.debug(
+        if self.logger:
+            self.logger.info(
                 "fetcher.request",
                 component="fetcher",
-                method="eth_getBlockByNumber",
-                block=block_number
+                method=req.method,
+                block=block_number,
+                pipeline=self.pipeline_type,
             )
 
-        value, meta = await self.scheduler.submit_request(req)
+        # -------------------------
+        # EXECUTE
+        # -------------------------
+        result = await self.scheduler.submit_request(req)
    
         # log after response
         if self.logger and self.logger.isEnabledFor(10):
-            self.logger.info(
+            self.logger.debug(
                 "fetcher.response",
                 component="fetcher",
-                method="eth_getBlockByNumber",
-                latency_ms=meta.extra.get("latency_ms"),
-                block=block_number
+                method=req.method,
+                block=block_number,
+                pipeline=self.pipeline_type,
             )
    
-        return value, meta
+        return result

@@ -26,8 +26,8 @@ class BaseClient(ABC):
 
         method = request.method
         
-        if self.logger:
-            self.logger.info(
+        if self.logger and self.logger.isEnabledFor(10):
+            self.logger.debug(
                 "client.rpc_request",
                 component="client",
                 rpc_url=self.base_url,
@@ -45,8 +45,8 @@ class BaseClient(ABC):
                         self.metrics.request_success += 1
                         span.set_attribute("rpc.status", "ok")
                         
-                        if self.logger:
-                            self.logger.info(
+                        if self.logger and self.logger.isEnabledFor(10):
+                            self.logger.debug(
                                 "client.rpc_success",
                                 component="client",
                                 method=method,
@@ -93,16 +93,18 @@ class BaseClient(ABC):
                         await asyncio.sleep(0.1 * (attempt + 1))
 
             except Exception as exc:
+                error_msg = repr(exc)
+                
                 self.metrics.request_error += 1
                 span.set_attribute("rpc.status", "failed")
-                span.set_attribute("rpc.exception", str(exc))
+                span.set_attribute("rpc.exception", error_msg)
                 
                 if self.logger:
                     self.logger.error(
                         "client.rpc_failed",
                         component="client",
                         method=method,
-                        error=str(exc)
+                        error=error_msg
                     )
                 
                 raise

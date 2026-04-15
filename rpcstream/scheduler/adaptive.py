@@ -44,7 +44,7 @@ class AdaptiveRpcScheduler(BaseScheduler):
             wait_ms = (time.time() - enqueue_ts) * 1000
             self._update_queue_wait(wait_ms)
 
-            if self.logger:
+            if self.logger and self.logger.isEnabledFor(10) :
                 self.logger.debug(
                     "scheduler.slot_acquired",
                     component="scheduler",
@@ -82,8 +82,8 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 span.set_attribute("scheduler.status", "ok")
                 span.set_attribute("scheduler.latency_ms", round(latency, 2))
                 
-                if self.logger:
-                    self.logger.info(
+                if self.logger and self.logger.isEnabledFor(10):
+                    self.logger.debug(
                         "scheduler.request_success",
                         component="scheduler",
                         method=request.operation_name(),
@@ -94,15 +94,17 @@ class AdaptiveRpcScheduler(BaseScheduler):
 
                 return result, meta
 
-            except Exception as exc:
+            except Exception as exc:               
                 latency = (time.time() - submit_ts) * 1000
 
                 self.errors += 1
                 self._update_latency(latency)
                 self._adjust_window(False)
 
+                error_msg = repr(exc)
+
                 span.set_attribute("scheduler.status", "error")
-                span.set_attribute("scheduler.exception", str(exc))
+                span.set_attribute("scheduler.exception", error_msg)
                 span.set_attribute("scheduler.latency_ms", round(latency, 2))
 
                 if self.logger:
@@ -110,12 +112,12 @@ class AdaptiveRpcScheduler(BaseScheduler):
                         "scheduler.request_failed",
                         component="scheduler",
                         method=request.operation_name(),
-                        error=str(exc),
+                        error=error_msg,
                         inflight=self.inflight,
                         window=self.current_limit,
                     )
 
-                return RpcErrorResult(exc, meta)
+                return RpcErrorResult(error_msg, meta)
 
             finally:
                 self._release_slot()
@@ -167,8 +169,8 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 reason = "increase"
 
         # log only when changed
-        if self.logger and self.current_limit != prev:
-            self.logger.info(
+        if self.logger and self.current_limit != prev and self.logger.isEnabledFor(10):
+            self.logger.debug(
                 "scheduler.window_adjusted",
                 component="scheduler",
                 prev_window=prev,

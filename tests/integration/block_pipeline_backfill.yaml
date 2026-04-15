@@ -11,23 +11,33 @@ schema:
   entities: ["blocks", "transactions"]
 
 range:
-  start_block: 90000100
+  start_block: 90000096
   end_block: 90000100
 
 rpc:
   endpoint: "http://localhost:30040/main/evm/56"
+  timeout_sec: 10
   inflight:
-    initial: 10
+    initial: 20
     max: 20
-    timeout_sec: 5
+    target: 10000
 
 engine:
   concurrency: 20 # concurrency for parallel processing and sink
 
 kafka:
-  broker: "localhost:30092"
+  bootstrap_servers: "kafka-default-datakube.l.aivencloud.com:22782" # "localhost:30092"
+
+  security:
+    protocol: "SASL_SSL"
+    mechanism: "PLAIN"
+
+  auth:
+    username_env: "KAFKA_USERNAME"
+    password_env: "KAFKA_PASSWORD"
+
   producer:
-    linger_ms: 5
+    linger_ms: 10
     batch_size: 65536
 
 log:

@@ -1,0 +1,17 @@
+
+kubectl create secret generic kafka-credentials \
+  --from-literal=username=username \
+  --from-literal=password=password
+
+env:
+  - name: KAFKA_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: kafka-credentials
+        key: username
+  - name: KAFKA_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: kafka-credentials
+        key: password
+
