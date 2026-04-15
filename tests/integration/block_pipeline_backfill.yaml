@@ -11,14 +11,14 @@ schema:
   entities: ["blocks", "transactions"]
 
 range:
-  start_block: 90000091
+  start_block: 90000100
   end_block: 90000100
 
 rpc:
   endpoint: "http://localhost:30040/main/evm/56"
   inflight:
-    initial: 5
-    max: 10
+    initial: 10
+    max: 20
     timeout_sec: 5
 
 engine:

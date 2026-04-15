@@ -27,7 +27,7 @@ class BaseClient(ABC):
         method = request.method
         
         if self.logger:
-            self.logger.debug(
+            self.logger.info(
                 "client.rpc_request",
                 component="client",
                 rpc_url=self.base_url,
