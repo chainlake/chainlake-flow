@@ -121,26 +121,27 @@ class KafkaWriter:
         buffer = []
         last_flush = time.time()
 
-        while self._running:
+        while self._running or not self.queue.empty():
             try:
-                timeout = self.flush_interval
-                item = await asyncio.wait_for(self.queue.get(), timeout)
-
+                item = await asyncio.wait_for(
+                    self.queue.get(),
+                    timeout=self.flush_interval
+                )
                 buffer.append(item)
 
-                if len(buffer) >= self.batch_size:
-                    self._flush_batch(buffer)
-                    buffer.clear()
-                    last_flush = time.time()
-
             except asyncio.TimeoutError:
-                # flush on interval
-                if buffer:
-                    self._flush_batch(buffer)
-                    buffer.clear()
-                    last_flush = time.time()
+                pass
 
-            # drive kafka delivery callbacks
+            now = time.time()
+
+            if buffer and (
+                len(buffer) >= self.batch_size or
+                (now - last_flush) >= self.flush_interval
+            ):
+                self._flush_batch(buffer)
+                buffer.clear()
+                last_flush = now
+
             self.producer.poll(0)
 
     # ----------------------------

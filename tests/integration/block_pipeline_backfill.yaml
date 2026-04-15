@@ -11,7 +11,7 @@ schema:
   entities: ["blocks", "transactions"]
 
 range:
-  start_block: 90000001
+  start_block: 90000091
   end_block: 90000100
 
 rpc:
@@ -41,10 +41,10 @@ kafka:
     batch_size: 65536
 
   streaming:
-    batch_size: 100          # micro-batch size
-    flush_interval_ms: 10    # max wait time
-    queue_maxsize: 10000     # backpressure control
+    batch_size: 200          # micro-batch size
+    flush_interval_ms: 20    # max wait time
+    queue_maxsize: 1000      # backpressure control
 
 
 log:
-  level: "debug"
+  level: "info"

@@ -12,18 +12,27 @@ class IngestionEngine:
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
 
+    # bounded streaming loop
     async def run_batch(self, start, end):
-        await self.sink.start()   # start async worker
-        
-        tasks = [
-            asyncio.create_task(self._run_one(block))
-            for block in range(start, end + 1)
-        ]
+        await self.sink.start()
 
-        await asyncio.gather(*tasks)
-       
-        await self.sink.close()   # graceful shutdown
-       
+        in_flight = set()
+        next_block = start
+
+        while next_block <= end or in_flight:
+            # fill up concurrency window
+            while len(in_flight) < self.semaphore._value and next_block <= end:
+                task = asyncio.create_task(self._run_one(next_block))
+                in_flight.add(task)
+                next_block += 1
+
+            # wait for at least ONE task to finish
+            done, in_flight = await asyncio.wait(
+                in_flight,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+        await self.sink.close()
         self._print_summary()
 
     async def _run_one(self, block_number):
