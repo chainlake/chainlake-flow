@@ -156,7 +156,7 @@ class KafkaWriter:
             topic_counts[topic] += 1
 
         if self.logger:
-            self.logger.info(
+            self.logger.debug(
                 "kafka.batch_send",
                 component="sink",
                 batch_size=len(buffer),

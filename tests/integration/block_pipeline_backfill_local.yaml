@@ -12,7 +12,7 @@ schema:
 
 range:
   start_block: 90000001
-  end_block: 90000300
+  end_block: 90000100
 
 rpc:
   endpoint: "http://localhost:30040/main/evm/56"

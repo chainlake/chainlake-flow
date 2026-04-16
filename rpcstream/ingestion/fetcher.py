@@ -24,7 +24,7 @@ class RpcFetcher:
 
         # log before response
         if self.logger:
-            self.logger.info(
+            self.logger.debug(
                 "fetcher.request",
                 component="fetcher",
                 method=req.method,

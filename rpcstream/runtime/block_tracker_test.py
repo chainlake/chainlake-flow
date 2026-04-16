@@ -1,6 +1,6 @@
 import asyncio
 from rpcstream.runtime.block_tracker import BlockHeadTracker
-from rpcstream.client.jsonrpc import JsonRpcClient 
+from rpcstream.client.jsonrpc import JsonRpcClient
 from rpcstream.utils.logger import JsonLogger
 
 
@@ -8,7 +8,7 @@ RPC_URL = "http://localhost:30040/main/evm/56"  # erpc endpoint
 
 
 async def main():
-    logger = JsonLogger("tracker_test")
+    logger = JsonLogger(name="tracker_test", level="debug")
 
     client = JsonRpcClient(RPC_URL)
 

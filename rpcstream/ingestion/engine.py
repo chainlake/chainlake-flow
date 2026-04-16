@@ -3,11 +3,22 @@ import asyncio
 from rpcstream.client.models import RpcErrorResult
 
 class IngestionEngine:
-    def __init__(self, fetcher, processor, sink, topics, metrics=None, concurrency=10, logger=None):
+    def __init__(
+        self, 
+        fetcher, 
+        processor, 
+        sink, 
+        topics, 
+        dlq_topics=None,
+        metrics=None, 
+        concurrency=10, 
+        logger=None
+    ):
         self.fetcher = fetcher
         self.processor = processor
         self.sink = sink
         self.topics = topics
+        self.dlq_topics = dlq_topics or {}
         self.metrics = metrics
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
@@ -35,6 +46,42 @@ class IngestionEngine:
         await self.sink.close()
         self._print_summary()
 
+
+    async def run_stream(self, block_source):
+        await self.sink.start()
+
+        workers = set()
+
+        async def worker(block):
+            try:
+                await self._run_one(block)
+            except Exception as e:
+                if self.logger:
+                    self.logger.error("engine.worker_crash", error=str(e))
+            
+        try:
+            while True:
+                block = await block_source.next_block()
+
+                if block is None:
+                    break
+
+                task = asyncio.create_task(worker(block))
+                workers.add(task)
+
+                # cleanup finished tasks
+                done = {t for t in workers if t.done()}
+                workers -= done
+
+                # limit concurrency
+                while len(workers) >= self.semaphore._value:
+                    await asyncio.sleep(0.01)
+
+        finally:
+            await asyncio.gather(*workers)
+            await self.sink.close()
+        
+
     async def _run_one(self, block_number):
         async with self.semaphore:
             try:
@@ -58,14 +105,12 @@ class IngestionEngine:
                             error=error_msg,
                         )
                     
-                    # send to ALL DLQ topics (or choose one)
-                    for entity in self.dlq_topics.keys():
-                        await self._send_dlq(
-                            entity=entity,
-                            block_number=block_number,
-                            error=error_msg,
-                            stage="rpc",
-                        )
+                    await self._send_dlq(
+                        entity="rpc",
+                        block_number=block_number,
+                        error=error_msg,
+                        stage="rpc"
+                    )
                     
                     return
                 
@@ -107,7 +152,7 @@ class IngestionEngine:
                 # LOGGING (entity agnostic)
                 # -------------------------
                 self.logger.info(
-                    "engine.block_processed",
+                    "engine.processed",
                     component="engine",
                     pipeline=self.fetcher.pipeline_type,
                     block=block_number,
