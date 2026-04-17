@@ -17,6 +17,9 @@ from rpcstream.utils.config_loader import load_pipeline_config
 from rpcstream.utils.topic_builder import build_topic, build_dlq_topic
 from rpcstream.utils.logger import JsonLogger
 
+from rpcstream.planner.block_source import RealtimeBlockSource
+from rpcstream.runtime.block_tracker import BlockHeadTracker
+
 from dotenv import load_dotenv
 from pathlib import Path
 import os
@@ -37,7 +40,7 @@ def build_kafka_config(config):
         "bootstrap.servers": kafka_cfg["bootstrap_servers"],
 
         # SASL config
-        # "security.protocol": kafka_cfg["security"]["protocol"],
+        "security.protocol": kafka_cfg["security"]["protocol"],
         "sasl.mechanism": kafka_cfg["security"]["mechanism"],
         "sasl.username": username,
         "sasl.password": password,
@@ -53,9 +56,10 @@ async def main():
     # -------------------------
     # LOAD YAML CONFIG
     # -------------------------
-    config = load_pipeline_config("block_pipeline_backfill_local.yaml")
+    config = load_pipeline_config("block_pipeline_aiven.yaml")
 
     logger = JsonLogger(level=config["log"]["level"])
+    
     adapter_type = config["adapter"]["type"]
     pipeline_type = config["pipeline"]["type"]
     chain = config["adapter"]["chain"]
@@ -91,9 +95,20 @@ async def main():
     client = JsonRpcClient(
         rpc_conf["endpoint"], 
         timeout_sec=rpc_conf["timeout_sec"],
-        max_retries=0,
+        max_retries=1,
         logger=logger
         )
+
+    # -------------------------
+    # BLOCK TRACKER
+    # -------------------------
+    tracker = BlockHeadTracker(
+        client=client,
+        poll_interval=0.8,
+        logger=logger,
+    )
+    
+    await tracker.start()
 
     scheduler = AdaptiveRpcScheduler(
         client,
@@ -103,7 +118,8 @@ async def main():
         logger=logger,
     )
 
-    fetcher = RpcFetcher(scheduler, pipeline_type, logger)
+    # Pass tracker to fetcher
+    fetcher = RpcFetcher(scheduler, pipeline_type, logger, tracker)
 
     # -------------------------
     # PROCESSOR
@@ -131,17 +147,21 @@ async def main():
         processor=processor,
         sink=kafka_write,
         topics=TOPICS,
+        dlq_topics=DLQ_TOPICS,
         concurrency=config["engine"]["concurrency"],
         logger=logger,
     )
-
+    
+    # -------------------------
+    # RUN PIPELINE
+    # -------------------------
+    block_source = RealtimeBlockSource(tracker)
+    
     try:
-        await engine.run_batch(
-            config["range"]["start_block"],
-            config["range"]["end_block"]
-        )
+        await engine.run_stream(block_source)
 
     finally:
+        await tracker.stop()
         await client.close()
 
 

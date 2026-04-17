@@ -56,7 +56,7 @@ async def main():
     # -------------------------
     # LOAD YAML CONFIG
     # -------------------------
-    config = load_pipeline_config("block_pipeline_backfill_local.yaml")
+    config = load_pipeline_config("block_pipeline_realtime.yaml")
 
     logger = JsonLogger(level=config["log"]["level"])
     
@@ -66,7 +66,7 @@ async def main():
     network = config["adapter"]["network"]
     schemas = config["schema"]["entities"]
     rpc_conf = config["rpc"]
-
+    
     # -------------------------
     # BUILD TOPICS DYNAMICALLY
     # -------------------------
@@ -95,9 +95,20 @@ async def main():
     client = JsonRpcClient(
         rpc_conf["endpoint"], 
         timeout_sec=rpc_conf["timeout_sec"],
-        max_retries=0,
+        max_retries=1,
         logger=logger
         )
+
+    # -------------------------
+    # BLOCK TRACKER
+    # -------------------------
+    tracker = BlockHeadTracker(
+        client=client,
+        poll_interval=0.4,
+        logger=logger,
+    )
+    
+    await tracker.start()
 
     scheduler = AdaptiveRpcScheduler(
         client,
@@ -107,7 +118,8 @@ async def main():
         logger=logger,
     )
 
-    fetcher = RpcFetcher(scheduler, pipeline_type, logger)
+    # Pass tracker to fetcher
+    fetcher = RpcFetcher(scheduler, pipeline_type, logger, tracker)
 
     # -------------------------
     # PROCESSOR
@@ -139,19 +151,10 @@ async def main():
         concurrency=config["engine"]["concurrency"],
         logger=logger,
     )
-
-
-    # -------------------------
-    # BLOCK TRACKER
-    # -------------------------
-    tracker = BlockHeadTracker(
-        client=client,
-        poll_interval=0.2,
-        logger=logger,
-    )
     
-    await tracker.start()
-    
+    # -------------------------
+    # RUN PIPELINE
+    # -------------------------
     block_source = RealtimeBlockSource(tracker)
     
     try:

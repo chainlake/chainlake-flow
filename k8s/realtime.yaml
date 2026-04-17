@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bsc-block-pipeline
+  name: bsc-block-transaction-ingestion
   namespace: ingestion
   labels:
-    app: block-pipeline
+    app: block-transaction-ingestion
     chain: bsc
   annotations:
     reloader.stakater.com/auto: "true"
@@ -16,19 +16,19 @@ spec:
     #  kill old takes time and ingestion continus while the pod is in terminating status, ingestion paused for 1 sec only
   selector:
     matchLabels:
-      app: block-pipeline
+      app: block-transaction-ingestion
       chain: bsc
   template:
     metadata:
       labels:
-        app: block-pipeline
+        app: block-transaction-ingestion
         chain: bsc
     spec:
       restartPolicy: Always
       terminationGracePeriodSeconds: 1 # EOS is maintained by state topic
       containers:
         - name: ingestion-pipeline
-          image: ghcr.io/chainlake/rpcstream:v0.1.2
+          image: ghcr.io/chainlake/rpcstream:v0.1.3
           imagePullPolicy: IfNotPresent
           command: ["python", "block_pipeline_realtime.py"]
 
@@ -57,7 +57,7 @@ spec:
           resources:
             requests:
               cpu: "200m"
-              memory: "64Mi"
-            limits:
-              cpu: "800m"
               memory: "128Mi"
+            limits:
+              cpu: "400m"
+              memory: "256Mi"

@@ -87,6 +87,16 @@ class IngestionEngine:
             latency = meta.extra.get("latency_ms", 0)
             queue_wait = meta.extra.get("queue_wait_ms", 0)
             
+            
+            # -------------------------
+            # LAG CALCULATION
+            # -------------------------
+            lag = None
+            if self.fetcher.tracker:
+                latest_block = self.fetcher.tracker.get_latest()
+                if latest_block is not None:
+                    lag = latest_block - block_number
+                    
             # -------------------------
             # PROCESS (PIPELINE ROUTING)
             # -------------------------
@@ -123,7 +133,7 @@ class IngestionEngine:
                 block=block_number,
                 latency_ms=latency,
                 queue_wait_ms=queue_wait,
-                # payload_kb=payload_kb
+                chain_lag=lag,
             )
             
             if self.logger and self.logger.isEnabledFor(10):

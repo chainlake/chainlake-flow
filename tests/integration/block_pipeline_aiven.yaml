@@ -18,9 +18,9 @@ rpc:
   endpoint: "http://localhost:30040/main/evm/56"
   timeout_sec: 10
   inflight:
-    initial: 10
-    max: 20
-    target: 10000
+    initial: 5
+    max: 10
+    target: 1000
 
 engine:
   concurrency: 20 # concurrency for parallel processing and sink
@@ -43,7 +43,7 @@ kafka:
   streaming:
     batch_size: 100          # micro-batch size
     flush_interval_ms: 20    # max wait time
-    queue_maxsize: 1000      # backpressure control
+    queue_maxsize: 100      # backpressure control
 
 
 log:

@@ -22,17 +22,13 @@ from rpcstream.runtime.block_tracker import BlockHeadTracker
 
 import os
 
-# go up to repo root
-# env_path = Path(__file__).resolve().parents[3] / ".env"
-# load_dotenv()
-
 def build_kafka_config(config):
     kafka_cfg = config["kafka"]
 
-    # username = os.getenv(kafka_cfg["auth"]["username_env"])
-    # password = os.getenv(kafka_cfg["auth"]["password_env"])
+    username = os.getenv(kafka_cfg["auth"]["username_env"])
+    password = os.getenv(kafka_cfg["auth"]["password_env"])
 
-    # ca_path = os.getenv("KAFKA_CA_PATH")
+    ca_path = os.getenv("KAFKA_CA_PATH")
 
     return {
         "bootstrap.servers": kafka_cfg["bootstrap_servers"],
@@ -47,7 +43,7 @@ def build_kafka_config(config):
         "linger.ms": kafka_cfg["producer"]["linger_ms"],
         "batch.size": kafka_cfg["producer"]["batch_size"],
         
-        # "ssl.ca.location": ca_path,
+        "ssl.ca.location": ca_path,
     }
 
 async def main():
@@ -64,7 +60,7 @@ async def main():
     network = config["adapter"]["network"]
     schemas = config["schema"]["entities"]
     rpc_conf = config["rpc"]
-
+    
     # -------------------------
     # BUILD TOPICS DYNAMICALLY
     # -------------------------
@@ -93,9 +89,20 @@ async def main():
     client = JsonRpcClient(
         rpc_conf["endpoint"], 
         timeout_sec=rpc_conf["timeout_sec"],
-        max_retries=0,
+        max_retries=1,
         logger=logger
         )
+
+    # -------------------------
+    # BLOCK TRACKER
+    # -------------------------
+    tracker = BlockHeadTracker(
+        client=client,
+        poll_interval=0.4,
+        logger=logger,
+    )
+    
+    await tracker.start()
 
     scheduler = AdaptiveRpcScheduler(
         client,
@@ -105,7 +112,8 @@ async def main():
         logger=logger,
     )
 
-    fetcher = RpcFetcher(scheduler, pipeline_type, logger)
+    # Pass tracker to fetcher
+    fetcher = RpcFetcher(scheduler, pipeline_type, logger, tracker)
 
     # -------------------------
     # PROCESSOR
@@ -137,19 +145,10 @@ async def main():
         concurrency=config["engine"]["concurrency"],
         logger=logger,
     )
-
-
-    # -------------------------
-    # BLOCK TRACKER
-    # -------------------------
-    tracker = BlockHeadTracker(
-        client=client,
-        poll_interval=0.2,
-        logger=logger,
-    )
     
-    await tracker.start()
-    
+    # -------------------------
+    # RUN PIPELINE
+    # -------------------------
     block_source = RealtimeBlockSource(tracker)
     
     try:

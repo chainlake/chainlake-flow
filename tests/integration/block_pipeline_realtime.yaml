@@ -1,5 +1,6 @@
 pipeline:
   type: "block"
+  mode: "backfill"
 
 adapter:
   type: "evm"
@@ -7,12 +8,13 @@ adapter:
   network: "mainnet"
   chain_id: "56"
 
+
 schema:
   entities: ["block", "transaction"]
 
 rpc:
   project_id: main
-  endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
+  endpoint: "http://localhost:30040/main/evm/56"
   timeout_sec: 10
   inflight:
     initial: 5
@@ -24,9 +26,9 @@ engine:
   # Rule: Engine ≥ RPC inflight
   # set to 1 for sequntial processing
   concurrency: 10
-
+  
 kafka:
-  bootstrap_servers: "redpanda.compute.svc:9092"
+  bootstrap_servers: "localhost:30092"
 
   security:
     # protocol: "SASL_SSL"
@@ -43,7 +45,7 @@ kafka:
   streaming:
     batch_size: 100          # micro-batch size
     flush_interval_ms: 20    # max wait time
-    queue_maxsize: 100       # backpressure control
+    queue_maxsize: 100      # backpressure control
 
 
 log:

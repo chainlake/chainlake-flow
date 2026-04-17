@@ -4,10 +4,11 @@ from rpcstream.adapters.evm.rpc_requests import build_get_block_receipts
 from rpcstream.adapters.evm.rpc_requests import build_debug_trace_block
 
 class RpcFetcher:
-    def __init__(self, scheduler, pipeline_type, logger=None):
+    def __init__(self, scheduler, pipeline_type, logger=None, tracker=None):
         self.scheduler = scheduler
         self.pipeline_type = pipeline_type
         self.logger = logger
+        self.tracker = tracker
 
     async def fetch(self, block_number):
         if self.pipeline_type == "block":
