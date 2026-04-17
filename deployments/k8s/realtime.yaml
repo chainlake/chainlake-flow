@@ -1,46 +1,63 @@
-pipeline:
-  type: "block"
-  mode: "realtime"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bsc-block-pipeline
+  namespace: ingestion
+  labels:
+    app: block-pipeline
+    chain: bsc
+  annotations:
+    reloader.stakater.com/auto: "true"
+    
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # 强制单实例 + 串行切换 （先 kill 旧 Pod，再建新 Pod
+    #  kill old takes time and ingestion continus while the pod is in terminating status, ingestion paused for 1 sec only
+  selector:
+    matchLabels:
+      app: block-pipeline
+      chain: bsc
+  template:
+    metadata:
+      labels:
+        app: block-pipeline
+        chain: bsc
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 1 # EOS is maintained by state topic
+      containers:
+        - name: ingestion-pipeline
+          image: ghcr.io/chainlake/rpcstream:v0.1.2
+          imagePullPolicy: IfNotPresent
+          command: ["python", "block_pipeline_realtime.py"]
 
-adapter:
-  type: "evm"
-  chain: "bsc"
-  network: "mainnet"
+          # -----------------------------
+          # Ingest runtime variables
+          # -----------------------------
+          env:
+                         
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
 
-schema:
-  entities: ["block", "transaction"]
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          # -----------------------------
+          # Metrics endpoint
+          # -----------------------------
 
-rpc:
-  endpoint: "http://localhost:30040/main/evm/56"
-  timeout_sec: 10
-  inflight:
-    initial: 5
-    max: 10
-    target: 1000
-
-engine:
-  concurrency: 20 # concurrency for parallel processing and sink
-
-kafka:
-  bootstrap_servers: "localhost:30092"
-
-  security:
-    # protocol: "SASL_SSL"
-    mechanism: "PLAIN"
-
-  auth:
-    username_env: "KAFKA_USERNAME"
-    password_env: "KAFKA_PASSWORD"
-
-  producer:
-    linger_ms: 10
-    batch_size: 65536
-
-  streaming:
-    batch_size: 100          # micro-batch size
-    flush_interval_ms: 20    # max wait time
-    queue_maxsize: 1000      # backpressure control
-
-
-log:
-  level: "info"
+          # -----------------------------
+          # (Optional but recommended)
+          # Resource limits
+          # -----------------------------
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "64Mi"
+            limits:
+              cpu: "800m"
+              memory: "128Mi"

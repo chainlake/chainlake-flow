@@ -11,7 +11,7 @@ schema:
   entities: ["block", "transaction"]
 
 rpc:
-  endpoint: "http://localhost:30040/main/evm/56"
+  endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
   timeout_sec: 10
   inflight:
     initial: 5
@@ -22,7 +22,7 @@ engine:
   concurrency: 20 # concurrency for parallel processing and sink
 
 kafka:
-  bootstrap_servers: "localhost:30092"
+  bootstrap_servers: "redpanda.compute.svc:9092"
 
   security:
     # protocol: "SASL_SSL"

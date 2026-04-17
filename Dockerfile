@@ -19,9 +19,8 @@ COPY pyproject.toml uv.lock ./
 # create venv (isolated build stage)
 RUN uv venv /opt/venv
 
-# 🔥 install from lockfile (FAST + deterministic)
-RUN uv pip sync uv.lock --python /opt/venv/bin/python
-
+# install INTO venv explicitly
+RUN uv pip install --python /opt/venv/bin/python .
 
 # ---------------- runtime ----------------
 FROM python:3.11-slim
@@ -29,6 +28,7 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONPATH=/app
 
 WORKDIR /app
 
@@ -41,6 +41,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 
 # copy application code last (max cache efficiency)
-COPY rpcstream ./rpcstream
+COPY rpcstream /app/rpcstream
+COPY scripts/ /app/scripts/
+
+WORKDIR /app/scripts
 
 CMD ["python", "block_pipeline_realtime.py"]

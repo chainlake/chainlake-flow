@@ -39,3 +39,5 @@ compiled deps ✅
 NO gcc ❌
 NO build tools ❌
 ```
+
+MUST run uv sync (or uv lock) after changing pyproject.toml
