@@ -55,16 +55,3 @@ class BaseScheduler:
             self.queue_wait_ema = wait_ms
         else:
             self.queue_wait_ema = self.alpha * wait_ms + (1 - self.alpha) * self.queue_wait_ema
-
-    def telemetry(self):
-        elapsed = max(time.time() - self.start_ts, 1)
-        return {
-            "window": self.current_limit,
-            "inflight": self.inflight,
-            "latency_ema_ms": round(self.latency_ema or 0, 2),
-            "queue_wait_ema_ms": round(self.queue_wait_ema or 0, 2),
-            "success": self.success,
-            "errors": self.errors,
-            "rps": round((self.success + self.errors) / elapsed, 2),
-            "client": self.client.telemetry() if hasattr(self, "client") else None,
-        }

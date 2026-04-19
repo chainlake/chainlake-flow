@@ -1,12 +1,18 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-
-from opentelemetry import trace
-from rpcstream.client.models import ClientMetrics
+from opentelemetry import trace, metrics
+from opentelemetry.trace import Status, StatusCode
 
 tracer = trace.get_tracer("rpcstream.client")
 
+from rpcstream.metrics.client import (
+    REQUEST_COUNTER,
+    REQUEST_SUBMITTED_COUNTER,
+    INFLIGHT_GAUGE,
+    RETRY_COUNTER,
+    LATENCY_HISTOGRAM,
+)
 
 class BaseClient(ABC):
     """
@@ -16,120 +22,127 @@ class BaseClient(ABC):
     def __init__(self, base_url: str, max_retries: int = 2, logger=None):
         self.base_url = base_url.rstrip("/")
         self.max_retries = max_retries
-        self.metrics = ClientMetrics()
         self.logger = logger
-
+        
     async def execute(self, request):
         start = time.time()
-        self.metrics.request_total += 1
-        self.metrics.inflight += 1
-
         method = request.method
+        
+        # OTEL metrics
+        REQUEST_SUBMITTED_COUNTER.add(1, {"method": method})
+        INFLIGHT_GAUGE.add(1)
         
         if self.logger and self.logger.isEnabledFor(10):
             self.logger.debug(
-                "client.rpc_request",
+                "rpc.request",
                 component="client",
                 rpc_url=self.base_url,
                 method=method,
                 params_preview=str(request.params)[:100]
             )
 
-        with tracer.start_as_current_span("client.execute_request") as span:
+        with tracer.start_as_current_span("rpc.execute") as span:
             span.set_attribute("rpc.url", self.base_url)
+            span_ctx = span.get_span_context()
+            trace_id = format(span_ctx.trace_id, "032x")
 
             try:
                 for attempt in range(self.max_retries + 1):
                     try:
                         result = await self._execute(request, span)
-                        self.metrics.request_success += 1
+                        REQUEST_COUNTER.add(1, {"method": method, "status": "success"})
                         
-                        span.set_attribute("rpc.status", "ok")
+                        span.set_status(Status(StatusCode.OK))
                         span.set_attribute("rpc.method", method)
                         span.set_attribute("rpc.retry_count", attempt)
+                        span.set_attribute("rpc.system", "jsonrpc")
                         
                         if self.logger and self.logger.isEnabledFor(10):
                             self.logger.debug(
-                                "client.rpc_success",
+                                "rpc.success",
                                 component="client",
                                 method=method,
                                 attempt=attempt,
+                                trace_id=trace_id,
                             )
                         
                         return result
 
                     except asyncio.TimeoutError:
-                        self.metrics.timeout_total += 1
+                        REQUEST_COUNTER.add(1, {"method": method, "status": "timeout"})
                         span.set_attribute("rpc.status", "timeout")
-
+                        span.add_event("retry", {"attempt": attempt})
+                        
                         if self.logger:
                             self.logger.warn(
-                                "client.rpc_timeout",
+                                "rpc.timeout",
                                 component="client",
                                 method=method,
                                 attempt=attempt,
+                                trace_id=trace_id,
                             )
 
                         if attempt >= self.max_retries:
                             raise
 
-                        self.metrics.retry_total += 1
+                        self.retry_counter.add(1, {"method": method})
                         await asyncio.sleep(0.1 * (attempt + 1))
 
                     except Exception as exc:
-                        self.metrics.transport_error_total += 1
-                        span.set_attribute("rpc.error", str(exc))
+                        REQUEST_COUNTER.add(1, {"method": method, "status": "transport_error"})
+                        span.add_event("retry", {"attempt": attempt})
+                        span.set_status(Status(StatusCode.ERROR))
 
                         if self.logger:
                             self.logger.warn(
-                                "client.rpc_transport_error",
+                                "rpc.transport_error",
                                 component="client",
                                 method=method,
                                 attempt=attempt,
-                                error=str(exc)
+                                error=str(exc),
+                                trace_id=trace_id,
                             )
 
                         if attempt >= self.max_retries:
                             raise
 
-                        self.metrics.retry_total += 1
+                        self.retry_counter.add(1, {"method": method})
                         await asyncio.sleep(0.1 * (attempt + 1))
 
             except Exception as exc:
                 error_msg = repr(exc)
                 
-                self.metrics.request_error += 1
+                REQUEST_COUNTER.add(1, {"method": method, "status": "request_error"})
                 span.set_attribute("rpc.status", "failed")
                 span.set_attribute("rpc.exception", error_msg)
                 
                 if self.logger:
                     self.logger.error(
-                        "client.rpc_failed",
+                        "rpc.failed",
                         component="client",
                         method=method,
-                        error=error_msg
+                        error=error_msg,
+                        trace_id=trace_id,
                     )
                 
                 raise
 
             finally:
                 latency = (time.time() - start) * 1000
-
-                if self.metrics.latency_ema_ms is None:
-                    self.metrics.latency_ema_ms = latency
-                else:
-                    self.metrics.latency_ema_ms = 0.2 * latency + 0.8 * self.metrics.latency_ema_ms
-
-                self.metrics.inflight -= 1
+                
+                # OTEL (authoritative)
+                LATENCY_HISTOGRAM.record(latency, {"method": method})
+                INFLIGHT_GAUGE.add(-1)
+                
                 span.set_attribute("rpc.latency_ms", round(latency, 2))
                 
                 if self.logger:
                     self.logger.debug(
-                        "client.rpc_complete",
+                        "rpc.complete",
                         component="client",
                         method=method,
                         latency_ms=round(latency, 2),
-                        inflight=self.metrics.inflight
+                        trace_id=trace_id,
                     )
 
     @abstractmethod
@@ -138,6 +151,3 @@ class BaseClient(ABC):
         Transport-specific execution.
         """
         pass
-
-    def telemetry(self):
-        return vars(self.metrics)
