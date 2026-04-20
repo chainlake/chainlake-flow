@@ -9,10 +9,11 @@ from rpcstream.metrics.engine import (
     BLOCK_LATENCY,
     QUEUE_WAIT,
     INFLIGHT,
+    TOTAL_TIME,
     ERROR_COUNTER,
     DLQ_COUNTER,
     CHAIN_LAG,
-    TOTAL_TIME,
+    INGESTION_LAG,
 )
 
 class IngestionEngine:
@@ -35,7 +36,8 @@ class IngestionEngine:
         self.metrics = metrics
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
-
+        self._latest_processed_block = 0
+        self._lag_lock = asyncio.Lock()
 
     async def run_stream(self, block_source):
         await self.sink.start()
@@ -107,13 +109,11 @@ class IngestionEngine:
             latency = meta.extra.get("latency_ms", 0)
             queue_wait = meta.extra.get("queue_wait_ms", 0)
             
+            # -------------------------
             # LAG CALCULATION
-            lag = None
-            if self.fetcher.tracker:
-                latest_block = self.fetcher.tracker.get_latest()
-                if latest_block is not None:
-                    lag = latest_block - block_number
-
+            # -------------------------
+            latest_block, chain_lag, ingestion_lag = await self._compute_lag(block_number)
+            
             # PROCESS (PIPELINE ROUTING)
             pipeline_type = self.fetcher.pipeline_type
             
@@ -123,6 +123,14 @@ class IngestionEngine:
             BLOCK_COUNTER.add(1, {"pipeline": self.fetcher.pipeline_type})
             BLOCK_LATENCY.record(latency, {"pipeline": self.fetcher.pipeline_type})
             QUEUE_WAIT.record(queue_wait, {"pipeline": self.fetcher.pipeline_type})
+            
+            # LAGS
+            if chain_lag is not None:
+                CHAIN_LAG.record(chain_lag, {"pipeline": pipeline_type})
+
+            if ingestion_lag is not None:
+                INGESTION_LAG.record(ingestion_lag, {"pipeline": pipeline_type})
+
 
             # SINK (GENERIC)
             for entity, rows in parsed.items():
@@ -141,16 +149,19 @@ class IngestionEngine:
                 pipeline=self.fetcher.pipeline_type,
                 block=block_number,
                 latency_ms=latency,
-                queue_wait_ms=queue_wait,
-                chain_lag=lag,
+                ingestion_lag=ingestion_lag,
+                # latest_block=latest_block,
+                # queue_wait_ms=queue_wait,
+                # chain_lag=chain_lag,
+                
             )
             
-            CHAIN_LAG.record(lag, {"pipeline": pipeline_type})
+
             
             if self.logger and self.logger.isEnabledFor(10):
                 preview = f"type={type(value)} size={len(value) if hasattr(value,'__len__') else 'NA'}"
                 self.logger.debug(
-                    "engine.block_processed",
+                    "engine.data_processed",
                     component="engine",
                     pipeline=self.fetcher.pipeline_type,
                     block=block_number,
@@ -224,3 +235,38 @@ class IngestionEngine:
                 stage=stage,
                 error=error,
             )
+            
+            
+    async def _update_ingestion_lag(self, block_number, latest_block):
+        async with self._lag_lock:
+            if block_number > self._latest_processed_block:
+                self._latest_processed_block = block_number
+
+            ingestion_lag = None
+            if latest_block is not None:
+                ingestion_lag = latest_block - self._latest_processed_block
+
+            return ingestion_lag
+        
+    
+    async def _compute_lag(self, block_number):
+        latest_block = None
+        chain_lag = None
+        ingestion_lag = None
+
+        tracker = getattr(self.fetcher, "tracker", None)
+
+        if tracker:
+            latest_block = tracker.get_latest()
+
+            if latest_block is not None:
+                # point-in-time lag
+                chain_lag = latest_block - block_number
+
+                # true pipeline lag (protected update)
+                ingestion_lag = await self._update_ingestion_lag(
+                    block_number,
+                    latest_block
+                )
+
+        return latest_block, chain_lag, ingestion_lag

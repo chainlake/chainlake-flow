@@ -1,6 +1,6 @@
 [project]
 name = "rpcstream"
-version = "0.1.4"
+version = "0.1.6"
 description = "High-throughput blockchain ingestion engine for realtime streaming and historical backfill."
 authors = [
   { name = "Chainlake" }

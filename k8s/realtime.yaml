@@ -12,7 +12,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate # 强制单实例 + 串行切换 （先 kill 旧 Pod，再建新 Pod
+    type: Recreate
     #  kill old takes time and ingestion continus while the pod is in terminating status, ingestion paused for 1 sec only
   selector:
     matchLabels:

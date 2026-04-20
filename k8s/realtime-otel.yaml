@@ -1,10 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bsc-block-transaction-ingestion-otel
+  name: bsc-block-transaction-ingestion
   namespace: ingestion
   labels:
-    app: block-transaction-ingestion-otel
+    app: block-transaction-ingestion
     chain: bsc
   annotations:
     reloader.stakater.com/auto: "true"
@@ -13,22 +13,21 @@ spec:
   replicas: 1
   strategy:
     type: Recreate
-    #  kill old takes time and ingestion continus while the pod is in terminating status, ingestion paused for 1 sec only
   selector:
     matchLabels:
-      app: block-transaction-ingestion-otel
+      app: block-transaction-ingestion
       chain: bsc
   template:
     metadata:
       labels:
-        app: block-transaction-ingestion-otel
+        app: block-transaction-ingestion
         chain: bsc
     spec:
       restartPolicy: Always
-      terminationGracePeriodSeconds: 1 # EOS is maintained by state topic
+      terminationGracePeriodSeconds: 1
       containers:
         - name: ingestion-pipeline-otel
-          image: ghcr.io/chainlake/rpcstream:v0.1.5
+          image: ghcr.io/chainlake/rpcstream:v0.1.6
           imagePullPolicy: IfNotPresent
           command: ["python", "block_pipeline_realtime.py"]
 
@@ -57,7 +56,7 @@ spec:
           resources:
             requests:
               cpu: "200m"
-              memory: "128Mi"
+              memory: "64Mi"
             limits:
               cpu: "400m"
-              memory: "256Mi"
+              memory: "128Mi"

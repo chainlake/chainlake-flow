@@ -85,7 +85,7 @@ class BaseClient(ABC):
                         if attempt >= self.max_retries:
                             raise
 
-                        self.retry_counter.add(1, {"method": method})
+                        RETRY_COUNTER.add(1, {"method": method})
                         await asyncio.sleep(0.1 * (attempt + 1))
 
                     except Exception as exc:
@@ -106,7 +106,7 @@ class BaseClient(ABC):
                         if attempt >= self.max_retries:
                             raise
 
-                        self.retry_counter.add(1, {"method": method})
+                        RETRY_COUNTER.add(1, {"method": method})
                         await asyncio.sleep(0.1 * (attempt + 1))
 
             except Exception as exc:

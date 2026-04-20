@@ -44,4 +44,10 @@ ERROR_COUNTER = meter.create_counter(
 # lag
 CHAIN_LAG = meter.create_histogram(
     name="engine_chain_lag",
+    description="point-in-time lag at processing moment",
+)
+
+INGESTION_LAG = meter.create_histogram(
+    name="engine_ingestion_lag",
+    description="TRUE pipeline lag (monotonic)",
 )

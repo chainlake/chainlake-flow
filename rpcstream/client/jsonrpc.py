@@ -64,7 +64,6 @@ class JsonRpcClient(BaseClient):
             data = orjson.loads(raw)
 
         if "error" in data:
-            self.metrics.rpc_error_total += 1
             span.set_attribute("rpc.status", "error")
             span.set_attribute("rpc.error", str(data["error"]))
             
