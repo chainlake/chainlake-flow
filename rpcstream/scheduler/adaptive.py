@@ -7,7 +7,7 @@ from rpcstream.adapters.base import BaseRpcRequest  # Generic RPC request
 from rpcstream.scheduler.base import BaseScheduler
 from opentelemetry import trace
 
-tracer = trace.get_tracer("rpcstream.scheduler")
+tracer = trace.get_tracer(__name__)
 
 
 class AdaptiveRpcScheduler(BaseScheduler):

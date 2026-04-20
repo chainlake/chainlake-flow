@@ -1,10 +1,10 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from opentelemetry import trace, metrics
+from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
-tracer = trace.get_tracer("rpcstream.client")
+tracer = trace.get_tracer(__name__)
 
 from rpcstream.metrics.client import (
     REQUEST_COUNTER,
@@ -43,8 +43,6 @@ class BaseClient(ABC):
 
         with tracer.start_as_current_span("rpc.execute") as span:
             span.set_attribute("rpc.url", self.base_url)
-            span_ctx = span.get_span_context()
-            trace_id = format(span_ctx.trace_id, "032x")
 
             try:
                 for attempt in range(self.max_retries + 1):
@@ -63,7 +61,6 @@ class BaseClient(ABC):
                                 component="client",
                                 method=method,
                                 attempt=attempt,
-                                trace_id=trace_id,
                             )
                         
                         return result
@@ -79,7 +76,6 @@ class BaseClient(ABC):
                                 component="client",
                                 method=method,
                                 attempt=attempt,
-                                trace_id=trace_id,
                             )
 
                         if attempt >= self.max_retries:
@@ -100,7 +96,6 @@ class BaseClient(ABC):
                                 method=method,
                                 attempt=attempt,
                                 error=str(exc),
-                                trace_id=trace_id,
                             )
 
                         if attempt >= self.max_retries:
@@ -122,7 +117,6 @@ class BaseClient(ABC):
                         component="client",
                         method=method,
                         error=error_msg,
-                        trace_id=trace_id,
                     )
                 
                 raise
@@ -142,7 +136,6 @@ class BaseClient(ABC):
                         component="client",
                         method=method,
                         latency_ms=round(latency, 2),
-                        trace_id=trace_id,
                     )
 
     @abstractmethod

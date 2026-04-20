@@ -1,7 +1,14 @@
 import json
 import time
 import logging
+from opentelemetry import trace
 
+def _get_trace_id():
+    span = trace.get_current_span()
+    ctx = span.get_span_context()
+    if ctx.trace_id == 0:
+        return None
+    return format(ctx.trace_id, "032x")
 
 class JsonLogger:
     
@@ -25,12 +32,17 @@ class JsonLogger:
         return level_num >= self.LEVELS[self.level]
 
     def _log(self, level, message, **kwargs):
+        trace_id = _get_trace_id()
+        
         log = {
             "level": level,
             "time": int(time.time() * 1000),
             "message": message,
             **kwargs
         }
+
+        if trace_id:
+            log["trace_id"] = trace_id
 
         self.logger.log(getattr(logging, level.upper()), json.dumps(log))
 

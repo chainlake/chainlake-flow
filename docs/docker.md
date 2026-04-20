@@ -2,7 +2,7 @@ from repo root:
 
 ```bash
 docker build -f Dockerfile.dev -t ghcr.io/chainlake/rpcstream:v0.3 .
-docker build -t ghcr.io/chainlake/rpcstream:v0.1.6 .
+docker build -t ghcr.io/chainlake/rpcstream:v0.1.8 .
 ```
 ### Generate lockfile
 `uv pip compile pyproject.toml -o uv.lock`

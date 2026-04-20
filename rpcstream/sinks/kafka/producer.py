@@ -6,6 +6,10 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.protobuf import ProtobufSerializer
 from collections import defaultdict
 
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
 from rpcstream.metrics.kafka import (
     QUEUE_SIZE,
     BATCH_COUNTER,
@@ -58,18 +62,24 @@ class KafkaWriter:
     # Public API (NON-BLOCKING)
     # ----------------------------
     async def send(self, topic, rows):
-        
-        if self.logger:
-            self.logger.debug(
-                "kafka.enqueue",
-                component="sink",
-                topic=topic,
-                batch_size=len(rows),
-                queue_size=self.queue.qsize(),
-            )
+        with tracer.start_as_current_span("kafka.enqueue") as span:
+            span.set_attribute("component", "sink")
+            span.set_attribute("topic", topic)
+            span.set_attribute("batch_size", len(rows))
+            span.set_attribute("queue_size", self.queue.qsize())
+            
+            # Log enqueue action before adding to the queue
+            if self.logger:
+                self.logger.debug(
+                    "kafka.enqueue",
+                    component="sink",
+                    topic=topic,
+                    batch_size=len(rows),
+                    queue_size=self.queue.qsize(),
+                )
 
-        await asyncio.wait_for(self.queue.put((topic, rows)), timeout=1) # batch enqueue, Apply backpressure to engine
-        QUEUE_SIZE.add(self.queue.qsize(), {"topic": topic})
+            await asyncio.wait_for(self.queue.put((topic, rows)), timeout=1) # batch enqueue, Apply backpressure to engine
+            QUEUE_SIZE.add(self.queue.qsize(), {"topic": topic})
 
     # ----------------------------
     # Worker loop
@@ -110,62 +120,66 @@ class KafkaWriter:
     # Flush batch
     # ----------------------------
     async def _flush_batch(self, buffer):
-        topic_counts = defaultdict(int)
-
-        # count per topic
-        for topic, _ in buffer:
-            topic_counts[topic] += 1
-
-        if self.logger:
-            self.logger.debug(
-                "kafka.batch_send",
-                component="sink",
-                batch_size=len(buffer),
-                topics=dict(topic_counts),
-            )
+        with tracer.start_as_current_span("kafka.batch_send") as span:
+            span.set_attribute("component", "sink")
+            span.set_attribute("batch_size", len(buffer))
             
-        start = time.time()
-        BATCH_COUNTER.add(1)
-        
-        for topic, r in buffer:
-            MESSAGE_COUNTER.add(1, {"topic": topic})
-            event_id = self.id_calc.calculate_event_id(r)
-            
-            # fallback for DLQ / unknown schema
-            if not event_id:
-                event_id = f"dlq-{r.get('block')}-{time.time_ns()}"
+            topic_counts = defaultdict(int)
 
-            r["id"] = event_id
-            # r["event_timestamp"] = self.time_calc.calculate_event_timestamp(r)
-            r["ingest_timestamp"] = self.time_calc.calculate_ingest_timestamp()
+            # count per topic
+            for topic, _ in buffer:
+                topic_counts[topic] += 1
 
-            payload = json.dumps(r, separators=(",", ":"))
-
-            retries = 0
-            while True:
-                try:
-                    self.producer.produce(
-                        topic=topic,
-                        key=event_id,
-                        value=payload,
-                        callback=self.delivery_report,
-                    )
-                    break
+            if self.logger:
+                self.logger.debug(
+                    "kafka.batch_send",
+                    component="sink",
+                    batch_size=len(buffer),
+                    topics=dict(topic_counts),
+                )
                 
-                except BufferError:
-                    BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
-                    retries += 1
-                    if retries > 100:
-                        raise RuntimeError("Kafka producer stuck")
-                    # 🔥 backpressure from Kafka (avoid: BufferError: Local: Queue full)
-                    self.producer.poll(0.1)
-                    await asyncio.sleep(0.01)  # yield to event loop, prevents CPU spinning
+            start = time.time()
+            BATCH_COUNTER.add(1)
+            
+            for topic, r in buffer:
+                MESSAGE_COUNTER.add(1, {"topic": topic})
+                event_id = self.id_calc.calculate_event_id(r)
+                
+                # fallback for DLQ / unknown schema
+                if not event_id:
+                    event_id = f"dlq-{r.get('block')}-{time.time_ns()}"
 
-        # trigger delivery callbacks
-        self.producer.poll(0)
-        latency = (time.time() - start) * 1000
-        BATCH_LATENCY.record(latency)
-        
+                r["id"] = event_id
+                r["ingest_timestamp"] = self.time_calc.calculate_ingest_timestamp()
+
+                payload = json.dumps(r, separators=(",", ":"))
+
+                retries = 0
+                while True:
+                    try:
+                        self.producer.produce(
+                            topic=topic,
+                            key=event_id,
+                            value=payload,
+                            callback=self.delivery_report,
+                        )
+                        break
+                    
+                    except BufferError:
+                        BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
+                        retries += 1
+                        if retries > 100:
+                            raise RuntimeError("Kafka producer stuck")
+                        # backpressure from Kafka (avoid: BufferError: Local: Queue full)
+                        self.producer.poll(0.1)
+                        await asyncio.sleep(0.01)  # yield to event loop, prevents CPU spinning
+
+            # trigger delivery callbacks
+            self.producer.poll(0)
+            latency = (time.time() - start) * 1000
+            BATCH_LATENCY.record(latency)
+            span.set_attribute("batch_latency_ms", latency)
+            
     # ----------------------------
     # Lifecycle
     # ----------------------------
