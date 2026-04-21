@@ -1,0 +1,50 @@
+logLevel: info
+
+pipeline:
+  type: "block"
+  mode: "realtime"
+
+chain:
+  uid: "evm:56"
+  type: "evm"
+  name: bsc
+  network: "mainnet"
+
+entities:
+  - "block"
+  - "transaction"
+
+erpc:
+  project_id: main
+  base_url: http://localhost:30040 # endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
+  timeout_sec: 10
+  max_retries: 1
+  inflight:
+    min_inflight: 5
+    max_inflight: 10
+    initial_inflight: 5
+    latency_target_ms: 1000
+
+tracker:
+  # polling interval is based on the specific Chain
+  poll_interval: 0.4
+
+engine:
+  # concurrency for parallel processing and sink
+  # Rule: Engine ≥ RPC inflight
+  # set to 1 for sequntial processing
+  concurrency: 10
+
+kafka:
+  profile: local   # local | k8s | aiven | msk | confluent
+  common:
+    bootstrap_servers: "localhost:30092"
+    topic_template: "{type}.{chain}.{network}.{kind}_{entity}"
+  producer:
+    linger_ms: 10
+    batch_size: 65536
+  streaming:
+    batch_size: 100          # micro-batch size
+    flush_interval_ms: 20    # max wait time
+    queue_maxsize: 100       # backpressure control
+

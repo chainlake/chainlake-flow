@@ -42,8 +42,5 @@ COPY --from=builder /opt/venv /opt/venv
 
 # copy application code last (max cache efficiency)
 COPY rpcstream /app/rpcstream
-COPY scripts/ /app/scripts/
 
-WORKDIR /app/scripts
-
-CMD ["python", "block_pipeline_realtime.py"]
+CMD ["rpcstream"]

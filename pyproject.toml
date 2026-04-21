@@ -18,22 +18,19 @@ dependencies = [
   "orjson>=3.10.0",
   "uvloop>=0.19.0",
   "tenacity>=9.0.0",
-  "prometheus-client>=0.20.0",
   "structlog>=24.4.0",
-  "redis>=5.0.7",
   "pyyaml>=6.0.2",
   "opentelemetry-api>=1.17.0",
   "opentelemetry-sdk>=1.17.0",
   "opentelemetry-exporter-otlp>=1.17.0",
-  "opentelemetry-instrumentation>=0.62b0",
-  "grpcio>=1.80.0",
-  "grpcio-tools>=1.80.0",
-  "protobuf>=6.33.6",
-  "confluent-kafka[protobuf]>=2.14.0",
+  "confluent-kafka>=2.14.0",
   "python-dotenv>=1.2.2",
   "pipreqs>=0.5.0",
   "pip-check-reqs>=2.5.6",
   "objgraph>=3.6.2",
+  "authlib>=1.7.0",
+  "httpx>=0.28.1",
+  "cachetools>=7.0.6",
 ]
 
 [project.optional-dependencies]
@@ -46,7 +43,7 @@ dev = [
 ]
 
 [project.scripts]
-chainlake = "cmd.cli:app"
+rpcstream = "rpcstream.main:cli"
 
 [build-system]
 requires = ["setuptools>=68"]

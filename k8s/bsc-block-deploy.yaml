@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: bsc-ingestion-block-test
+  name: bsc-block-transaction
   namespace: ingestion
   labels:
     chain: bsc
@@ -27,15 +27,16 @@ spec:
       terminationGracePeriodSeconds: 1
       containers:
         - name: ingestion-pipeline
-          image: ghcr.io/chainlake/rpcstream:v0.1.8
+          image: rpcstream:dev
           imagePullPolicy: IfNotPresent
-          command: ["python", "block_pipeline_realtime.py"]
 
           # -----------------------------
           # Ingest runtime variables
           # -----------------------------
           env:
-                         
+            - name: PIPELINE_CONFIG
+              value: /config/pipeline.yaml
+
             - name: POD_UID
               valueFrom:
                 fieldRef:
@@ -45,18 +46,20 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-          # -----------------------------
-          # Metrics endpoint
-          # -----------------------------
 
-          # -----------------------------
-          # (Optional but recommended)
-          # Resource limits
-          # -----------------------------
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+
           resources:
             requests:
-              cpu: "200m"
+              cpu: "100m"
               memory: "64Mi"
             limits:
-              cpu: "400m"
+              cpu: "200m"
               memory: "128Mi"
+
+      volumes:
+        - name: config-volume
+          configMap:
+            name: bsc-block-config

@@ -27,7 +27,7 @@ spec:
       terminationGracePeriodSeconds: 1
       containers:
         - name: ingestion-pipeline
-          image: ghcr.io/chainlake/rpcstream:v0.1.6
+          image: ghcr.io/chainlake/rpcstream:v0.1.9
           imagePullPolicy: IfNotPresent
           command: ["python", "block_pipeline_realtime.py"]
 
@@ -55,8 +55,8 @@ spec:
           # -----------------------------
           resources:
             requests:
-              cpu: "200m"
+              cpu: "100m"
               memory: "64Mi"
             limits:
-              cpu: "400m"
+              cpu: "200m"
               memory: "128Mi"
