@@ -12,6 +12,7 @@ from rpcstream.ingestion.fetcher import EvmRpcFetcher
 from rpcstream.sinks.kafka.producer import KafkaWriter
 
 from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
+from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
 from rpcstream.adapters.evm.processor import PROCESSOR_REGISTRY
 
 from rpcstream.planner.block_source import RealtimeBlockSource
@@ -90,8 +91,9 @@ async def main():
         kafka_write = KafkaWriter(
             producer=producer,
             id_calculator=EventIdCalculator(),
+            time_calculator=EventTimeCalculator(),
             logger=logger,
-            stream_config=runtime.kafka.streaming,
+            config=runtime.kafka.streaming,
         )
 
         # -------------------------

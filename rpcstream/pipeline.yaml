@@ -1,4 +1,4 @@
-logLevel: debug
+logLevel: info
 
 pipeline:
   name: "bsc_mainet_ingestion"
@@ -47,7 +47,7 @@ kafka:
     linger_ms: 10
     batch_size: 65536
   streaming:
-    batch_size: 100          # micro-batch size
-    flush_interval_ms: 20    # max wait time
+    batch_size: 10           # micro-batch size
+    flush_interval_ms: 50    # max wait time
     queue_maxsize: 100       # backpressure control
 

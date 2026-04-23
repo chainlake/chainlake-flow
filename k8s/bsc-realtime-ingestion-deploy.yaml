@@ -26,8 +26,8 @@ spec:
       restartPolicy: Always
       terminationGracePeriodSeconds: 1
       containers:
-        - name: ingestion-pipeline
-          image: ghcr.io/chainlake/rpcstream:v0.2.1
+        - name: rpcstream-dev
+          image: rpcstream:dev
           imagePullPolicy: IfNotPresent
 
           # -----------------------------

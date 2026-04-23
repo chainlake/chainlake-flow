@@ -132,24 +132,26 @@ class IngestionEngine:
                         BLOCK_LATENCY.record(latency, {"entity": entity})
                         QUEUE_WAIT.record(queue_wait, {"entity": entity})
                         
+                        # 4. SINK
+                        topic = self.topics.get(entity)
+                        rows = processed_data[entity]
+                        
+                        ROW_COUNTER.add(len(rows), {"entity": entity})
                         self.logger.info(
                             "engine.processed",
                             component="engine",
                             block=block_number,
                             entity=entity,
                             latency_ms=latency,
+                            payload=len(rows),
                             ingestion_lag=ingestion_lag,
                             chain_lag=chain_lag,
-                            
-                        )
-                        # 4. SINK
-                        topic = self.topics.get(entity)
-                        rows = processed_data[entity]
-                        ROW_COUNTER.add(len(rows), {"entity": entity})
-                        
+                        )                        
+
                         if not topic:
                             continue
-                        await self.sink.send(topic, rows)                   
+                        await self.sink.send(topic, rows)
+                        
                         
                     except Exception as e:
                         await self._send_dlq(entity, block_number, repr(e), "processor")
