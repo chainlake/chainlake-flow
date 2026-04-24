@@ -2,6 +2,7 @@ import uuid
 import aiohttp
 import orjson
 from rpcstream.client.base import BaseClient
+from rpcstream.client.models import RpcResponseError
 
 
 class JsonRpcClient(BaseClient):
@@ -70,19 +71,26 @@ class JsonRpcClient(BaseClient):
             data = orjson.loads(raw)
 
         if "error" in data:
+            exc = RpcResponseError.from_payload(
+                method=request.method,
+                error=data["error"],
+                request_meta=getattr(request, "meta", None),
+            )
+
             if span is not None:
                 span.set_attribute("rpc.status", "error")
-                span.set_attribute("rpc.error", str(data["error"]))
+                span.set_attribute("rpc.error", str(exc))
             
             if self.logger:
-                self.logger.error(
+                log_method = self.logger.warn if exc.is_expected_warning() else self.logger.error
+                log_method(
                     "client.rpc_response_error",
                     component="client",
                     method=request.method,
-                    error=str(data["error"])
+                    **exc.log_fields(),
                 )
             
-            raise RuntimeError(data["error"])
+            raise exc
 
         if self.logger:
             self.logger.debug(

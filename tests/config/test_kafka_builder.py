@@ -59,4 +59,4 @@ def test_build_topic_maps_only_includes_main_and_dlq_topics():
     topic_maps = build_topic_maps(cfg)
 
     assert topic_maps.main["block"] == "evm.bsc.mainnet.raw_block"
-    assert topic_maps.dlq["trace"] == "evm.bsc.mainnet.dlq_trace"
+    assert topic_maps.dlq == "dlq.ingestion"

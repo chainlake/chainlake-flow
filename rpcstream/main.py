@@ -14,11 +14,10 @@ from rpcstream.sinks.kafka.producer import KafkaWriter
 
 from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
 from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
-from rpcstream.adapters.evm.schema import EVM_ENTITY_SCHEMAS
 from rpcstream.adapters.evm.processor import PROCESSOR_REGISTRY
-from rpcstream.sinks.kafka.protobuf import DLQ_SCHEMA
+from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 
-from rpcstream.planner.block_source import RealtimeBlockSource
+from rpcstream.planner.block_source import build_block_source
 from rpcstream.runtime.block_tracker import BlockHeadTracker
 
 from rpcstream.utils.logger import JsonLogger
@@ -54,13 +53,13 @@ async def main():
         # -------------------------
         # TRACKER
         # -------------------------
-        tracker = BlockHeadTracker(
-            client=client,
-            poll_interval=runtime.tracker.poll_interval,
-            logger=logger,
-        )
-        
-        await tracker.start()
+        if runtime.pipeline.mode == "realtime":
+            tracker = BlockHeadTracker(
+                client=client,
+                poll_interval=runtime.tracker.poll_interval,
+                logger=logger,
+            )
+            await tracker.start()
         
         # -------------------------
         # SCHEDULER
@@ -104,17 +103,7 @@ async def main():
             topic_maps=topic_maps,
             protobuf_enabled=runtime.kafka.protobuf_enabled,
             schema_registry_url=runtime.kafka.schema_registry_url,
-            protobuf_topic_schemas={
-                **{
-                    topic_maps.main[entity]: EVM_ENTITY_SCHEMAS[entity]
-                    for entity in runtime.entities
-                    if entity in EVM_ENTITY_SCHEMAS
-                },
-                **{
-                    topic: DLQ_SCHEMA
-                    for topic in topic_maps.dlq.values()
-                },
-            },
+            protobuf_topic_schemas=build_protobuf_topic_schemas(topic_maps, runtime.entities),
             observability=observability,
         )
 
@@ -126,7 +115,10 @@ async def main():
             processors=processors,
             sink=kafka_write,
             topics=main_topics,
-            dlq_topics=dlq_topics,
+            dlq_topic=dlq_topics,
+            chain=runtime.chain,
+            pipeline=runtime.pipeline,
+            max_retry=runtime.client.max_retries,
             concurrency=runtime.engine.concurrency,
             logger=logger,
             observability=observability,
@@ -135,7 +127,7 @@ async def main():
         # -------------------------
         # RUN PIPELINE
         # -------------------------
-        block_source = RealtimeBlockSource(tracker, observability=observability)
+        block_source = build_block_source(runtime, tracker, observability=observability)
         
         await engine.run_stream(block_source)
         

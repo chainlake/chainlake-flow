@@ -1,7 +1,7 @@
 # build runtime configs (kafka, rpc)
 import os
 from .schema import PipelineConfig
-from rpcstream.runtime.topic import TopicMaps, build_topics, normalize_entity
+from rpcstream.runtime.topic import TopicMaps, build_topics, build_unified_dlq_topic, normalize_entity
 
 def build_kafka_config(cfg: PipelineConfig) -> dict:
     kafka = cfg.kafka
@@ -73,18 +73,16 @@ def build_topic_maps(cfg) -> TopicMaps:
     """
 
     topics = {}
-    dlq_topics = {}
 
     for entity in cfg.entities:
         normalized = normalize_entity(entity)
         topic_set = build_topics(cfg, normalized)
 
         topics[normalized] = topic_set.main
-        dlq_topics[normalized] = topic_set.dlq
 
     return TopicMaps(
         main=topics,
-        dlq=dlq_topics,
+        dlq=build_unified_dlq_topic(cfg),
     )
 
 

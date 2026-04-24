@@ -3,6 +3,7 @@ logLevel: info
 pipeline:
   name: "bsc_mainnet_ingestion"
   mode: "realtime"
+  start_block: 94385700
 
 chain:
   uid: "evm:56"
@@ -12,10 +13,10 @@ chain:
 
 # trace is currently not supported
 entities:
-  - "receipt"
-  - "log"
+  # - "receipt"
+  # - "log"
   - "block"
-  - "transaction"
+  # - "transaction"
 
 erpc:
   project_id: main

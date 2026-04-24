@@ -8,12 +8,24 @@ from rpcstream.adapters.evm.schema import EntitySchema, FieldSchema
 
 DLQ_SCHEMA = EntitySchema(
     entity="dlq",
-    message_name="DlqRecord",
+    message_name="UnifiedDlqRecord",
     fields=(
-        FieldSchema("block", "int64"),
+        FieldSchema("chain", "string"),
+        FieldSchema("network", "string"),
+        FieldSchema("pipeline", "string"),
         FieldSchema("entity", "string"),
+        FieldSchema("block_number", "int64"),
         FieldSchema("stage", "string"),
-        FieldSchema("error", "string"),
+        FieldSchema("error_type", "string"),
+        FieldSchema("error_message", "string"),
+        FieldSchema("payload", "string"),
+        FieldSchema("context", "string"),
+        FieldSchema("retry_count", "int64"),
+        FieldSchema("max_retry", "int64"),
+        FieldSchema("status", "string"),
+        FieldSchema("first_seen_at", "int64"),
+        FieldSchema("last_attempt_at", "int64"),
+        FieldSchema("next_retry_at", "int64"),
         FieldSchema("id", "string"),
         FieldSchema("ingest_timestamp", "int64"),
     ),
@@ -33,17 +45,28 @@ class ProtobufSerializerRegistry:
         schema_registry_url: str,
         producer_config: dict,
         topic_schemas: dict[str, EntitySchema],
+        auto_register_schemas: bool = True,
         logger=None,
     ):
         self.schema_registry_url = schema_registry_url
         self.producer_config = producer_config
         self.topic_schemas = topic_schemas
+        self.auto_register_schemas = auto_register_schemas
         self.logger = logger
         self._serializers = {}
+        self._started = False
+
+    def prepare(self) -> None:
+        for topic, schema in self.topic_schemas.items():
+            if topic in self._serializers:
+                continue
+            self._serializers[topic] = self._build_serializer(topic, schema)
 
     def start(self) -> None:
+        if self._started:
+            return
+        self.prepare()
         for topic, schema in self.topic_schemas.items():
-            self._serializers[topic] = self._build_serializer(topic, schema)
             self._serializers[topic]["serializer"](
                 self._serializers[topic]["message_class"](),
                 self._serialization_context(topic),
@@ -56,11 +79,16 @@ class ProtobufSerializerRegistry:
                     message_name=schema.message_name,
                     schema_registry=self.schema_registry_url,
                 )
+        self._started = True
 
     def serialize(self, topic: str, row: dict) -> bytes:
         entry = self._serializers.get(topic)
         if entry is None:
-            raise KeyError(f"missing protobuf serializer for topic {topic}")
+            schema = self.topic_schemas.get(topic)
+            if schema is None:
+                raise KeyError(f"missing protobuf serializer for topic {topic}")
+            entry = self._build_serializer(topic, schema)
+            self._serializers[topic] = entry
 
         message = entry["message_class"]()
         self._populate_message(message, entry["schema"], row)
@@ -74,7 +102,7 @@ class ProtobufSerializerRegistry:
         serializer = ProtobufSerializer(
             message_class,
             client,
-            conf={"auto.register.schemas": True},
+            conf={"auto.register.schemas": self.auto_register_schemas},
         )
         return {
             "schema": schema,

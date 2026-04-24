@@ -2,7 +2,13 @@ import asyncio
 import time
 
 from rpcstream.client.base import BaseClient
-from rpcstream.client.models import RpcTaskMeta, RpcErrorResult
+from rpcstream.client.models import (
+    RpcTaskMeta,
+    RpcErrorResult,
+    exception_log_fields,
+    is_expected_rpc_warning,
+    summarize_exception,
+)
 from rpcstream.adapters.base import BaseRpcRequest  # Generic RPC request
 from rpcstream.scheduler.base import BaseScheduler
 from rpcstream.runtime.observability.context import ObservabilityContext
@@ -107,23 +113,30 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 self._update_latency(latency)
                 self._adjust_window(False)
 
-                error_msg = repr(exc)
+                error_msg = summarize_exception(exc)
+                error_fields = exception_log_fields(exc)
 
                 span.set_attribute("scheduler.status", "error")
                 span.set_attribute("scheduler.exception", error_msg)
                 span.set_attribute("scheduler.latency_ms", round(latency, 2))
 
                 if self.logger:
-                    self.logger.error(
+                    log_method = self.logger.warn if is_expected_rpc_warning(exc) else self.logger.error
+                    log_method(
                         "scheduler.request_failed",
                         component="scheduler",
                         method=request.operation_name(),
-                        error=error_msg,
                         inflight=self.inflight,
                         window=self.current_limit,
+                        **error_fields,
                     )
 
-                return RpcErrorResult(error_msg, meta)
+                return RpcErrorResult(
+                    error=error_msg,
+                    meta=meta,
+                    details=error_fields,
+                    expected=is_expected_rpc_warning(exc),
+                )
 
             finally:
                 self._release_slot()

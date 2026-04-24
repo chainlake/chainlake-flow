@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional
 from rpcstream.runtime.observability.config import ObservabilityConfig
 
@@ -73,6 +73,39 @@ class ErpcConfig(BaseModel):
 class PipelineConfigModel(BaseModel):
     name: str
     mode: str
+    start_block: str | int | None = None
+    end_block: str | int | None = None
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self):
+        mode = (self.mode or "").strip().lower()
+        self.mode = mode
+
+        if mode not in {"realtime", "backfill"}:
+            raise ValueError("pipeline.mode must be either 'realtime' or 'backfill'")
+
+        if self.start_block is None:
+            raise ValueError("pipeline.start_block is required")
+
+        if mode == "realtime":
+            if self.end_block is not None:
+                raise ValueError("pipeline.end_block is not allowed in realtime mode")
+            if isinstance(self.start_block, str):
+                start_value = self.start_block.strip().lower()
+                if start_value != "latest":
+                    _parse_block_number(start_value, "pipeline.start_block")
+                self.start_block = start_value
+            else:
+                _parse_block_number(self.start_block, "pipeline.start_block")
+            return self
+
+        start_block = _parse_block_number(self.start_block, "pipeline.start_block")
+        end_block = _parse_block_number(self.end_block, "pipeline.end_block")
+        if start_block > end_block:
+            raise ValueError("pipeline.start_block must be <= pipeline.end_block in backfill mode")
+        self.start_block = start_block
+        self.end_block = end_block
+        return self
 
 class TrackerConfig(BaseModel):
     poll_interval: float
@@ -96,3 +129,22 @@ class PipelineConfig(BaseModel):
         default_factory=ObservabilityConfig,
         alias="telemetry",
     )
+
+
+def _parse_block_number(value, field_name: str) -> int:
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"{field_name} must be >= 0")
+        return value
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError(f"{field_name} must not be empty")
+
+    number = int(text)
+    if number < 0:
+        raise ValueError(f"{field_name} must be >= 0")
+    return number

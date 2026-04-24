@@ -1,15 +1,17 @@
 from dataclasses import dataclass
 
+UNIFIED_DLQ_TOPIC = "dlq.ingestion"
+
+
 @dataclass
 class TopicSet:
     main: str
-    dlq: str
 
 
 @dataclass
 class TopicMaps:
     main: dict[str, str]
-    dlq: dict[str, str]
+    dlq: str
 
 
 def normalize_entity(entity: str) -> str:
@@ -34,5 +36,8 @@ def build_topics(cfg, entity: str) -> TopicSet:
 
     return TopicSet(
         main=render("raw"),
-        dlq=render("dlq"),
     )
+
+
+def build_unified_dlq_topic(_cfg) -> str:
+    return UNIFIED_DLQ_TOPIC

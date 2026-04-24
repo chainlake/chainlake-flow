@@ -5,6 +5,7 @@ from opentelemetry.trace import Status, StatusCode
 from contextlib import nullcontext
 
 from rpcstream.metrics.client import ClientMetrics
+from rpcstream.client.models import exception_log_fields, is_expected_rpc_warning, summarize_exception
 from rpcstream.runtime.observability.context import ObservabilityContext
 
 class BaseClient(ABC):
@@ -113,7 +114,7 @@ class BaseClient(ABC):
                                 component="client",
                                 method=method,
                                 attempt=attempt,
-                                error=str(exc),
+                                **exception_log_fields(exc),
                             )
 
                         if attempt >= self.max_retries:
@@ -123,7 +124,7 @@ class BaseClient(ABC):
                         await asyncio.sleep(0.1 * (attempt + 1))
 
             except Exception as exc:
-                error_msg = repr(exc)
+                error_msg = summarize_exception(exc)
                 
                 self.metrics.REQUEST_COUNTER.add(1, {"method": method, "status": "request_error"})
                 if span is not None:
@@ -131,11 +132,12 @@ class BaseClient(ABC):
                     span.set_attribute("rpc.exception", error_msg)
                 
                 if self.logger:
-                    self.logger.error(
+                    log_method = self.logger.warn if is_expected_rpc_warning(exc) else self.logger.error
+                    log_method(
                         "rpc.failed",
                         component="client",
                         method=method,
-                        error=error_msg,
+                        **exception_log_fields(exc),
                     )
                 
                 raise

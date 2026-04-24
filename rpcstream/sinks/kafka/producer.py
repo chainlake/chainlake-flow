@@ -8,7 +8,6 @@ from opentelemetry.trace import Link
 
 from rpcstream.metrics.kafka import KafkaMetrics
 from rpcstream.runtime.observability.context import ObservabilityContext
-from rpcstream.sinks.kafka.admin import KafkaTopicManager
 from rpcstream.sinks.kafka.protobuf import ProtobufSerializerRegistry
 
 class KafkaWriter:
@@ -39,7 +38,6 @@ class KafkaWriter:
         self.queue_maxsize = config.queue_maxsize
         self.topic_maps = topic_maps
         self.protobuf_enabled = protobuf_enabled
-        self.topic_manager = KafkaTopicManager(producer_config=producer_config, logger=logger)
         self.protobuf_registry = None
 
         self.queue = asyncio.Queue(maxsize=self.queue_maxsize)
@@ -56,6 +54,7 @@ class KafkaWriter:
                 schema_registry_url=schema_registry_url,
                 producer_config=producer_config,
                 topic_schemas=protobuf_topic_schemas or {},
+                auto_register_schemas=False,
                 logger=logger,
             )
 
@@ -140,10 +139,10 @@ class KafkaWriter:
                 last_flush = now
             
             # Ensure that the producer is regularly polled to send messages
-            self.producer.poll(0.1) # Poll frequently to send any messages in the buffer
+            self.producer.poll(0) # Poll frequently to send any messages in the buffer
 
             # Avoid busy waiting and CPU spinning
-            await asyncio.sleep(self.flush_interval / 5)
+            await asyncio.sleep(0)
 
     # ----------------------------
     # Flush batch
@@ -190,19 +189,21 @@ class KafkaWriter:
             
             for topic, r, _ in items:
                 self.metrics.MESSAGE_COUNTER.add(1, {"topic": topic})
-                event_id = self.id_calc.calculate_event_id(r)
+                partition_key = r.pop("kafka_partition_key", None)
+                event_id = r.get("id") or self.id_calc.calculate_event_id(r)
                 
                 # fallback for DLQ / unknown schema
                 if not event_id:
-                    event_id = f"dlq-{r.get('block')}-{time.time_ns()}"
+                    event_id = f"dlq-{r.get('block_number') or r.get('block')}-{time.time_ns()}"
 
                 r["id"] = event_id
                 r["ingest_timestamp"] = self.time_calc.calculate_ingest_timestamp()
+                kafka_key = partition_key or event_id
 
                 self.logger.debug(
                     "kafka.produce_attempt",
                     topic=topic,
-                    key=event_id,
+                    key=kafka_key,
                 )
 
                 payload = self._serialize(topic, r)
@@ -212,7 +213,7 @@ class KafkaWriter:
                     try:
                         self.producer.produce(
                             topic=topic,
-                            key=event_id,
+                            key=kafka_key,
                             value=payload,
                             callback=self.delivery_report,
                         )
@@ -237,9 +238,25 @@ class KafkaWriter:
     # Lifecycle
     # ----------------------------
     async def start(self):
-        self.topic_manager.ensure_topics(self._all_topics())
         if self.protobuf_registry is not None:
-            self.protobuf_registry.start()
+            warmup_started = time.time()
+            if self.logger:
+                self.logger.info(
+                    "kafka.protobuf_warmup_started",
+                    component="sink",
+                    schema_registry=self.protobuf_registry.schema_registry_url,
+                    topic_count=len(self.protobuf_registry.topic_schemas),
+                )
+            await asyncio.to_thread(self.protobuf_registry.start)
+            if self.logger:
+                self.logger.info(
+                    "kafka.protobuf_warmup_complete",
+                    component="sink",
+                    schema_registry=self.protobuf_registry.schema_registry_url,
+                    topic_count=len(self.protobuf_registry.topic_schemas),
+                    elapsed_ms=round((time.time() - warmup_started) * 1000, 2),
+                )
+
         self._running = True
         self._worker_task = asyncio.create_task(self._worker())
 
@@ -251,12 +268,6 @@ class KafkaWriter:
 
         # FORCE FINAL FLUSH
         self.producer.flush()
-
-    def _all_topics(self):
-        topics = []
-        topics.extend(self.topic_maps.main.values())
-        topics.extend(self.topic_maps.dlq.values())
-        return topics
 
     def _serialize(self, topic, row):
         if self.protobuf_registry is not None:

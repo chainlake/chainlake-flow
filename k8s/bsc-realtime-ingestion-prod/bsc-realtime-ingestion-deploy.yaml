@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bsc-realtime-ingestion
+  namespace: ingestion
+  labels:
+    chain: bsc
+    pipeline: bsc_mainnet_ingestion
+    environment: prod
+  annotations:
+    reloader.stakater.com/auto: "true"
+    
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      chain: bsc
+      pipeline: bsc_mainnet_ingestion
+      environment: prod
+  template:
+    metadata:
+      labels:
+        chain: bsc
+        pipeline: bsc_mainnet_ingestion
+        environment: prod
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: rpcstream-dev
+          image: rpcstream:dev
+          imagePullPolicy: IfNotPresent
+
+          # -----------------------------
+          # Ingest runtime variables
+          # -----------------------------
+          env:
+            - name: PIPELINE_CONFIG
+              value: /config/pipeline.yaml
+
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            # Use Secret for Kafka credentials
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFKA_USERNAME
+
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFKA_PASSWORD
+
+            - name: KAFKA_CA_PATH
+              value: /etc/ssl/certs/ca.pem  # Set the path to where the CA file will be mounted
+
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFKA_BOOTSTRAP_SERVERS
+
+            - name: KAFAK_SCHEMA_REGISTRY
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFAK_SCHEMA_REGISTRY
+
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            - name: kafka-ca-volume
+              mountPath: /etc/ssl/certs  # Mount the secret to this directory
+
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "400m"
+              memory: "256Mi"
+
+      volumes:
+        - name: config-volume
+          configMap:
+            name: bsc-realtime-ingestion
+
+        - name: kafka-ca-volume
+          secret:
+            secretName: kafka-ca-secret  # Reference the secret

@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rpcstream-dlq-retry
+  namespace: ingestion
+  labels:
+    app: rpcstream-dlq-retry
+    chain: bsc
+    pipeline: bsc_mainnet_ingestion
+  annotations:
+    reloader.stakater.com/auto: "true"
+
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: rpcstream-dlq-retry
+      chain: bsc
+      pipeline: bsc_mainnet_ingestion
+  template:
+    metadata:
+      labels:
+        app: rpcstream-dlq-retry
+        chain: bsc
+        pipeline: bsc_mainnet_ingestion
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: rpcstream-dlq-retry
+          image: rpcstream:dev
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "rpcstream.dlq_retry"]
+          env:
+            - name: PIPELINE_CONFIG
+              value: /config/pipeline.yaml
+
+            - name: DLQ_RETRY_GROUP_ID
+              value: rpcstream-dlq-retry
+
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+            - name: KAFKA_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFKA_USERNAME
+
+            - name: KAFKA_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFKA_PASSWORD
+
+            - name: KAFKA_CA_PATH
+              value: /etc/ssl/certs/ca.pem
+
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFKA_BOOTSTRAP_SERVERS
+
+            - name: KAFAK_SCHEMA_REGISTRY
+              valueFrom:
+                secretKeyRef:
+                  name: kafka-credentials
+                  key: KAFAK_SCHEMA_REGISTRY
+
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            - name: kafka-ca-volume
+              mountPath: /etc/ssl/certs
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            limits:
+              cpu: "400m"
+              memory: "256Mi"
+
+      volumes:
+        - name: config-volume
+          configMap:
+            name: rpcstream-dlq
+
+        - name: kafka-ca-volume
+          secret:
+            secretName: kafka-ca-secret

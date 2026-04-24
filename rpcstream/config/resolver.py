@@ -43,6 +43,16 @@ class TrackerRuntime:
 class PipelineRuntime:
     name: str
     mode: str
+    start_block: str | int
+    end_block: int | None
+
+@dataclass
+class ChainRuntime:
+    uid: str
+    type: str
+    name: str
+    network: str
+    network_label: str
 
 @dataclass
 class ObservabilityRuntime:
@@ -57,6 +67,7 @@ class RuntimeConfig:
     engine: EngineRuntime
     tracker: TrackerRuntime
     pipeline: PipelineRuntime
+    chain: ChainRuntime
     entities: list[str]
     observability: ObservabilityRuntime
 
@@ -94,6 +105,16 @@ def resolve(cfg) -> RuntimeConfig:
     pipeline = PipelineRuntime(
         name=cfg.pipeline.name,
         mode=cfg.pipeline.mode,
+        start_block=cfg.pipeline.start_block,
+        end_block=cfg.pipeline.end_block,
+    )
+
+    chain = ChainRuntime(
+        uid=cfg.chain.uid,
+        type=cfg.chain.type,
+        name=cfg.chain.name,
+        network=cfg.chain.network,
+        network_label=f"{cfg.chain.name}-{cfg.chain.network}",
     )
 
     topic_map = build_topic_maps(cfg)
@@ -112,6 +133,7 @@ def resolve(cfg) -> RuntimeConfig:
         engine=engine,
         tracker=tracker,
         pipeline=pipeline,
+        chain=chain,
         entities=entities,
         observability=observability,
     )

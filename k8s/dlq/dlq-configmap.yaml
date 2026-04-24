@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rpcstream-dlq
+  namespace: ingestion
+data:
+  pipeline.yaml: |
+    logLevel: info
+
+    pipeline:
+      name: "bsc_mainnet_ingestion"
+      mode: "realtime"
+
+    chain:
+      uid: "evm:56"
+      type: "evm"
+      name: bsc
+      network: "mainnet"
+
+    entities:
+      - "receipt"
+      - "log"
+      - "block"
+      - "transaction"
+
+    erpc:
+      project_id: main
+      base_url: http://erpc-service.erpc.svc:4000
+      timeout_sec: 10
+      max_retries: 3
+      inflight:
+        min_inflight: 1
+        max_inflight: 10
+        initial_inflight: 5
+        latency_target_ms: 1000
+
+    tracker:
+      poll_interval: 0.2
+
+    engine:
+      concurrency: 10
+
+    kafka:
+      connection:
+        bootstrap_servers: "localhost:30092"
+        security_protocol: SASL_SSL
+        sasl_mechanism: PLAIN
+        auth:
+          username_env: KAFKA_USERNAME
+          password_env: KAFKA_PASSWORD
+        ssl:
+          ca_path_env: KAFKA_CA_PATH
+      common:
+        topic_template: "{type}.{chain}.{network}.{kind}_{entity}"
+      producer:
+        linger_ms: 50
+        batch_size: 65536
+        compression_type: zstd
+      streaming:
+        batch_size: 100
+        flush_interval_ms: 50
+        queue_maxsize: 100
+      protobuf:
+        enabled: true
+
+    telemetry:
+      tracing:
+        enabled: true
+        endpoint: "http://otel-collector.observability.svc:4317"
+        sampleRate: 1.0
+
+      metrics:
+        enabled: true
+        endpoint: "http://otel-collector.observability.svc:4317"
+        export_interval_ms: 5000

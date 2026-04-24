@@ -70,9 +70,15 @@ class BackfillBlockSource(BlockSource):
 
 # Realtime implementation
 class RealtimeBlockSource(BlockSource):
-    def __init__(self, tracker, observability: ObservabilityContext | None = None):
+    def __init__(
+        self,
+        tracker,
+        start_block: int | str = "latest",
+        observability: ObservabilityContext | None = None,
+    ):
         self.tracker = tracker
         self.last_emitted = None
+        self.start_block = start_block
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
 
@@ -94,8 +100,17 @@ class RealtimeBlockSource(BlockSource):
             # FIRST BLOCK
             # -------------------------
             if self.last_emitted is None:
-                self.last_emitted = latest
-                return latest
+                if self.start_block == "latest":
+                    self.last_emitted = latest
+                    return latest
+
+                start_block = int(self.start_block)
+                if start_block > latest:
+                    await asyncio.sleep(0.05)
+                    continue
+
+                self.last_emitted = start_block
+                return start_block
 
             # -------------------------
             # NORMAL PROGRESSION
@@ -105,3 +120,18 @@ class RealtimeBlockSource(BlockSource):
                 return self.last_emitted
 
             await asyncio.sleep(0.05) # Prevents CPU Hogging and Infinite Busy Loop
+
+
+def build_block_source(runtime, tracker, observability: ObservabilityContext | None = None) -> BlockSource:
+    if runtime.pipeline.mode == "backfill":
+        return BackfillBlockSource(
+            start=int(runtime.pipeline.start_block),
+            end=int(runtime.pipeline.end_block),
+            observability=observability,
+        )
+
+    return RealtimeBlockSource(
+        tracker,
+        start_block=runtime.pipeline.start_block,
+        observability=observability,
+    )

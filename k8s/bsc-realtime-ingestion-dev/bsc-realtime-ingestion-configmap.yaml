@@ -45,23 +45,26 @@ data:
       concurrency: 10
 
     kafka:
-      profile: local   # local | k8s | aiven | msk | confluent
+      connection:
+        bootstrap_servers: "localhost:30092"
       common:
-        bootstrap_servers: "redpanda.compute.svc:9092"
         topic_template: "{type}.{chain}.{network}.{kind}_{entity}"
       producer:
         linger_ms: 50
-        batch_size: 262144
+        batch_size: 65536
+        compression_type: zstd   # lz4 for realtime ingestion, zstd for backfill；zstd have higher compression rate
       streaming:
-        batch_size: 1000         # micro-batch size
-        flush_interval_ms: 100   # max wait time
-        queue_maxsize: 1000      # backpressure control
+        batch_size: 100          # micro-batch size
+        flush_interval_ms: 50    # max wait time
+        queue_maxsize: 100       # backpressure control
+      protobuf:
+        enabled: true
 
     telemetry:
       tracing:
         enabled: true
         endpoint: "http://otel-collector.observability.svc:4317"
-        sampleRate: 0.5 # Sample 10% of requests, lower sample rate will impact the Linked Span between kafka.batch_send and streaming.run
+        sampleRate: 1.0 # Sample 10% of requests, lower sample rate will impact the Linked Span between kafka.batch_send and streaming.run
 
       metrics:
         enabled: true

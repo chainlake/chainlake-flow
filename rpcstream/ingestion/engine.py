@@ -2,6 +2,12 @@ import json
 import asyncio
 import time
 from rpcstream.client.models import RpcErrorResult
+from rpcstream.ingestion.dlq import (
+    build_resolved_record,
+    build_retry_record,
+    build_unified_dlq_record,
+    compute_next_retry_at,
+)
 
 from opentelemetry.trace import Status, StatusCode
 
@@ -15,7 +21,11 @@ class IngestionEngine:
         processors, 
         sink, 
         topics, 
+        dlq_topic=None,
         dlq_topics=None,
+        chain=None,
+        pipeline=None,
+        max_retry=0,
         concurrency=10, 
         logger=None,
         observability: ObservabilityContext | None = None,
@@ -24,11 +34,21 @@ class IngestionEngine:
         self.processors = processors # e.g. {"block": BlockProcessor(), "transaction": TransactionProcessor(), ...}
         self.sink = sink
         self.topics = topics
-        self.dlq_topics = dlq_topics or {}
+        if dlq_topic is None and dlq_topics is not None:
+            if isinstance(dlq_topics, dict):
+                dlq_topic = next(iter(dlq_topics.values()), None)
+            else:
+                dlq_topic = dlq_topics
+
+        self.dlq_topic = dlq_topic
+        self.chain = chain
+        self.pipeline = pipeline
+        self.max_retry = max_retry
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
         self._latest_processed_block = 0
         self._lag_lock = asyncio.Lock()
+        self._active_dlq_record = None
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
         self.metrics = EngineMetrics(self.observability.get_meter("rpcstream.engine"))
@@ -69,6 +89,7 @@ class IngestionEngine:
     async def _run_one(self, block_number):
         start_total = time.time()
         current_entity = "unknown"
+        success = True
         try:
             # =========================
             # Span for the entire streaming process
@@ -88,6 +109,7 @@ class IngestionEngine:
                     # HANDLE RPC FAILURE
                     if isinstance(raw_data[entity], RpcErrorResult):
                         error_msg = raw_data[entity].error
+                        error_details = raw_data[entity].details.copy()
                         self.metrics.ERROR_COUNTER.add(1, {"stage": "rpc"})
                         
                         if self.logger:
@@ -97,14 +119,27 @@ class IngestionEngine:
                                 entity=entity,
                                 block=block_number,
                                 error=error_msg,
+                                expected=raw_data[entity].expected,
+                                **{
+                                    key: value
+                                    for key, value in error_details.items()
+                                    if key != "block"
+                                },
                             )
-                        for entity in self.dlq_topics.keys():
-                            await self._send_dlq(
-                                entity=entity,
-                                block_number=block_number,
-                                error=error_msg,
-                                stage="rpc"
-                            )
+                        await self._send_dlq(
+                            entity=entity,
+                            block_number=block_number,
+                            stage="rpc",
+                            error_type="RpcError",
+                            error_message=error_msg,
+                            payload=None,
+                            context={
+                                "request": raw_data[entity].meta.extra,
+                                "rpc_error": error_details,
+                                "expected": raw_data[entity].expected,
+                            },
+                        )
+                        success = False
                         return
                     
                     try:
@@ -148,7 +183,19 @@ class IngestionEngine:
                         
                         
                     except Exception as e:
-                        await self._send_dlq(entity, block_number, repr(e), "processor")
+                        await self._send_dlq(
+                            entity=entity,
+                            block_number=block_number,
+                            stage="processor",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
+                            payload=value,
+                            context={
+                                "processor": processor.__class__.__name__,
+                                "meta": meta.extra,
+                            },
+                        )
+                        success = False
                             
         except Exception as e:
             # Handle failure in a new span
@@ -170,24 +217,36 @@ class IngestionEngine:
                     error=error_msg
                 )
             
-            # send to all entities DLQ
-            for entity in self.dlq_topics.keys():
-                await self._send_dlq(
-                    entity=entity,
-                    block_number=block_number,
-                    error=error_msg,
-                    stage="processor",
-                )
+            await self._send_dlq(
+                entity=current_entity,
+                block_number=block_number,
+                stage="processor",
+                error_type=type(e).__name__,
+                error_message=str(e),
+                payload=None,
+                context={},
+            )
+            success = False
             
         finally:
             self.metrics.INFLIGHT.add(-1)
             total_ms = (time.time() - start_total) * 1000
             self.metrics.TOTAL_TIME.record(total_ms, {"entity": current_entity})
+        return success
 
 
 
-    async def _send_dlq(self, entity, block_number, error, stage):
-        topic  = self.dlq_topics.get(entity)
+    async def _send_dlq(
+        self,
+        entity,
+        block_number,
+        stage,
+        error_type,
+        error_message,
+        payload=None,
+        context=None,
+    ):
+        topic = self.dlq_topic
         self.metrics.DLQ_COUNTER.add(1, {"entity": entity, "stage": stage})
         
         if not topic:
@@ -200,24 +259,60 @@ class IngestionEngine:
                 )
             return
 
-        payload = {
-            "block": block_number,
-            "entity": entity,
-            "stage": stage,
-            "error": error,
-        }
+        if self._active_dlq_record is not None:
+            record = build_retry_record(
+                self._active_dlq_record,
+                error_type=error_type,
+                error_message=error_message,
+                payload=payload,
+                context=context,
+            )
+        else:
+            record = build_unified_dlq_record(
+                chain=getattr(self.chain, "type", "unknown"),
+                network=getattr(self.chain, "network_label", "unknown"),
+                pipeline=getattr(self.pipeline, "name", "unknown"),
+                entity=entity,
+                block_number=block_number,
+                stage=stage,
+                error_type=error_type,
+                error_message=error_message,
+                payload=payload,
+                context=context,
+                retry_count=0,
+                max_retry=self.max_retry,
+                status="pending",
+                next_retry_at=compute_next_retry_at(retry_count=1),
+            )
 
-        await self.sink.send(topic, [payload])
+        await self.sink.send(topic, [record])
 
         if self.logger:
             self.logger.warn(
                 "engine.dlq_sent",
                 component="engine",
+                topic=topic,
                 entity=entity,
                 block=block_number,
                 stage=stage,
-                error=error,
+                error_type=error_type,
+                error=error_message,
+                status=record["status"],
+                retry_count=record["retry_count"],
             )
+
+    async def retry_dlq_record(self, record: dict) -> bool:
+        previous = self._active_dlq_record
+        self._active_dlq_record = record
+        try:
+            return await self._run_one(record["block_number"])
+        finally:
+            self._active_dlq_record = previous
+
+    async def mark_dlq_resolved(self, record: dict) -> None:
+        if not self.dlq_topic:
+            return
+        await self.sink.send(self.dlq_topic, [build_resolved_record(record)])
             
             
     async def _update_ingestion_lag(self, block_number, latest_block):
