@@ -365,7 +365,7 @@ class KafkaWriter:
                     transactional_id=self.producer_config.get("transactional.id"),
                     timeout_sec=self.eos_init_timeout_sec,
                 )
-            self.producer.init_transactions(self.eos_init_timeout_sec)
+            await self._init_transactions()
             if self.logger:
                 self.logger.info(
                     "kafka.eos_init_complete",
@@ -375,6 +375,59 @@ class KafkaWriter:
 
         self._running = True
         self._worker_task = asyncio.create_task(self._worker())
+
+    async def _init_transactions(self):
+        """
+        Initialize the transactional producer without blocking the event loop.
+
+        init_transactions() is a blocking broker round-trip and can take a long
+        time on managed clusters while the transaction coordinator is elected or
+        when ACLs are still propagating.
+        """
+        attempts = 3
+        backoff_sec = 1.0
+        last_exc = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                await asyncio.to_thread(
+                    self.producer.init_transactions,
+                    self.eos_init_timeout_sec,
+                )
+                return
+            except Exception as exc:
+                last_exc = exc
+                err_text = str(exc)
+                retryable = any(
+                    token in err_text
+                    for token in ("_TIMED_OUT", "TIMED_OUT", "Timed out waiting")
+                )
+
+                if self.logger:
+                    self.logger.warn(
+                        "kafka.eos_init_failed",
+                        component="sink",
+                        transactional_id=self.producer_config.get("transactional.id"),
+                        attempt=attempt,
+                        attempts=attempts,
+                        retryable=retryable,
+                        error=err_text,
+                    )
+
+                if not retryable or attempt >= attempts:
+                    raise RuntimeError(
+                        "Kafka EOS initialization failed; verify the broker supports "
+                        "transactions and that the service user is authorized for the "
+                        "transactional.id resource"
+                    ) from exc
+
+                await asyncio.sleep(backoff_sec)
+                backoff_sec *= 2
+
+        if last_exc is not None:
+            raise RuntimeError(
+                "Kafka EOS initialization failed after retries"
+            ) from last_exc
 
     async def close(self):
         self._running = False

@@ -4,7 +4,7 @@ pipeline:
   mode: "realtime"
   start_block: "latest"
   checkpoint:
-    enabled: false
+    enabled: true
 
 chain:
   name: "bsc"
@@ -92,8 +92,8 @@ kafka:
   protobuf:
     enabled: true
   eos:
-    enabled: false
-    transactional_id_template: "{pipeline}.{chain_uid}.{mode}.{entities}.{hostname}.{pid}"
+    enabled: true
+    transactional_id_template: "{pipeline}.{chain_uid}.{mode}.{entities}"
     init_timeout_sec: 30
     transaction_timeout_ms: 60000
 

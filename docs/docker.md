@@ -21,6 +21,7 @@ Dockerfile build:
 | Production use | 😐 ok             | 🚀 recommended   |
 
 
+```bash
 # 1. build
 docker build -t rpcstream:dev .
 
@@ -32,6 +33,7 @@ sudo k3s ctr images import rpcstream.tar
 
 # 4. restart pod
 kubectl rollout restart deployment bsc-block-transaction -n ingestion
+```
 
 👉 Two containers:
 
