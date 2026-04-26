@@ -92,7 +92,7 @@ kafka:
   protobuf:
     enabled: true
   eos:
-    enabled: true
+    enabled: false
     transactional_id_template: "{pipeline}.{chain_uid}.{mode}.{entities}"
     init_timeout_sec: 30
     transaction_timeout_ms: 60000

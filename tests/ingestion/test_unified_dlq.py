@@ -35,11 +35,35 @@ def test_build_unified_dlq_record_uses_shared_topic_fields_and_partition_key():
     assert record["pipeline"] == "bsc_mainnet_ingestion"
     assert record["entity"] == "transaction"
     assert record["block_number"] == 90000100
-    assert record["payload"]["hash"] == "0x1"
+    assert record["payload"]["type"] == "dict"
+    assert record["payload"]["size"] == 2
+    assert record["payload"]["preview"]["hash"] == "0x1"
     assert record["context"]["request"]["rpc"] == "block"
     assert record["kafka_partition_key"] == "evm_transaction_90000100"
     assert record["status"] == "pending"
     assert len(record["id"]) == 32
+
+
+def test_build_unified_dlq_record_summarizes_large_payload():
+    record = build_unified_dlq_record(
+        chain="evm",
+        network="bsc-mainnet",
+        pipeline="bsc_mainnet_ingestion",
+        entity="receipt",
+        block_number=90000100,
+        stage="processor",
+        error_type="TimeoutError",
+        error_message="timeout",
+        payload=[
+            {"transactionHash": f"0x{i}", "logs": [{"data": "0x" + ("a" * 2000)}]}
+            for i in range(20)
+        ],
+    )
+
+    assert record["payload"]["type"] == "list"
+    assert record["payload"]["size"] == 20
+    assert len(record["payload"]["preview"]) == 3
+    assert len(record["payload"]["preview"][0]["logs"][0]["data"]) < 520
 
 
 def test_retry_record_uses_exponential_backoff_and_preserves_identity():

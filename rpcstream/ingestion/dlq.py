@@ -11,6 +11,7 @@ FAILED = "failed"
 RESOLVED = "resolved"
 
 RETRYABLE_STATUSES = {PENDING, RETRYING}
+PAYLOAD_PREVIEW_LIMIT = 512
 
 
 def build_unified_dlq_record(
@@ -48,7 +49,7 @@ def build_unified_dlq_record(
         "stage": stage,
         "error_type": error_type,
         "error_message": error_message,
-        "payload": payload if payload is not None else {},
+        "payload": summarize_payload(payload),
         "context": context or {},
         "retry_count": retry_count,
         "max_retry": max_retry,
@@ -221,3 +222,63 @@ def _normalize_optional_int(value: Any) -> int | None:
     if value in (None, 0, "0", ""):
         return None
     return int(value)
+
+
+def summarize_payload(payload: Any) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    if _is_payload_summary(payload):
+        return payload
+
+    summary: dict[str, Any] = {
+        "type": type(payload).__name__,
+    }
+    if hasattr(payload, "__len__"):
+        try:
+            summary["size"] = len(payload)
+        except TypeError:
+            pass
+
+    preview = _payload_preview(payload)
+    if preview:
+        summary["preview"] = preview
+    return summary
+
+
+def _is_payload_summary(payload: Any) -> bool:
+    return (
+        isinstance(payload, dict)
+        and "type" in payload
+        and set(payload).issubset({"type", "size", "preview"})
+    )
+
+
+def _payload_preview(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        return {
+            key: _truncate_preview(value)
+            for key, value in list(payload.items())[:10]
+        }
+    if isinstance(payload, list):
+        return [_truncate_preview(item) for item in payload[:3]]
+    return _truncate_preview(payload)
+
+
+def _truncate_preview(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        text = str(value)
+        if len(text) <= PAYLOAD_PREVIEW_LIMIT:
+            return value
+        return f"{text[:PAYLOAD_PREVIEW_LIMIT]}..."
+    if isinstance(value, dict):
+        return {
+            key: _truncate_preview(item)
+            for key, item in list(value.items())[:10]
+        }
+    if isinstance(value, list):
+        return [_truncate_preview(item) for item in value[:3]]
+
+    text = repr(value)
+    if len(text) > PAYLOAD_PREVIEW_LIMIT:
+        return f"{text[:PAYLOAD_PREVIEW_LIMIT]}..."
+    return text
