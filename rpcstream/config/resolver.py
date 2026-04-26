@@ -17,6 +17,14 @@ class KafkaRuntime:
     streaming: any
     protobuf_enabled: bool
     schema_registry_url: str | None
+
+
+@dataclass
+class CheckpointRuntime:
+    enabled: bool
+    topic: str
+    flush_interval_ms: int
+    commit_batch_size: int
     
 @dataclass
 class ClientRuntime:
@@ -62,6 +70,7 @@ class ObservabilityRuntime:
 class RuntimeConfig:
     kafka: KafkaRuntime
     topic_map: TopicMaps
+    checkpoint: CheckpointRuntime
     client: ClientRuntime
     scheduler: SchedulerRuntime
     engine: EngineRuntime
@@ -118,6 +127,14 @@ def resolve(cfg) -> RuntimeConfig:
     )
 
     topic_map = build_topic_maps(cfg)
+    checkpoint_cfg = _resolve_checkpoint_config(cfg)
+
+    checkpoint = CheckpointRuntime(
+        enabled=checkpoint_cfg.enabled,
+        topic=topic_map.checkpoint,
+        flush_interval_ms=checkpoint_cfg.flush_interval_ms,
+        commit_batch_size=checkpoint_cfg.commit_batch_size,
+    )
     
     entities = cfg.entities
     
@@ -128,6 +145,7 @@ def resolve(cfg) -> RuntimeConfig:
     return RuntimeConfig(
         kafka=kafka,
         topic_map=topic_map,
+        checkpoint=checkpoint,
         client=client,
         scheduler=scheduler,
         engine=engine,
@@ -137,3 +155,11 @@ def resolve(cfg) -> RuntimeConfig:
         entities=entities,
         observability=observability,
     )
+
+
+def _resolve_checkpoint_config(cfg):
+    pipeline_fields = getattr(cfg.pipeline, "model_fields_set", set())
+    root_fields = getattr(cfg, "model_fields_set", set())
+    if "checkpoint" not in pipeline_fields and "checkpoint" in root_fields:
+        return cfg.checkpoint
+    return cfg.pipeline.checkpoint

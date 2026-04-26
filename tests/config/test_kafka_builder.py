@@ -60,3 +60,21 @@ def test_build_topic_maps_only_includes_main_and_dlq_topics():
 
     assert topic_maps.main["block"] == "evm.bsc.mainnet.raw_block"
     assert topic_maps.dlq == "dlq.ingestion"
+    assert topic_maps.checkpoint == "evm.bsc.mainnet.checkpoint_cursor"
+
+
+def test_build_topic_maps_supports_custom_checkpoint_topic():
+    cfg = SimpleNamespace(
+        pipeline=SimpleNamespace(checkpoint=SimpleNamespace(topic="custom.checkpoints")),
+        kafka=SimpleNamespace(
+            common=SimpleNamespace(
+                topic_template="{type}.{chain}.{network}.{kind}_{entity}"
+            )
+        ),
+        chain=SimpleNamespace(type="sui", name="sui", network="mainnet"),
+        entities=["checkpoint"],
+    )
+
+    topic_maps = build_topic_maps(cfg)
+
+    assert topic_maps.checkpoint == "custom.checkpoints"

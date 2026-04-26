@@ -72,7 +72,7 @@ class ProtobufSerializerRegistry:
                 self._serialization_context(topic),
             )
             if self.logger:
-                self.logger.info(
+                self.logger.debug(
                     "kafka.protobuf_schema_ready",
                     component="sink",
                     topic=topic,

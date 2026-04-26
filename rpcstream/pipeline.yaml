@@ -3,12 +3,14 @@ logLevel: info
 pipeline:
   name: "bsc_mainnet_ingestion"
   mode: "realtime"
-  start_block: 94385700
+  start_block: "latest"
+  checkpoint:
+    enabled: false
 
 chain:
   uid: "evm:56"
   type: "evm"
-  name: bsc
+  name: "bsc"
   network: "mainnet"
 
 # trace is currently not supported
@@ -16,7 +18,7 @@ entities:
   # - "receipt"
   # - "log"
   - "block"
-  # - "transaction"
+ # - "transaction"
 
 erpc:
   project_id: main

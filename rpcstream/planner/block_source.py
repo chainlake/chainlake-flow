@@ -122,16 +122,28 @@ class RealtimeBlockSource(BlockSource):
             await asyncio.sleep(0.05) # Prevents CPU Hogging and Infinite Busy Loop
 
 
-def build_block_source(runtime, tracker, observability: ObservabilityContext | None = None) -> BlockSource:
+def build_block_source(
+    runtime,
+    tracker,
+    observability: ObservabilityContext | None = None,
+    resume_cursor: int | None = None,
+) -> BlockSource:
     if runtime.pipeline.mode == "backfill":
+        start = int(runtime.pipeline.start_block)
+        if resume_cursor is not None:
+            start = max(start, resume_cursor + 1)
         return BackfillBlockSource(
-            start=int(runtime.pipeline.start_block),
+            start=start,
             end=int(runtime.pipeline.end_block),
             observability=observability,
         )
 
+    start_block = runtime.pipeline.start_block
+    if resume_cursor is not None:
+        start_block = resume_cursor + 1
+
     return RealtimeBlockSource(
         tracker,
-        start_block=runtime.pipeline.start_block,
+        start_block=start_block,
         observability=observability,
     )

@@ -17,6 +17,7 @@ from rpcstream.runtime.observability.provider import build_observability
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
 from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 from rpcstream.sinks.kafka.producer import KafkaWriter
+from rpcstream.state.checkpoint import CheckpointManager, KafkaCheckpointStore, build_checkpoint_identity
 from rpcstream.utils.logger import JsonLogger
 
 
@@ -29,6 +30,7 @@ class RuntimeStack:
     client: JsonRpcClient
     tracker: BlockHeadTracker | None
     engine: IngestionEngine
+    resume_cursor: int | None = None
 
     async def start(self) -> None:
         await self.observability.start()
@@ -47,6 +49,7 @@ def build_runtime_stack(
     *,
     config_path: str,
     with_tracker: bool,
+    with_checkpoint: bool = False,
 ) -> RuntimeStack:
     config = load_pipeline_config(config_path)
     runtime = resolve(config)
@@ -78,6 +81,25 @@ def build_runtime_stack(
         observability=observability,
     )
     fetcher = EvmRpcFetcher(scheduler, runtime.entities, logger, tracker)
+    checkpoint_manager = None
+    resume_cursor = None
+    if with_checkpoint and runtime.checkpoint.enabled:
+        checkpoint_store = KafkaCheckpointStore(
+            topic=runtime.checkpoint.topic,
+            producer_config=runtime.kafka.config,
+            identity=build_checkpoint_identity(runtime),
+            logger=logger,
+        )
+        checkpoint_record = checkpoint_store.load()
+        if checkpoint_record is not None:
+            resume_cursor = checkpoint_record.cursor
+        checkpoint_manager = CheckpointManager(
+            store=checkpoint_store,
+            initial_cursor=resume_cursor,
+            flush_interval_ms=runtime.checkpoint.flush_interval_ms,
+            commit_batch_size=runtime.checkpoint.commit_batch_size,
+            logger=logger,
+        )
     processors = {
         entity: PROCESSOR_REGISTRY[entity]
         for entity in runtime.entities
@@ -108,6 +130,7 @@ def build_runtime_stack(
         concurrency=runtime.engine.concurrency,
         logger=logger,
         observability=observability,
+        checkpoint_manager=checkpoint_manager,
     )
 
     return RuntimeStack(
@@ -118,4 +141,5 @@ def build_runtime_stack(
         client=client,
         tracker=tracker,
         engine=engine,
+        resume_cursor=resume_cursor,
     )

@@ -1,7 +1,13 @@
 # build runtime configs (kafka, rpc)
 import os
 from .schema import PipelineConfig
-from rpcstream.runtime.topic import TopicMaps, build_topics, build_unified_dlq_topic, normalize_entity
+from rpcstream.runtime.topic import (
+    TopicMaps,
+    build_checkpoint_topic,
+    build_topics,
+    build_unified_dlq_topic,
+    normalize_entity,
+)
 
 def build_kafka_config(cfg: PipelineConfig) -> dict:
     kafka = cfg.kafka
@@ -83,6 +89,7 @@ def build_topic_maps(cfg) -> TopicMaps:
     return TopicMaps(
         main=topics,
         dlq=build_unified_dlq_topic(cfg),
+        checkpoint=build_checkpoint_topic(cfg),
     )
 
 

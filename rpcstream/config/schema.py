@@ -83,11 +83,19 @@ class ErpcConfig(BaseModel):
     inflight: ErpcInflight
     
 
+class CheckpointConfig(BaseModel):
+    enabled: bool = True
+    topic: Optional[str] = None
+    flush_interval_ms: int = 100
+    commit_batch_size: int = 100
+
+
 class PipelineConfigModel(BaseModel):
     name: str
     mode: str
     start_block: str | int | None = None
     end_block: str | int | None = None
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
 
     @model_validator(mode="after")
     def validate_mode_fields(self):
@@ -127,6 +135,7 @@ class TrackerConfig(BaseModel):
 class EngineConfig(BaseModel):
     concurrency: int
 
+
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -137,6 +146,7 @@ class PipelineConfig(BaseModel):
     erpc: ErpcConfig
     tracker: TrackerConfig
     engine: EngineConfig
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     kafka: KafkaConfig
     observability: ObservabilityConfig = Field(
         default_factory=ObservabilityConfig,
