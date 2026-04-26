@@ -1,7 +1,19 @@
 # build runtime configs (kafka, rpc)
 import os
+import socket
+
+from rpcstream.runtime.topic import (
+    TopicMaps,
+    build_checkpoint_topic,
+    build_topics,
+    build_unified_dlq_topic,
+    normalize_entity,
+)
+
 from .schema import PipelineConfig
-from rpcstream.runtime.topic import TopicMaps, build_topics, build_unified_dlq_topic, normalize_entity
+from .naming import build_pipeline_name
+from .profiles.store import get_chain_profile
+
 
 def build_kafka_config(cfg: PipelineConfig) -> dict:
     kafka = cfg.kafka
@@ -52,7 +64,41 @@ def build_kafka_config(cfg: PipelineConfig) -> dict:
         kafka.producer.compression_type,
     )
 
+    if kafka.eos.enabled:
+        result["enable.idempotence"] = True
+        result["acks"] = "all"
+        result["transactional.id"] = build_transactional_id(cfg)
+        result["transaction.timeout.ms"] = kafka.eos.transaction_timeout_ms
+
     return result
+
+
+def build_transactional_id(cfg: PipelineConfig) -> str:
+    template = cfg.kafka.eos.transactional_id_template
+    entities = ",".join(sorted(cfg.entities))
+    chain_uid = getattr(cfg.chain, "uid", None)
+    if not chain_uid:
+        chain_uid = get_chain_profile(cfg.chain.name, cfg.chain.network).chain_uid
+    pipeline_name = getattr(cfg.pipeline, "name", None) or build_pipeline_name(
+        chain_name=cfg.chain.name,
+        network=cfg.chain.network,
+        mode=cfg.pipeline.mode,
+        start_block=cfg.pipeline.start_block,
+        end_block=cfg.pipeline.end_block,
+        checkpoint_enabled=cfg.pipeline.checkpoint.enabled,
+    )
+    return template.format(
+        pipeline=pipeline_name,
+        chain_uid=chain_uid,
+        chain_type=cfg.chain.type,
+        chain_name=cfg.chain.name,
+        network=cfg.chain.network,
+        mode=cfg.pipeline.mode,
+        entities=entities,
+        hostname=os.getenv("HOSTNAME", socket.gethostname()),
+        pid=os.getpid(),
+        pod_uid=os.getenv("POD_UID", ""),
+    )
 
 
 def build_schema_registry_url() -> str | None:
@@ -83,12 +129,14 @@ def build_topic_maps(cfg) -> TopicMaps:
     return TopicMaps(
         main=topics,
         dlq=build_unified_dlq_topic(cfg),
+        checkpoint=build_checkpoint_topic(cfg),
     )
 
 
 def build_erpc_endpoint(cfg) -> str:
-    chain_type = cfg.chain.type
-    chain_id = cfg.chain.uid.split(":")[-1]
+    profile = get_chain_profile(cfg.chain.name, cfg.chain.network)
+    chain_type = profile.chain_type
+    chain_id = profile.chain_uid.split(":")[-1]
 
     return (
         f"{cfg.erpc.base_url}/"

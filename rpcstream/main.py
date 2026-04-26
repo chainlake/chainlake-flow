@@ -1,4 +1,6 @@
 import asyncio
+import signal
+from contextlib import suppress
 from confluent_kafka import Producer
 
 from rpcstream.config.loader import load_pipeline_config
@@ -19,9 +21,45 @@ from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 
 from rpcstream.planner.block_source import build_block_source
 from rpcstream.runtime.block_tracker import BlockHeadTracker
+from rpcstream.state.checkpoint import (
+    CheckpointManager,
+    KafkaCheckpointStore,
+    build_checkpoint_identity,
+)
 
 from rpcstream.utils.logger import JsonLogger
 import os
+
+
+def install_shutdown_handlers(logger) -> asyncio.Event:
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def request_shutdown(signal_name: str) -> None:
+        if shutdown_event.is_set():
+            return
+        if logger:
+            logger.warn(
+                "runtime.shutdown_requested",
+                component="runtime",
+                signal=signal_name,
+            )
+        shutdown_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(
+                sig,
+                lambda _signum, _frame, name=sig.name: loop.call_soon_threadsafe(
+                    request_shutdown,
+                    name,
+                ),
+            )
+        except (ValueError, RuntimeError):
+            with suppress(NotImplementedError, RuntimeError):
+                loop.add_signal_handler(sig, request_shutdown, sig.name)
+
+    return shutdown_event
 
 
 async def main():
@@ -32,6 +70,7 @@ async def main():
     # Resolve config
     runtime = resolve(config)
     logger = JsonLogger(level=config.logLevel)
+    shutdown_event = install_shutdown_handlers(logger)
     topic_maps = runtime.topic_map
     main_topics = topic_maps.main
     dlq_topics = topic_maps.dlq
@@ -40,6 +79,9 @@ async def main():
 
     client = None
     tracker = None
+    checkpoint_manager = None
+    checkpoint_store = None
+    resume_cursor = None
     
     try:
         client = JsonRpcClient(
@@ -79,6 +121,37 @@ async def main():
         fetcher = EvmRpcFetcher(scheduler, runtime.entities, logger, tracker)
 
         # -------------------------
+        # CHECKPOINT
+        # -------------------------
+        if runtime.kafka.eos_enabled and not runtime.checkpoint.enabled:
+            raise ValueError("kafka.eos.enabled requires pipeline.checkpoint.enabled=true")
+
+        if runtime.checkpoint.enabled:
+            checkpoint_store = KafkaCheckpointStore(
+                topic=runtime.checkpoint.topic,
+                producer_config=runtime.kafka.config,
+                identity=build_checkpoint_identity(runtime),
+                logger=logger,
+            )
+            logger.info(
+                "checkpoint.load_started",
+                component="checkpoint",
+                topic=runtime.checkpoint.topic,
+                key=checkpoint_store.identity.key,
+            )
+            checkpoint_record = await asyncio.to_thread(checkpoint_store.load)
+            if checkpoint_record is not None:
+                resume_cursor = checkpoint_record.cursor
+            if not runtime.kafka.eos_enabled:
+                checkpoint_manager = CheckpointManager(
+                    store=checkpoint_store,
+                    initial_cursor=resume_cursor,
+                    flush_interval_ms=runtime.checkpoint.flush_interval_ms,
+                    commit_batch_size=runtime.checkpoint.commit_batch_size,
+                    logger=logger,
+                )
+
+        # -------------------------
         # PROCESSOR
         # -------------------------
         # Load processors dynamically based on the YAML configuration
@@ -105,6 +178,8 @@ async def main():
             schema_registry_url=runtime.kafka.schema_registry_url,
             protobuf_topic_schemas=build_protobuf_topic_schemas(topic_maps, runtime.entities),
             observability=observability,
+            eos_enabled=runtime.kafka.eos_enabled,
+            eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
         )
 
         # -------------------------
@@ -122,14 +197,22 @@ async def main():
             concurrency=runtime.engine.concurrency,
             logger=logger,
             observability=observability,
+            checkpoint_manager=checkpoint_manager,
+            checkpoint_store=checkpoint_store,
+            eos_enabled=runtime.kafka.eos_enabled,
         )
         
         # -------------------------
         # RUN PIPELINE
         # -------------------------
-        block_source = build_block_source(runtime, tracker, observability=observability)
+        block_source = build_block_source(
+            runtime,
+            tracker,
+            observability=observability,
+            resume_cursor=resume_cursor,
+        )
         
-        await engine.run_stream(block_source)
+        await engine.run_stream(block_source, shutdown_event=shutdown_event)
         
     finally:
         if tracker is not None:
@@ -137,9 +220,17 @@ async def main():
         elif client is not None:
             await client.close()
         await observability.shutdown()
+        if shutdown_event.is_set():
+            logger.warn(
+                "runtime.shutdown_complete",
+                component="runtime",
+            )
 
 def cli():
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
     
 if __name__ == "__main__":
-    asyncio.run(main())
+    cli()

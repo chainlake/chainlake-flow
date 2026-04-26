@@ -1,6 +1,8 @@
 import asyncio
 
-from rpcstream.planner.block_source import BackfillBlockSource, RealtimeBlockSource
+from types import SimpleNamespace
+
+from rpcstream.planner.block_source import BackfillBlockSource, RealtimeBlockSource, build_block_source
 
 
 class DummyTracker:
@@ -52,3 +54,27 @@ def test_realtime_block_source_numeric_start_catches_up_then_tails():
         ]
 
     assert asyncio.run(run()) == [103, 104, 105, 106, 107]
+
+
+def test_build_block_source_resumes_backfill_after_checkpoint():
+    runtime = SimpleNamespace(
+        pipeline=SimpleNamespace(mode="backfill", start_block=10, end_block=15)
+    )
+
+    async def run():
+        source = build_block_source(runtime, tracker=None, resume_cursor=12)
+        return [await source.next_block(), await source.next_block()]
+
+    assert asyncio.run(run()) == [13, 14]
+
+
+def test_build_block_source_resumes_realtime_after_checkpoint():
+    runtime = SimpleNamespace(
+        pipeline=SimpleNamespace(mode="realtime", start_block="latest", end_block=None)
+    )
+
+    async def run():
+        source = build_block_source(runtime, DummyTracker([105, 106]), resume_cursor=103)
+        return [await source.next_block(), await source.next_block()]
+
+    assert asyncio.run(run()) == [104, 105]

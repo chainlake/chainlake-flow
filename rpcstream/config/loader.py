@@ -6,7 +6,9 @@ from pathlib import Path
 
 import yaml
 
+from .naming import build_pipeline_name
 from .schema import PipelineConfig
+from .profiles.store import default_chain_profiles_path, resolve_chain_config
 
 
 ENV_LINE_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
@@ -15,8 +17,14 @@ ENV_LINE_RE = re.compile(r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 def load_pipeline_config(path: str) -> PipelineConfig:
     _load_env_file(path)
     with open(path, "r") as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.safe_load(f) or {}
 
+    profiles_path = os.getenv("CHAIN_PROFILES_PATH")
+    if not profiles_path:
+        profiles_path = str(default_chain_profiles_path())
+
+    raw["chain"] = resolve_chain_config(raw.get("chain", {}), profiles_path=profiles_path)
+    raw["pipeline"] = _fill_pipeline_name(raw.get("pipeline", {}), raw["chain"])
     return PipelineConfig(**raw)
 
 
@@ -58,3 +66,24 @@ def _clean_env_value(value: str) -> str:
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
         return cleaned[1:-1]
     return cleaned
+
+
+def _fill_pipeline_name(pipeline_cfg: dict, chain_cfg: dict) -> dict:
+    pipeline = dict(pipeline_cfg or {})
+    name = pipeline.get("name")
+    if name:
+        return pipeline
+
+    pipeline["name"] = build_pipeline_name(
+        chain_name=str(chain_cfg.get("name") or ""),
+        network=str(chain_cfg.get("network") or ""),
+        mode=str(pipeline.get("mode") or ""),
+        start_block=pipeline.get("start_block"),
+        end_block=pipeline.get("end_block"),
+        checkpoint_enabled=(
+            pipeline.get("checkpoint", {}).get("enabled")
+            if isinstance(pipeline.get("checkpoint"), dict)
+            else pipeline.get("checkpoint_enabled", True)
+        ),
+    )
+    return pipeline

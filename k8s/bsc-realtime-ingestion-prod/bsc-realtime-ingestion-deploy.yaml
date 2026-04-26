@@ -5,7 +5,6 @@ metadata:
   namespace: ingestion
   labels:
     chain: bsc
-    pipeline: bsc_mainnet_ingestion
     environment: prod
   annotations:
     reloader.stakater.com/auto: "true"
@@ -17,13 +16,11 @@ spec:
   selector:
     matchLabels:
       chain: bsc
-      pipeline: bsc_mainnet_ingestion
       environment: prod
   template:
     metadata:
       labels:
         chain: bsc
-        pipeline: bsc_mainnet_ingestion
         environment: prod
     spec:
       restartPolicy: Always

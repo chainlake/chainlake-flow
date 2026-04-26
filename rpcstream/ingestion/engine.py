@@ -1,5 +1,6 @@
 import json
 import asyncio
+from contextlib import suppress
 import time
 from rpcstream.client.models import RpcErrorResult
 from rpcstream.ingestion.dlq import (
@@ -29,6 +30,9 @@ class IngestionEngine:
         concurrency=10, 
         logger=None,
         observability: ObservabilityContext | None = None,
+        checkpoint_manager=None,
+        checkpoint_store=None,
+        eos_enabled=False,
     ):
         self.fetcher = fetcher
         self.processors = processors # e.g. {"block": BlockProcessor(), "transaction": TransactionProcessor(), ...}
@@ -44,6 +48,7 @@ class IngestionEngine:
         self.chain = chain
         self.pipeline = pipeline
         self.max_retry = max_retry
+        self.concurrency = concurrency
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
         self._latest_processed_block = 0
@@ -52,44 +57,117 @@ class IngestionEngine:
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
         self.metrics = EngineMetrics(self.observability.get_meter("rpcstream.engine"))
+        self.checkpoint_manager = checkpoint_manager
+        self.checkpoint_store = checkpoint_store
+        self.eos_enabled = eos_enabled
+        self._checkpoint_tasks = set()
 
-    async def run_stream(self, block_source):
+    async def run_stream(self, block_source, shutdown_event: asyncio.Event | None = None):
+        sink_started = False
+        checkpoint_started = False
+        workers = []
         await self.sink.start()
+        sink_started = True
+        if self.checkpoint_manager is not None:
+            await self.checkpoint_manager.start()
+            checkpoint_started = True
 
-        queue = asyncio.Queue(maxsize=1000)
+        worker_count = 1 if self.eos_enabled else self.concurrency
+        queue = asyncio.Queue(maxsize=1 if self.eos_enabled else 1000)
 
         async def producer():
-            while True:
-                block = await block_source.next_block()
-                if block is None:
-                    break
-                await queue.put(block)
-
-            # signal shutdown
-            for _ in range(self.semaphore._value):
-                await queue.put(None)
+            try:
+                while not self._is_shutdown_requested(shutdown_event):
+                    block = await self._next_block_or_shutdown(block_source, shutdown_event)
+                    if block is None:
+                        break
+                    if self.checkpoint_manager is not None:
+                        await self.checkpoint_manager.mark_emitted(block)
+                    await queue.put(block)
+            finally:
+                # Signal workers to drain and stop after queued blocks are processed.
+                for _ in range(worker_count):
+                    await queue.put(None)
 
         async def worker():
             while True:
                 block = await queue.get()
                 if block is None:
                     break
-                await self._run_one(block)
+                success, delivery_futures = await self._run_one(block)
+                if self.checkpoint_manager is not None:
+                    task = asyncio.create_task(
+                        self._finalize_checkpoint(block, success, delivery_futures)
+                    )
+                    self._checkpoint_tasks.add(task)
+                    task.add_done_callback(self._checkpoint_tasks.discard)
 
-        workers = [
-            asyncio.create_task(worker())
-            for _ in range(self.semaphore._value)
-        ]
+        try:
+            workers = [
+                asyncio.create_task(worker())
+                for _ in range(worker_count)
+            ]
 
-        await producer()
-        await asyncio.gather(*workers)
-        await self.sink.close()
+            await producer()
+            if self._is_shutdown_requested(shutdown_event) and self.logger:
+                self.logger.warn(
+                    "engine.shutdown_draining",
+                    component="engine",
+                    queued_blocks=queue.qsize(),
+                    checkpoint_tasks=len(self._checkpoint_tasks),
+                )
+            await asyncio.gather(*workers)
+        except asyncio.CancelledError:
+            if self.logger:
+                self.logger.warn(
+                    "engine.shutdown_cancelled",
+                    component="engine",
+                )
+            for task in workers:
+                task.cancel()
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
+        finally:
+            if sink_started:
+                await self.sink.close()
+            if self._checkpoint_tasks:
+                await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
+            if self.checkpoint_manager is not None and checkpoint_started:
+                status = "eos" if getattr(self.pipeline, "mode", None) == "backfill" else "running"
+                await self.checkpoint_manager.stop(status=status)
+
+    def _is_shutdown_requested(self, shutdown_event: asyncio.Event | None) -> bool:
+        return shutdown_event is not None and shutdown_event.is_set()
+
+    async def _next_block_or_shutdown(self, block_source, shutdown_event: asyncio.Event | None):
+        if shutdown_event is None:
+            return await block_source.next_block()
+
+        next_block_task = asyncio.create_task(block_source.next_block())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        done, pending = await asyncio.wait(
+            {next_block_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if shutdown_task in done:
+            next_block_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await next_block_task
+            return None
+
+        shutdown_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await shutdown_task
+        return await next_block_task
 
 
     async def _run_one(self, block_number):
         start_total = time.time()
         current_entity = "unknown"
         success = True
+        delivery_futures = []
+        transactional_topic_rows = []
         try:
             # =========================
             # Span for the entire streaming process
@@ -140,7 +218,7 @@ class IngestionEngine:
                             },
                         )
                         success = False
-                        return
+                        return False, delivery_futures
                     
                     try:
                         value, meta = raw_data[entity]
@@ -179,7 +257,16 @@ class IngestionEngine:
 
                         if not topic:
                             continue
-                        await self.sink.send(topic, rows)
+                        if self.eos_enabled:
+                            transactional_topic_rows.append((topic, rows))
+                        else:
+                            delivery_future = await self.sink.send(
+                                topic,
+                                rows,
+                                wait_delivery=self.checkpoint_manager is not None,
+                            )
+                            if delivery_future is not None:
+                                delivery_futures.append(delivery_future)
                         
                         
                     except Exception as e:
@@ -232,7 +319,30 @@ class IngestionEngine:
             self.metrics.INFLIGHT.add(-1)
             total_ms = (time.time() - start_total) * 1000
             self.metrics.TOTAL_TIME.record(total_ms, {"entity": current_entity})
-        return success
+
+        if success and self.eos_enabled:
+            checkpoint_key, checkpoint_value = self.checkpoint_store.build_record(
+                block_number,
+                status="running",
+            )
+            await self.sink.send_transaction(
+                transactional_topic_rows,
+                self.checkpoint_store.topic,
+                checkpoint_key,
+                checkpoint_value,
+            )
+        return success, delivery_futures
+
+    async def _finalize_checkpoint(self, block_number, success, delivery_futures):
+        if not success:
+            await self.checkpoint_manager.mark_failed(block_number)
+            return
+        try:
+            if delivery_futures:
+                await asyncio.gather(*delivery_futures)
+            await self.checkpoint_manager.mark_completed(block_number)
+        except Exception as exc:
+            await self.checkpoint_manager.mark_failed(block_number, error=str(exc))
 
 
 
@@ -305,7 +415,8 @@ class IngestionEngine:
         previous = self._active_dlq_record
         self._active_dlq_record = record
         try:
-            return await self._run_one(record["block_number"])
+            success, _delivery_futures = await self._run_one(record["block_number"])
+            return success
         finally:
             self._active_dlq_record = previous
 

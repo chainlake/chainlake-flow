@@ -8,12 +8,9 @@ data:
     logLevel: info
 
     pipeline:
-      name: "bsc_mainnet_ingestion"
       mode: "realtime"
 
     chain:
-      uid: "evm:56"
-      type: "evm"
       name: bsc
       network: "mainnet"
 
@@ -35,7 +32,7 @@ data:
         latency_target_ms: 1000
 
     tracker:
-      # polling interval is based on the specific Chain
+      # ratio of the chain block interval used to poll head updates
       poll_interval: 0.5
 
     engine:

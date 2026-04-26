@@ -40,12 +40,22 @@ class KafkaProtobuf(BaseModel):
     enabled: bool = True
 
 
+class KafkaEos(BaseModel):
+    enabled: bool = False
+    transactional_id_template: str = (
+        "{pipeline}.{chain_uid}.{mode}.{entities}.{hostname}.{pid}"
+    )
+    init_timeout_sec: float = 30.0
+    transaction_timeout_ms: int = 60000
+
+
 class KafkaConfig(BaseModel):
     connection: KafkaConnection
     common: KafkaCommon
     producer: KafkaProducer
     streaming: KafkaStreaming
     protobuf: KafkaProtobuf = Field(default_factory=KafkaProtobuf)
+    eos: KafkaEos = Field(default_factory=KafkaEos)
 
 
 class ChainConfig(BaseModel):
@@ -83,16 +93,30 @@ class ErpcConfig(BaseModel):
     inflight: ErpcInflight
     
 
+class CheckpointConfig(BaseModel):
+    enabled: bool = True
+    topic: Optional[str] = None
+    flush_interval_ms: int = 100
+    commit_batch_size: int = 100
+
+
 class PipelineConfigModel(BaseModel):
-    name: str
+    name: str | None = None
     mode: str
     start_block: str | int | None = None
     end_block: str | int | None = None
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
 
     @model_validator(mode="after")
     def validate_mode_fields(self):
         mode = (self.mode or "").strip().lower()
         self.mode = mode
+
+        if self.name is not None:
+            name = str(self.name).strip()
+            if not name:
+                raise ValueError("pipeline.name must not be empty")
+            self.name = name
 
         if mode not in {"realtime", "backfill"}:
             raise ValueError("pipeline.mode must be either 'realtime' or 'backfill'")
@@ -121,11 +145,18 @@ class PipelineConfigModel(BaseModel):
         return self
 
 class TrackerConfig(BaseModel):
-    poll_interval: float
+    poll_interval: float = 0.5
+
+    @model_validator(mode="after")
+    def validate_poll_interval(self):
+        if self.poll_interval <= 0:
+            raise ValueError("tracker.poll_interval must be > 0")
+        return self
 
 
 class EngineConfig(BaseModel):
     concurrency: int
+
 
 class PipelineConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -135,8 +166,9 @@ class PipelineConfig(BaseModel):
     chain: ChainConfig
     entities: list[str]
     erpc: ErpcConfig
-    tracker: TrackerConfig
+    tracker: TrackerConfig = Field(default_factory=TrackerConfig)
     engine: EngineConfig
+    checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     kafka: KafkaConfig
     observability: ObservabilityConfig = Field(
         default_factory=ObservabilityConfig,

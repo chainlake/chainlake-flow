@@ -59,8 +59,7 @@ class FakeTraceExporter:
         self.shutdown_calls += 1
 
 
-@pytest.mark.asyncio
-async def test_observability_context_exports_with_explicit_async_lifecycle():
+def test_observability_context_exports_with_explicit_async_lifecycle():
     metric_reader = FakeMetricReader()
     metric_exporter = FakeMetricExporter()
     tracer_provider = FakeTracerProvider()
@@ -78,9 +77,12 @@ async def test_observability_context_exports_with_explicit_async_lifecycle():
         metrics_export_interval_ms=10,
     )
 
-    await context.start()
-    await asyncio.sleep(0.03)
-    await context.shutdown()
+    async def run():
+        await context.start()
+        await asyncio.sleep(0.03)
+        await context.shutdown()
+
+    asyncio.run(run())
 
     assert metric_reader.collect_calls >= 1
     assert metric_exporter.exports
@@ -99,7 +101,7 @@ def test_pipeline_telemetry_alias_maps_into_runtime_observability():
     assert runtime.observability.config.metrics.enabled is False
     assert runtime.observability.config.tracing.enabled is False
     assert runtime.observability.config.tracing.sampleRate == 0.1
-    assert runtime.observability.config.metrics.endpoint == "http://otel-collector.observability.svc:4317"
+    assert runtime.observability.config.metrics.endpoint == "http://localhost:4317"
     assert runtime.observability.config.metrics.export_interval_ms == 5000
 
 

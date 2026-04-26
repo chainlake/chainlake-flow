@@ -1,3 +1,5 @@
+import asyncio
+
 from rpcstream.adapters.evm.rpc_requests import build_get_block_by_number
 from rpcstream.adapters.evm.rpc_requests import build_get_block_receipts
 from rpcstream.adapters.evm.rpc_requests import build_debug_trace_block
@@ -21,47 +23,56 @@ class EvmRpcFetcher:
                 block=block_number,
             )
         
-        # Initialize a dictionary to store results for the relevant entities
-        raw_data = {}
-        req_method = {}
-        # Fetch only the entities defined in the pipeline.yaml
+        requests = []
+
         if "block" in self.entities and "transaction" not in self.entities:
-            req = build_get_block_by_number(block_number, False)  # or True depending on the config
-            result = await self.scheduler.submit_request(req)
-            raw_data["block"] = result
-            req_method["block"] = req.method
+            requests.append((
+                ("block",),
+                build_get_block_by_number(block_number, False),
+            ))
 
         if "transaction" in self.entities:
-            req = build_get_block_by_number(block_number, True)
-            result = await self.scheduler.submit_request(req)
-            raw_data["transaction"] = result
-            req_method["transaction"] = req.method
+            entities = ["transaction"]
             if "block" in self.entities:
-                raw_data["block"] = result
-                req_method["block"] = req.method
+                entities.append("block")
+            requests.append((
+                tuple(entities),
+                build_get_block_by_number(block_number, True),
+            ))
 
         if "receipt" in self.entities or "log" in self.entities:
-            req = build_get_block_receipts(block_number)
-            result = await self.scheduler.submit_request(req)
-            raw_data["receipt"] = result
-            req_method["receipt"] = req.method
+            entities = ["receipt"]
             if "log" in self.entities:
-                raw_data["log"] = result  # Logs are parsed from receipts
-                req_method["log"] = req.method
+                entities.append("log")
+            requests.append((
+                tuple(entities),
+                build_get_block_receipts(block_number),
+            ))
     
         if "trace" in self.entities:
-            req = build_debug_trace_block(block_number)
-            result = await self.scheduler.submit_request(req)
-            req_method["trace"] = req.method
-            raw_data["trace"] = result
+            requests.append((
+                ("trace",),
+                build_debug_trace_block(block_number),
+            ))
+
+        results = await asyncio.gather(
+            *(self.scheduler.submit_request(req) for _, req in requests)
+        )
+
+        raw_data = {}
+        req_method = {}
+        for (entities, req), result in zip(requests, results):
+            for entity in entities:
+                raw_data[entity] = result
+                req_method[entity] = req.method
 
         # Log after fetch
         if self.logger:
-            for entity, respone in raw_data.items():
+            for entity in raw_data:
                 self.logger.debug(
                     "fetcher.response",
                     component="fetcher",
-                    method = req_method[entity],
+                    method=req_method[entity],
                     block=block_number,
                     entity=entity
                 )

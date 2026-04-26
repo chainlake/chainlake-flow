@@ -1,14 +1,13 @@
 logLevel: info
 
 pipeline:
-  name: "bsc_mainnet_ingestion"
   mode: "realtime"
-  start_block: 94385700
+  start_block: "latest"
+  checkpoint:
+    enabled: true
 
 chain:
-  uid: "evm:56"
-  type: "evm"
-  name: bsc
+  name: "bsc"
   network: "mainnet"
 
 # trace is currently not supported
@@ -30,8 +29,8 @@ erpc:
     latency_target_ms: 1000
 
 tracker:
-  # polling interval is based on the specific Chain
-  poll_interval: 0.4
+  # ratio of the chain block interval used to poll head updates
+  poll_interval: 0.5 # default is 50% of interval_seconds from chain_profiels.yaml
 
 engine:
   # concurrency for parallel processing and sink
@@ -92,6 +91,11 @@ kafka:
     queue_maxsize: 100       # backpressure control
   protobuf:
     enabled: true
+  eos:
+    enabled: true
+    transactional_id_template: "{pipeline}.{chain_uid}.{mode}.{entities}"
+    init_timeout_sec: 30
+    transaction_timeout_ms: 60000
 
 telemetry:
   tracing:

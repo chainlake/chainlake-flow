@@ -12,6 +12,7 @@ class TopicSet:
 class TopicMaps:
     main: dict[str, str]
     dlq: str
+    checkpoint: str
 
 
 def normalize_entity(entity: str) -> str:
@@ -41,3 +42,18 @@ def build_topics(cfg, entity: str) -> TopicSet:
 
 def build_unified_dlq_topic(_cfg) -> str:
     return UNIFIED_DLQ_TOPIC
+
+
+def build_checkpoint_topic(cfg) -> str:
+    checkpoint = getattr(getattr(cfg, "pipeline", None), "checkpoint", None)
+    pipeline_fields = getattr(getattr(cfg, "pipeline", None), "model_fields_set", set())
+    root_fields = getattr(cfg, "model_fields_set", set())
+    if "checkpoint" not in pipeline_fields and "checkpoint" in root_fields:
+        checkpoint = getattr(cfg, "checkpoint", None)
+    if checkpoint is None:
+        checkpoint = getattr(cfg, "checkpoint", None)
+    configured = getattr(checkpoint, "topic", None)
+    if configured:
+        return configured
+
+    return f"{cfg.chain.type}.{cfg.chain.name}.{cfg.chain.network}.checkpoint_cursor"
