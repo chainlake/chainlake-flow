@@ -12,10 +12,10 @@ chain:
 
 # trace is currently not supported
 entities:
-  # - "receipt"
-  # - "log"
-  # - "block"
+  - "block"
   - "transaction"
+  - "receipt"
+  - "log"
 
 erpc:
   project_id: main
@@ -43,8 +43,8 @@ kafka:
   #
   # 1. PLAINTEXT — no auth, no TLS (local dev / internal trusted network)
   #
-  # connection:
-  #   bootstrap_servers: "localhost:9092"
+  connection:
+    bootstrap_servers: "localhost:30092"
   #
   # ───────────────────────────────────────────────────────────────────────────
   # 2. SASL_PLAINTEXT — SASL auth over plaintext (internal network with auth)
@@ -69,22 +69,22 @@ kafka:
   # ───────────────────────────────────────────────────────────────────────────
   # 4. SASL_SSL — SASL auth over TLS (production default, e.g. Confluent Cloud)
   #
-  connection:
-    bootstrap_servers: "localhost:30092"
-    security_protocol: SASL_SSL
-    sasl_mechanism: PLAIN            # or SCRAM-SHA-256 / SCRAM-SHA-512
-    auth:
-      username_env: KAFKA_USERNAME
-      password_env: KAFKA_PASSWORD
-    ssl:
-      ca_path_env: KAFKA_CA_PATH     # omit if broker cert is signed by a public CA
+  # connection:
+  #   bootstrap_servers: "localhost:30092"
+  #   security_protocol: SASL_SSL
+  #   sasl_mechanism: PLAIN            # or SCRAM-SHA-256 / SCRAM-SHA-512
+  #   auth:
+  #     username_env: KAFKA_USERNAME
+  #     password_env: KAFKA_PASSWORD
+  #   ssl:
+  #     ca_path_env: KAFKA_CA_PATH     # omit if broker cert is signed by a public CA
   # ────────────────────────────────────────────────────────────────────────────
   common:
     topic_template: "{type}.{chain}.{network}.{kind}_{entity}"
   producer:
     linger_ms: 50
     batch_size: 65536
-    compression_type: zstd   # lz4 for realtime ingestion, zstd for backfill；zstd have higher compression rate
+    compression_type: lz4    # lz4 for realtime ingestion, zstd for backfill；zstd have higher compression rate
   streaming:
     batch_size: 100          # micro-batch size
     flush_interval_ms: 50    # max wait time
@@ -92,7 +92,7 @@ kafka:
   protobuf:
     enabled: true
   eos:
-    enabled: false
+    enabled: true
     transactional_id_template: "{pipeline}.{chain_uid}.{mode}.{entities}"
     init_timeout_sec: 30
     transaction_timeout_ms: 60000
