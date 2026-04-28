@@ -61,9 +61,17 @@ data:
       tracing:
         enabled: true
         endpoint: "http://otel-collector.observability.svc:4317"
-        sampleRate: 1.0 # Sample 10% of requests, lower sample rate will impact the Linked Span between kafka.batch_send and streaming.run
+        # Probability-based trace sampling: 1.0 exports every new root trace.
+        # This is not "N out of every N blocks" and does not target the first,
+        # last, or any specific block. Child spans follow the parent decision,
+        # preserving linked RPC, processing, and Kafka spans for sampled traces.
+        sampleRate: 1.0
 
       metrics:
         enabled: true
         endpoint: "http://otel-collector.observability.svc:4317"
         export_interval_ms: 5000
+
+      logs:
+        enabled: true
+        endpoint: "http://otel-collector.observability.svc:4317"

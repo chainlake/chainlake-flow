@@ -53,8 +53,11 @@ def build_runtime_stack(
 ) -> RuntimeStack:
     config = load_pipeline_config(config_path)
     runtime = resolve(config)
-    logger = JsonLogger(level=config.logLevel)
     observability = build_observability(runtime.observability.config, runtime.pipeline.name)
+    logger = JsonLogger(
+        level=config.logLevel,
+        logger_provider=observability.get_logger_provider(),
+    )
 
     client = JsonRpcClient(
         base_url=runtime.client.base_url,

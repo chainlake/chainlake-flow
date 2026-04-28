@@ -65,6 +65,9 @@ data:
       tracing:
         enabled: true
         endpoint: "http://otel-collector.observability.svc:4317"
+        # Probability-based trace sampling: 1.0 exports every new root trace.
+        # Child spans follow the parent decision, preserving linked spans for
+        # sampled replay/retry traces.
         sampleRate: 1.0
 
       metrics:

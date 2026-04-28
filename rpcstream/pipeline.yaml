@@ -101,9 +101,18 @@ telemetry:
   tracing:
     enabled: true
     endpoint: "http://localhost:4317" # http://otel-collector.observability.svc:4317
-    sampleRate: 0.01 # Sample 1% of requests
+    # Probability-based trace sampling: 0.1 means each new root trace has a 1%
+    # random chance to be exported. This is not "1 out of every 10 blocks" and
+    # does not guarantee the first, last, or any specific block is sampled.
+    # Child spans follow the parent trace decision, so a sampled block/request
+    # keeps its linked RPC, processing, and Kafka spans together.
+    sampleRate: 0.1
 
   metrics:
     enabled: true
     endpoint: "http://localhost:4317"
     export_interval_ms: 5000
+
+  logs:
+    enabled: true
+    endpoint: "http://localhost:4317"

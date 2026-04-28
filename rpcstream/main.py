@@ -69,12 +69,15 @@ async def main():
 
     # Resolve config
     runtime = resolve(config)
-    logger = JsonLogger(level=config.logLevel)
-    shutdown_event = install_shutdown_handlers(logger)
     topic_maps = runtime.topic_map
     main_topics = topic_maps.main
     dlq_topics = topic_maps.dlq
     observability = build_observability(runtime.observability.config, runtime.pipeline.name)
+    logger = JsonLogger(
+        level=config.logLevel,
+        logger_provider=observability.get_logger_provider(),
+    )
+    shutdown_event = install_shutdown_handlers(logger)
     await observability.start()
 
     client = None

@@ -13,6 +13,12 @@ class MetricsConfig(BaseModel):
     export_interval_ms: int = 5000
 
 
+class LogsConfig(BaseModel):
+    enabled: bool = False
+    endpoint: str | None = None
+
+
 class ObservabilityConfig(BaseModel):
     tracing: TracingConfig = Field(default_factory=TracingConfig)
     metrics: MetricsConfig = Field(default_factory=MetricsConfig)
+    logs: LogsConfig = Field(default_factory=LogsConfig)

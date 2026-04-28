@@ -16,21 +16,27 @@ class ObservabilityContext:
         service_name: str,
         tracing_enabled: bool = False,
         metrics_enabled: bool = False,
+        logs_enabled: bool = False,
         tracer_provider=None,
         meter_provider=None,
+        logger_provider=None,
         metric_reader=None,
         trace_exporter=None,
         metric_exporter=None,
+        log_exporter=None,
         metrics_export_interval_ms: int = 5000,
     ):
         self.service_name = service_name
         self.tracing_enabled = tracing_enabled
         self.metrics_enabled = metrics_enabled
+        self.logs_enabled = logs_enabled
         self._tracer_provider = tracer_provider or NoOpTracerProvider()
         self._meter_provider = meter_provider or NoOpMeterProvider()
+        self._logger_provider = logger_provider
         self._metric_reader = metric_reader
         self._trace_exporter = trace_exporter
         self._metric_exporter = metric_exporter
+        self._log_exporter = log_exporter
         self._metrics_export_interval_ms = metrics_export_interval_ms
         self._metrics_task = None
         self._stop_event = asyncio.Event()
@@ -44,6 +50,9 @@ class ObservabilityContext:
 
     def get_meter(self, name: str):
         return self._meter_provider.get_meter(name)
+
+    def get_logger_provider(self):
+        return self._logger_provider
 
     async def start(self):
         if not self.metrics_enabled or self._metric_reader is None or self._metric_exporter is None:
@@ -99,6 +108,13 @@ class ObservabilityContext:
 
         if self._trace_exporter is not None:
             self._trace_exporter.shutdown(timeout_millis=10000)
+
+        if (
+            self._logger_provider is not None
+            and self.logs_enabled
+            and hasattr(self._logger_provider, "shutdown")
+        ):
+            self._logger_provider.shutdown()
 
         if (
             self._meter_provider is not None

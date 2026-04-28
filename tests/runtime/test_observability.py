@@ -98,11 +98,13 @@ def test_pipeline_telemetry_alias_maps_into_runtime_observability():
     config = load_pipeline_config(str(config_path))
     runtime = resolve(config)
 
-    assert runtime.observability.config.metrics.enabled is False
-    assert runtime.observability.config.tracing.enabled is False
-    assert runtime.observability.config.tracing.sampleRate == 0.1
+    assert runtime.observability.config.metrics.enabled is True
+    assert runtime.observability.config.tracing.enabled is True
+    assert runtime.observability.config.tracing.sampleRate == 0.01
     assert runtime.observability.config.metrics.endpoint == "http://localhost:4317"
     assert runtime.observability.config.metrics.export_interval_ms == 5000
+    assert runtime.observability.config.logs.enabled is True
+    assert runtime.observability.config.logs.endpoint == "http://localhost:4317"
 
 
 def test_build_observability_requires_endpoint_when_enabled():
