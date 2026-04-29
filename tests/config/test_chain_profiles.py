@@ -15,10 +15,7 @@ def test_load_pipeline_config_resolves_chain_profile_fields(tmp_path):
             [
                 "logLevel: info",
                 "pipeline:",
-                "  mode: realtime",
-                "  start_block: latest",
-                "  checkpoint:",
-                "    enabled: true",
+                "  from: checkpoint",
                 "tracker:",
                 "  poll_interval: 0.5",
                 "chain:",
@@ -67,24 +64,22 @@ def test_build_pipeline_name_covers_realtime_and_backfill_variants():
         chain_name="bsc",
         network="mainnet",
         mode="realtime",
-        start_block="latest",
-        checkpoint_enabled=False,
+        from_value="latest",
     ) == "bsc_mainnet_realtime_latest"
 
     assert build_pipeline_name(
         chain_name="bsc",
         network="mainnet",
         mode="realtime",
-        start_block="latest",
-        checkpoint_enabled=True,
+        from_value="checkpoint",
     ) == "bsc_mainnet_realtime_checkpointed_latest"
 
     assert build_pipeline_name(
         chain_name="bsc",
         network="mainnet",
         mode="backfill",
-        start_block=100,
-        end_block=200,
+        from_value=100,
+        to_value=200,
     ) == "bsc_mainnet_backfill_100_200"
 
 
@@ -95,8 +90,7 @@ def test_tracker_poll_interval_scales_with_chain_block_time(tmp_path):
             [
                 "logLevel: info",
                 "pipeline:",
-                "  mode: realtime",
-                "  start_block: latest",
+                "  from: checkpoint",
                 "chain:",
                 "  name: ethereum",
                 "  network: mainnet",
@@ -141,8 +135,7 @@ def test_tracker_poll_interval_defaults_when_section_is_omitted(tmp_path):
             [
                 "logLevel: info",
                 "pipeline:",
-                "  mode: realtime",
-                "  start_block: latest",
+                "  from: checkpoint",
                 "chain:",
                 "  name: bsc",
                 "  network: mainnet",

@@ -48,11 +48,15 @@ class RuntimeStack:
 
 def build_runtime_stack(
     *,
-    config_path: str,
+    config_path: str | None = None,
+    config: object | None = None,
     with_tracker: bool,
     with_checkpoint: bool = False,
 ) -> RuntimeStack:
-    config = load_pipeline_config(config_path)
+    if config is None:
+        if config_path is None:
+            raise ValueError("config_path is required when config is not provided")
+        config = load_pipeline_config(config_path)
     runtime = resolve(config)
     observability = build_observability(runtime.observability.config, runtime.pipeline.name)
     logger = JsonLogger(
@@ -92,9 +96,7 @@ def build_runtime_stack(
     resume_cursor = None
     eos_active = runtime.kafka.eos_enabled
     producer_config = dict(runtime.kafka.config)
-    if with_checkpoint and eos_active and not runtime.checkpoint.enabled:
-        raise ValueError("kafka.eos.enabled requires pipeline.checkpoint.enabled=true")
-    if with_checkpoint and runtime.checkpoint.enabled:
+    if with_checkpoint:
         checkpoint_identity = build_checkpoint_identity(runtime)
         checkpoint_reader = KafkaCheckpointReader(
             topic=runtime.checkpoint.topic,
@@ -130,7 +132,7 @@ def build_runtime_stack(
         eos_enabled=eos_active,
         eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
     )
-    if with_checkpoint and runtime.checkpoint.enabled and not eos_active:
+    if with_checkpoint and not eos_active:
         checkpoint_manager = CheckpointManager(
             sink=kafka_writer,
             topic=runtime.checkpoint.topic,

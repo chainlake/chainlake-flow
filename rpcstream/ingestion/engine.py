@@ -248,7 +248,6 @@ class IngestionEngine:
                                 latency_ms=latency,
                                 payload=emitted_rows,
                                 ingestion_lag=ingestion_lag,
-                                chain_lag=chain_lag,
                             )
                     except Exception as e:
                         await self._send_dlq(
@@ -450,6 +449,13 @@ class IngestionEngine:
         latest_block = None
         chain_lag = None
         ingestion_lag = None
+        pipeline_mode = getattr(self.pipeline, "mode", None)
+
+        if pipeline_mode == "backfill":
+            end_block = getattr(self.pipeline, "end_block", None)
+            if end_block is not None:
+                ingestion_lag = max(int(end_block) - int(block_number), 0)
+            return latest_block, chain_lag, ingestion_lag
 
         tracker = getattr(self.fetcher, "tracker", None)
 

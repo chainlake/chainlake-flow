@@ -8,8 +8,7 @@ data:
     logLevel: info
 
     pipeline:
-      mode: "realtime"
-      start_block: "latest"
+      from: "checkpoint"
 
     chain:
       name: bsc

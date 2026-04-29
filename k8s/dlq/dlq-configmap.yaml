@@ -8,8 +8,7 @@ data:
     logLevel: info
 
     pipeline:
-      mode: "realtime"
-
+      from: "checkpoint"
     chain:
       name: bsc
       network: "mainnet"

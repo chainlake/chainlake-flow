@@ -10,18 +10,16 @@ def test_backfill_mode_requires_start_not_greater_than_end():
         PipelineConfigModel(
             name="demo",
             mode="backfill",
-            start_block="100",
-            end_block="99",
+            **{"from": "100", "to": "99"},
         )
 
 
-def test_realtime_mode_rejects_end_block():
+def test_realtime_mode_rejects_to():
     with pytest.raises(ValidationError):
         PipelineConfigModel(
             name="demo",
             mode="realtime",
-            start_block="latest",
-            end_block="100",
+            **{"from": "latest", "to": "100"},
         )
 
 
@@ -29,37 +27,32 @@ def test_realtime_mode_accepts_latest_or_numeric_start():
     latest = PipelineConfigModel(
         name="demo",
         mode="realtime",
-        start_block="latest",
+        **{"from": "latest"},
     )
     numeric = PipelineConfigModel(
         name="demo",
         mode="realtime",
-        start_block="90000000",
+        **{"from": "90000000"},
+    )
+    checkpoint = PipelineConfigModel(
+        name="demo",
+        mode="realtime",
+        **{"from": "checkpoint"},
     )
 
     assert latest.start_block == "latest"
     assert numeric.start_block == "90000000"
+    assert checkpoint.start_block == "checkpoint"
 
 
-def test_pipeline_checkpoint_defaults_enabled():
+def test_pipeline_checkpoint_defaults_present():
     cfg = PipelineConfigModel(
         name="demo",
         mode="realtime",
-        start_block="latest",
+        **{"from": "checkpoint"},
     )
 
-    assert cfg.checkpoint.enabled is True
-
-
-def test_pipeline_checkpoint_can_be_disabled():
-    cfg = PipelineConfigModel(
-        name="demo",
-        mode="realtime",
-        start_block="latest",
-        checkpoint={"enabled": False},
-    )
-
-    assert cfg.checkpoint.enabled is False
+    assert cfg.checkpoint.flush_interval_ms == 100
 
 
 def test_resolver_prefers_pipeline_checkpoint_over_legacy_root_checkpoint():
@@ -69,14 +62,14 @@ def test_resolver_prefers_pipeline_checkpoint_over_legacy_root_checkpoint():
 
     cfg = Obj(
         model_fields_set={"checkpoint"},
-        checkpoint=Obj(enabled=True),
+        checkpoint=Obj(topic="root-topic"),
         pipeline=Obj(
             model_fields_set={"checkpoint"},
-            checkpoint=Obj(enabled=False),
+            checkpoint=Obj(topic="pipeline-topic"),
         ),
     )
 
-    assert _resolve_checkpoint_config(cfg).enabled is False
+    assert _resolve_checkpoint_config(cfg).topic == "pipeline-topic"
 
 
 def test_resolver_supports_legacy_root_checkpoint_when_pipeline_checkpoint_omitted():
@@ -86,22 +79,21 @@ def test_resolver_supports_legacy_root_checkpoint_when_pipeline_checkpoint_omitt
 
     cfg = Obj(
         model_fields_set={"checkpoint"},
-        checkpoint=Obj(enabled=False),
+        checkpoint=Obj(topic="root-topic"),
         pipeline=Obj(
             model_fields_set=set(),
-            checkpoint=Obj(enabled=True),
+            checkpoint=Obj(topic="pipeline-topic"),
         ),
     )
 
-    assert _resolve_checkpoint_config(cfg).enabled is False
+    assert _resolve_checkpoint_config(cfg).topic == "root-topic"
 
 
 def test_backfill_mode_normalizes_numeric_bounds():
     cfg = PipelineConfigModel(
         name="demo",
         mode="backfill",
-        start_block="90000000",
-        end_block="90000100",
+        **{"from": "90000000", "to": "90000100"},
     )
 
     assert cfg.start_block == 90000000

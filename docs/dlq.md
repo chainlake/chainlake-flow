@@ -130,7 +130,7 @@ Read current DLQ state:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
-  --config rpcstream/pipeline.yaml \
+  --config pipeline.yaml \
   --summary \
   --pretty
 ```
@@ -139,7 +139,7 @@ Read only unresolved trace records:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
-  --config rpcstream/pipeline.yaml \
+  --config pipeline.yaml \
   --entity trace \
   --status pending \
   --summary \
@@ -150,7 +150,7 @@ Run one local replay:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python rpcstream/adapters/evm/jobs/dlq_replay_job.py \
-  --config rpcstream/pipeline.yaml \
+  --config pipeline.yaml \
   --entity trace \
   --status pending \
   --stage processor \
@@ -161,7 +161,7 @@ After replay succeeds, verify the record became `resolved`:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
-  --config rpcstream/pipeline.yaml \
+  --config pipeline.yaml \
   --entity trace \
   --status resolved \
   --summary \

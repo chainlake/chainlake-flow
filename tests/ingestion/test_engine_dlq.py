@@ -89,6 +89,29 @@ def build_success_engine(*, sink, eos_enabled=False):
     )
 
 
+def build_backfill_engine(*, sink):
+    return IngestionEngine(
+        fetcher=DummyFetcher(value=[]),
+        processors={"trace": SuccessfulTraceProcessor()},
+        enricher=EvmEnricher(),
+        sink=sink,
+        topics={"trace": "evm.bsc.mainnet.raw_trace"},
+        dlq_topic="dlq.ingestion",
+        chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
+        pipeline=SimpleNamespace(
+            name="bsc_mainnet_backfill_10_20",
+            mode="backfill",
+            end_block=20,
+        ),
+        max_retry=1,
+        concurrency=1,
+        logger=None,
+        checkpoint_manager=None,
+        checkpoint_reader=None,
+        eos_enabled=False,
+    )
+
+
 def test_engine_sends_trace_dlq_record_when_processor_fails():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=False)
@@ -177,3 +200,14 @@ def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
     assert len(topic_rows) == 1
     assert topic_rows[0][0] == "dlq.ingestion"
     assert topic_rows[0][1][0]["status"] == "resolved"
+
+
+def test_backfill_compute_lag_uses_end_block_as_remaining_work():
+    sink = RecordingSink()
+    engine = build_backfill_engine(sink=sink)
+
+    latest_block, chain_lag, ingestion_lag = asyncio.run(engine._compute_lag(12))
+
+    assert latest_block is None
+    assert chain_lag is None
+    assert ingestion_lag == 8

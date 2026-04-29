@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 from contextlib import suppress
 from confluent_kafka import Producer
@@ -29,7 +30,6 @@ from rpcstream.state.checkpoint import (
 )
 
 from rpcstream.utils.logger import JsonLogger
-import os
 
 
 def install_shutdown_handlers(logger) -> asyncio.Event:
@@ -63,10 +63,10 @@ def install_shutdown_handlers(logger) -> asyncio.Event:
     return shutdown_event
 
 
-async def main():
-    # Load config(typed)   
-    config_path = os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
-    config = load_pipeline_config(config_path)
+async def run_pipeline(*, config_path: str | None = None, config=None):
+    if config is None:
+        config_path = config_path or os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
+        config = load_pipeline_config(config_path)
 
     # Resolve config
     runtime = resolve(config)
@@ -130,31 +130,27 @@ async def main():
         # -------------------------
         # CHECKPOINT
         # -------------------------
-        if runtime.kafka.eos_enabled and not runtime.checkpoint.enabled:
-            raise ValueError("kafka.eos.enabled requires pipeline.checkpoint.enabled=true")
-
-        if runtime.checkpoint.enabled:
-            checkpoint_identity = build_checkpoint_identity(runtime)
-            checkpoint_reader = KafkaCheckpointReader(
-                topic=runtime.checkpoint.topic,
-                producer_config=runtime.kafka.config,
-                identity=checkpoint_identity,
-                schema_registry_url=(
-                    runtime.kafka.schema_registry_url
-                    if runtime.kafka.protobuf_enabled
-                    else None
-                ),
-                logger=logger,
-            )
-            logger.info(
-                "checkpoint.load_started",
-                component="checkpoint",
-                topic=runtime.checkpoint.topic,
-                key=checkpoint_reader.identity.key,
-            )
-            checkpoint_record = await asyncio.to_thread(checkpoint_reader.load)
-            if checkpoint_record is not None:
-                resume_cursor = checkpoint_record.cursor
+        checkpoint_identity = build_checkpoint_identity(runtime)
+        checkpoint_reader = KafkaCheckpointReader(
+            topic=runtime.checkpoint.topic,
+            producer_config=runtime.kafka.config,
+            identity=checkpoint_identity,
+            schema_registry_url=(
+                runtime.kafka.schema_registry_url
+                if runtime.kafka.protobuf_enabled
+                else None
+            ),
+            logger=logger,
+        )
+        logger.info(
+            "checkpoint.load_started",
+            component="checkpoint",
+            topic=runtime.checkpoint.topic,
+            key=checkpoint_reader.identity.key,
+        )
+        checkpoint_record = await asyncio.to_thread(checkpoint_reader.load)
+        if checkpoint_record is not None:
+            resume_cursor = checkpoint_record.cursor
 
         # -------------------------
         # PROCESSOR
@@ -187,7 +183,7 @@ async def main():
             eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
         )
 
-        if runtime.checkpoint.enabled and not runtime.kafka.eos_enabled:
+        if not runtime.kafka.eos_enabled:
             checkpoint_manager = CheckpointManager(
                 sink=kafka_write,
                 topic=runtime.checkpoint.topic,
@@ -242,6 +238,10 @@ async def main():
                 "runtime.shutdown_complete",
                 component="runtime",
             )
+
+
+async def main():
+    await run_pipeline()
 
 def cli():
     try:

@@ -24,6 +24,7 @@ def load_pipeline_config(path: str) -> PipelineConfig:
         profiles_path = str(default_chain_profiles_path())
 
     raw["chain"] = resolve_chain_config(raw.get("chain", {}), profiles_path=profiles_path)
+    raw["pipeline"] = _normalize_pipeline_fields(raw.get("pipeline", {}))
     raw["pipeline"] = _fill_pipeline_name(raw.get("pipeline", {}), raw["chain"])
     return PipelineConfig(**raw)
 
@@ -73,17 +74,24 @@ def _fill_pipeline_name(pipeline_cfg: dict, chain_cfg: dict) -> dict:
     name = pipeline.get("name")
     if name:
         return pipeline
+    mode = pipeline.get("mode")
+    if mode is None:
+        mode = "backfill" if pipeline.get("to") is not None else "realtime"
 
     pipeline["name"] = build_pipeline_name(
         chain_name=str(chain_cfg.get("name") or ""),
         network=str(chain_cfg.get("network") or ""),
-        mode=str(pipeline.get("mode") or ""),
-        start_block=pipeline.get("start_block"),
-        end_block=pipeline.get("end_block"),
-        checkpoint_enabled=(
-            pipeline.get("checkpoint", {}).get("enabled")
-            if isinstance(pipeline.get("checkpoint"), dict)
-            else pipeline.get("checkpoint_enabled", True)
-        ),
+        mode=str(mode or ""),
+        from_value=pipeline.get("from"),
+        to_value=pipeline.get("to"),
     )
+    return pipeline
+
+
+def _normalize_pipeline_fields(pipeline_cfg: dict) -> dict:
+    pipeline = dict(pipeline_cfg or {})
+    if "from" not in pipeline and "start_block" in pipeline:
+        pipeline["from"] = pipeline.pop("start_block")
+    if "to" not in pipeline and "end_block" in pipeline:
+        pipeline["to"] = pipeline.pop("end_block")
     return pipeline

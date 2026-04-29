@@ -9,7 +9,7 @@ reading the same runtime configuration as the application.
 
 Inputs:
 
-- `rpcstream/pipeline.yaml` for pipeline name, entities, topics, checkpoint topic,
+- `pipeline.yaml` for pipeline name, entities, topics, checkpoint topic,
   and Kafka EOS `transactional.id`.
 - `.env` for Kafka and Aiven credentials.
 
@@ -43,7 +43,7 @@ Use a different pipeline config:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python scripts/aiven_kafka_acls.py \
-  --config rpcstream/pipeline.yaml \
+  --config pipeline.yaml \
   --apply
 ```
 
@@ -127,7 +127,7 @@ Use a specific pipeline config:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python scripts/verify_trace_dlq.py \
-  --config rpcstream/pipeline.yaml
+  --config pipeline.yaml
 ```
 
 Use a fixed synthetic block number:

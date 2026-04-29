@@ -30,7 +30,7 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
             eos_init_timeout_sec=12,
         ),
         topic_map=SimpleNamespace(main={"trace": "topic-a"}, dlq="dlq.ingestion"),
-        checkpoint=SimpleNamespace(enabled=False, topic="checkpoint-topic"),
+        checkpoint=SimpleNamespace(topic="checkpoint-topic", flush_interval_ms=100, commit_batch_size=100),
         chain=SimpleNamespace(type="evm"),
         engine=SimpleNamespace(concurrency=1),
     )
@@ -73,7 +73,7 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
     monkeypatch.setattr("rpcstream.app_runtime.IngestionEngine", lambda **kwargs: kwargs)
     monkeypatch.setattr("rpcstream.app_runtime.build_protobuf_topic_schemas", lambda *_args, **_kwargs: {})
 
-    stack = build_runtime_stack(config_path="rpcstream/pipeline.yaml", with_tracker=False)
+    stack = build_runtime_stack(config_path="pipeline.yaml", with_tracker=False)
 
     assert stack.engine["eos_enabled"] is True
     assert stack.engine["sink"].eos_enabled is True

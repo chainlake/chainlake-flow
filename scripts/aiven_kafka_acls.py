@@ -110,12 +110,11 @@ def desired_acls(runtime) -> list[dict]:
         add("Describe", "Topic", dlq_topic, "LITERAL")
         add("Write", "Topic", dlq_topic, "LITERAL")
 
-    if runtime.checkpoint.enabled:
-        add("Describe", "Topic", runtime.checkpoint.topic, "LITERAL")
-        add("Read", "Topic", runtime.checkpoint.topic, "LITERAL")
-        add("Write", "Topic", runtime.checkpoint.topic, "LITERAL")
-        add("Read", "Group", "checkpoint-loader-", "PREFIXED")
-        add("Describe", "Group", "checkpoint-loader-", "PREFIXED")
+    add("Describe", "Topic", runtime.checkpoint.topic, "LITERAL")
+    add("Read", "Topic", runtime.checkpoint.topic, "LITERAL")
+    add("Write", "Topic", runtime.checkpoint.topic, "LITERAL")
+    add("Read", "Group", "checkpoint-loader-", "PREFIXED")
+    add("Describe", "Group", "checkpoint-loader-", "PREFIXED")
 
     return _dedupe_acls(acls)
 

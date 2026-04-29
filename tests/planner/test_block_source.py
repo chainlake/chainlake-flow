@@ -70,7 +70,7 @@ def test_build_block_source_resumes_backfill_after_checkpoint():
 
 def test_build_block_source_resumes_realtime_after_checkpoint():
     runtime = SimpleNamespace(
-        pipeline=SimpleNamespace(mode="realtime", start_block="latest", end_block=None)
+        pipeline=SimpleNamespace(mode="realtime", start_block="checkpoint", end_block=None)
     )
 
     async def run():

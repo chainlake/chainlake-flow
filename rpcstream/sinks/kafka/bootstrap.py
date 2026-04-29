@@ -31,8 +31,7 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
         logger=logger,
     )
     topic_manager.ensure_topics(all_topics(runtime.topic_map))
-    if runtime.checkpoint.enabled:
-        topic_manager.ensure_compacted_topics([runtime.checkpoint.topic])
+    topic_manager.ensure_compacted_topics([runtime.checkpoint.topic])
 
     if not runtime.kafka.protobuf_enabled:
         if logger:
@@ -40,7 +39,7 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
                 "kafka.bootstrap_complete",
                 component="sink",
                 protobuf_enabled=False,
-                checkpoint_topic=runtime.checkpoint.topic if runtime.checkpoint.enabled else None,
+                checkpoint_topic=runtime.checkpoint.topic,
             )
         return
 
@@ -64,5 +63,5 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
             protobuf_enabled=True,
             topic_count=len(all_topics(runtime.topic_map)),
             schema_topic_count=len(protobuf_registry.topic_schemas),
-            checkpoint_topic=runtime.checkpoint.topic if runtime.checkpoint.enabled else None,
+            checkpoint_topic=runtime.checkpoint.topic,
         )

@@ -134,7 +134,7 @@ Instead of editing YAML manually, render the replay job from `pipeline.yaml`:
 
 ```bash
 UV_CACHE_DIR=/tmp/uvcache uv run python -m rpcstream.adapters.evm.jobs.dlq_replay_job render \
-  --config rpcstream/pipeline.yaml \
+  --config pipeline.yaml \
   --entity trace \
   --status pending \
   --stage processor \

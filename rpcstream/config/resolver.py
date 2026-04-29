@@ -27,7 +27,6 @@ class KafkaRuntime:
 
 @dataclass
 class CheckpointRuntime:
-    enabled: bool
     topic: str
     flush_interval_ms: int
     commit_batch_size: int
@@ -127,9 +126,8 @@ def resolve(cfg) -> RuntimeConfig:
             chain_name=chain_profile.chain_name,
             network=chain_profile.network,
             mode=cfg.pipeline.mode,
-            start_block=cfg.pipeline.start_block,
-            end_block=cfg.pipeline.end_block,
-            checkpoint_enabled=cfg.pipeline.checkpoint.enabled,
+            from_value=cfg.pipeline.start_block,
+            to_value=cfg.pipeline.end_block,
         ),
         mode=cfg.pipeline.mode,
         start_block=cfg.pipeline.start_block,
@@ -152,7 +150,6 @@ def resolve(cfg) -> RuntimeConfig:
     )
 
     checkpoint = CheckpointRuntime(
-        enabled=checkpoint_cfg.enabled,
         topic=topic_map.checkpoint,
         flush_interval_ms=checkpoint_cfg.flush_interval_ms,
         commit_batch_size=checkpoint_cfg.commit_batch_size,

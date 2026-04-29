@@ -85,23 +85,25 @@ G --> I[Historical Semantic Lakehouse]
 
 ```bash
 chainlake-flow/
-├── cli/                  # command entrypoints
 ├── scripts/              # local tooling
 ├── docs/                 # design docs
 ├── tests/                # integration / benchmark tests
 │
 ├── rpcstream/            # RPCStream Engine core
-│   ├── rpc/              # rpc transport + eRPC client
-│   ├── scheduler/        # chain adapters
-│   ├── planner/          # block planning
-│   ├── execution/        # fetch + decode
-│   ├── runtime/          # scheduler + runtime loop
+│   ├── client/           # RPC transport clients
+│   ├── scheduler/        # adaptive RPC scheduling
+│   ├── planner/          # cursor/block source planning
+│   ├── ingestion/        # fetch + process + DLQ flow
+│   ├── adapters/         # chain-specific parsing/enrich/schema logic
+│   ├── runtime/          # runtime assembly + observability
 │   ├── state/            # checkpoint / cursor / replay
 │   ├── sinks/            # kafka / storage outputs
 │   ├── metrics/          # telemetry
-│   ├── models/           # domain schema
+│   ├── config/           # typed config + runtime resolution
+│   ├── cli/              # unified top-level CLI
 │   └── utils/
 │
+├── pipeline.yaml
 ├── pyproject.toml
 ├── README.md
 └── LICENSE

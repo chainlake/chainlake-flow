@@ -20,11 +20,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def run(args: argparse.Namespace) -> None:
-    config_path = os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
-    group_id = os.getenv("DLQ_REPLAY_GROUP_ID", DEFAULT_REPLAY_GROUP)
+async def run_dlq_replay(
+    *,
+    config_path: str | None = None,
+    config=None,
+    group_id: str | None = None,
+    entity: str | None = None,
+    status: str = "failed",
+    stage: str | None = None,
+    max_records: int | None = None,
+) -> None:
+    config_path = config_path or os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
+    group_id = group_id or os.getenv("DLQ_REPLAY_GROUP_ID", DEFAULT_REPLAY_GROUP)
 
-    stack = build_runtime_stack(config_path=config_path, with_tracker=False)
+    stack = build_runtime_stack(config_path=config_path, config=config, with_tracker=False)
     dlq_client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
         producer_config=stack.runtime.kafka.config,
@@ -34,12 +43,12 @@ async def run(args: argparse.Namespace) -> None:
     )
     source = DlqReplayBlockSource(
         dlq_client,
-        entity=args.entity,
-        status=args.status,
-        stage=args.stage,
+        entity=entity,
+        status=status,
+        stage=stage,
         pipeline=stack.runtime.pipeline.name,
         chain=stack.runtime.chain.type,
-        max_records=args.max_records,
+        max_records=max_records,
         logger=stack.logger,
     )
 
@@ -49,15 +58,24 @@ async def run(args: argparse.Namespace) -> None:
             "dlq.replay_started",
             component="dlq",
             topic=stack.runtime.topic_map.dlq,
-            entity=args.entity,
-            status=args.status,
-            stage=args.stage,
-            max_records=args.max_records,
+            entity=entity,
+            status=status,
+            stage=stage,
+            max_records=max_records,
         )
         await stack.engine.run_stream(source)
     finally:
         dlq_client.close()
         await stack.close()
+
+
+async def run(args: argparse.Namespace) -> None:
+    await run_dlq_replay(
+        entity=args.entity,
+        status=args.status,
+        stage=args.stage,
+        max_records=args.max_records,
+    )
 
 
 def cli() -> None:

@@ -33,7 +33,7 @@ DEFAULT_KAFKA_CREDENTIALS_SECRET = "kafka-credentials"
 DEFAULT_KAFKA_CA_SECRET = "kafka-ca-secret"
 DEFAULT_KAFKA_CA_PATH = "/etc/ssl/certs/ca.pem"
 DEFAULT_RESTART_POLICY = "Never"
-LOCAL_DEFAULT_CONFIG_PATH = os.path.join(REPO_ROOT, "rpcstream", "pipeline.yaml")
+LOCAL_DEFAULT_CONFIG_PATH = os.path.join(REPO_ROOT, "pipeline.yaml")
 
 
 class NoAliasSafeDumper(yaml.SafeDumper):
@@ -83,10 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             f"  python {os.path.relpath(__file__, REPO_ROOT)} "
-            "--config rpcstream/pipeline.yaml --entity trace --status pending "
+            "--config pipeline.yaml --entity trace --status pending "
             "--stage processor --max-records 1\n"
             "  python -m rpcstream.adapters.evm.jobs.dlq_replay_job render "
-            "--config rpcstream/pipeline.yaml --entity trace --status pending "
+            "--config pipeline.yaml --entity trace --status pending "
             "--output k8s/dlq/dlq-replay-job.yaml\n"
             "  python -m rpcstream.adapters.evm.jobs.dlq_replay_job run "
             "--group-id rpcstream-dlq-replay-manual --offset earliest"

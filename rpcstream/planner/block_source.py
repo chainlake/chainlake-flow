@@ -141,6 +141,8 @@ def build_block_source(
     start_block = runtime.pipeline.start_block
     if resume_cursor is not None:
         start_block = resume_cursor + 1
+    elif start_block == "checkpoint":
+        start_block = "latest"
 
     return RealtimeBlockSource(
         tracker,

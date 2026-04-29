@@ -1,10 +1,7 @@
 logLevel: info
 
 pipeline:
-  mode: "realtime"
-  start_block: "latest"
-  checkpoint:
-    enabled: true # default is true, set to false and Kafka EOS false for testing only.
+  from: "checkpoint"
 
 chain:
   name: "bsc"

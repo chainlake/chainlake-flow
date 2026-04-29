@@ -84,9 +84,8 @@ def build_transactional_id(cfg: PipelineConfig) -> str:
         chain_name=cfg.chain.name,
         network=cfg.chain.network,
         mode=cfg.pipeline.mode,
-        start_block=cfg.pipeline.start_block,
-        end_block=cfg.pipeline.end_block,
-        checkpoint_enabled=cfg.pipeline.checkpoint.enabled,
+        from_value=cfg.pipeline.start_block,
+        to_value=cfg.pipeline.end_block,
     )
     return template.format(
         pipeline=pipeline_name,

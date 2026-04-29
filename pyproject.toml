@@ -45,7 +45,7 @@ dev = [
 ]
 
 [project.scripts]
-rpcstream = "rpcstream.main:cli"
+rpcstream = "rpcstream.cli:cli"
 rpcstream-kafka-init = "rpcstream.kafka_init:cli"
 rpcstream-dlq-retry = "rpcstream.dlq_retry:cli"
 rpcstream-dlq-replay = "rpcstream.dlq_replay:cli"

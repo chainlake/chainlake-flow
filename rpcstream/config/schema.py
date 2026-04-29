@@ -95,7 +95,6 @@ class ErpcConfig(BaseModel):
     
 
 class CheckpointConfig(BaseModel):
-    enabled: bool = True
     topic: Optional[str] = None
     flush_interval_ms: int = 100
     commit_batch_size: int = 100
@@ -103,14 +102,14 @@ class CheckpointConfig(BaseModel):
 
 class PipelineConfigModel(BaseModel):
     name: str | None = None
-    mode: str
-    start_block: str | int | None = None
-    end_block: str | int | None = None
+    mode: str | None = None
+    from_: str | int | None = Field(default=None, alias="from")
+    to: str | int | None = None
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
 
     @model_validator(mode="after")
     def validate_mode_fields(self):
-        mode = (self.mode or "").strip().lower()
+        mode = _infer_pipeline_mode(self.from_, self.to, self.mode)
         self.mode = mode
 
         if self.name is not None:
@@ -119,31 +118,36 @@ class PipelineConfigModel(BaseModel):
                 raise ValueError("pipeline.name must not be empty")
             self.name = name
 
-        if mode not in {"realtime", "backfill"}:
-            raise ValueError("pipeline.mode must be either 'realtime' or 'backfill'")
-
-        if self.start_block is None:
-            raise ValueError("pipeline.start_block is required")
+        if self.from_ is None:
+            raise ValueError("pipeline.from is required")
 
         if mode == "realtime":
-            if self.end_block is not None:
-                raise ValueError("pipeline.end_block is not allowed in realtime mode")
-            if isinstance(self.start_block, str):
-                start_value = self.start_block.strip().lower()
-                if start_value != "latest":
-                    _parse_block_number(start_value, "pipeline.start_block")
-                self.start_block = start_value
+            if self.to is not None:
+                raise ValueError("pipeline.to is not allowed in realtime mode")
+            if isinstance(self.from_, str):
+                start_value = self.from_.strip().lower()
+                if start_value not in {"latest", "checkpoint"}:
+                    _parse_block_number(start_value, "pipeline.from")
+                self.from_ = start_value
             else:
-                _parse_block_number(self.start_block, "pipeline.start_block")
+                _parse_block_number(self.from_, "pipeline.from")
             return self
 
-        start_block = _parse_block_number(self.start_block, "pipeline.start_block")
-        end_block = _parse_block_number(self.end_block, "pipeline.end_block")
+        start_block = _parse_block_number(self.from_, "pipeline.from")
+        end_block = _parse_block_number(self.to, "pipeline.to")
         if start_block > end_block:
-            raise ValueError("pipeline.start_block must be <= pipeline.end_block in backfill mode")
-        self.start_block = start_block
-        self.end_block = end_block
+            raise ValueError("pipeline.from must be <= pipeline.to in backfill mode")
+        self.from_ = start_block
+        self.to = end_block
         return self
+
+    @property
+    def start_block(self):
+        return self.from_
+
+    @property
+    def end_block(self):
+        return self.to
 
 class TrackerConfig(BaseModel):
     poll_interval: float = 0.5
@@ -194,3 +198,18 @@ def _parse_block_number(value, field_name: str) -> int:
     if number < 0:
         raise ValueError(f"{field_name} must be >= 0")
     return number
+
+
+def _infer_pipeline_mode(from_value, to_value, explicit_mode: str | None) -> str:
+    inferred = "backfill" if to_value is not None else "realtime"
+    if explicit_mode is None:
+        return inferred
+
+    mode = str(explicit_mode).strip().lower()
+    if mode not in {"realtime", "backfill"}:
+        raise ValueError("pipeline.mode must be either 'realtime' or 'backfill'")
+    if mode != inferred:
+        raise ValueError(
+            f"pipeline.mode={mode!r} conflicts with pipeline.from/pipeline.to inferred mode {inferred!r}"
+        )
+    return mode

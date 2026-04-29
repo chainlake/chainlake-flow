@@ -10,11 +10,16 @@ from rpcstream.sinks.kafka.dlq import UnifiedDlqKafkaClient
 DEFAULT_RETRY_GROUP = "rpcstream-dlq-retry"
 
 
-async def main() -> None:
-    config_path = os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
-    group_id = os.getenv("DLQ_RETRY_GROUP_ID", DEFAULT_RETRY_GROUP)
+async def run_dlq_retry(
+    *,
+    config_path: str | None = None,
+    config=None,
+    group_id: str | None = None,
+) -> None:
+    config_path = config_path or os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
+    group_id = group_id or os.getenv("DLQ_RETRY_GROUP_ID", DEFAULT_RETRY_GROUP)
 
-    stack = build_runtime_stack(config_path=config_path, with_tracker=False)
+    stack = build_runtime_stack(config_path=config_path, config=config, with_tracker=False)
     client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
         producer_config=stack.runtime.kafka.config,
@@ -74,6 +79,10 @@ async def main() -> None:
         client.close()
         await stack.engine.sink.close()
         await stack.close()
+
+
+async def main() -> None:
+    await run_dlq_retry()
 
 
 def cli() -> None:
