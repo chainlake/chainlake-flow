@@ -256,7 +256,13 @@ class KafkaWriter:
             self.metrics.BATCH_LATENCY.record(latency)
             span.set_attribute("batch_latency_ms", latency)
 
-    async def send_transaction(self, topic_rows, checkpoint_topic, checkpoint_key, checkpoint_value):
+    async def send_transaction(
+        self,
+        topic_rows,
+        checkpoint_topic=None,
+        checkpoint_key=None,
+        checkpoint_value=None,
+    ):
         self._send_transaction_sync(
             topic_rows,
             checkpoint_topic,
@@ -281,13 +287,14 @@ class KafkaWriter:
                     )
                     self.producer.poll(0)
 
-            self.producer.produce(
-                topic=checkpoint_topic,
-                key=checkpoint_key,
-                value=checkpoint_value,
-                callback=self.delivery_report,
-            )
-            self.producer.poll(0)
+            if checkpoint_topic is not None:
+                self.producer.produce(
+                    topic=checkpoint_topic,
+                    key=checkpoint_key,
+                    value=checkpoint_value,
+                    callback=self.delivery_report,
+                )
+                self.producer.poll(0)
             self.producer.commit_transaction()
         except Exception:
             self.producer.abort_transaction()

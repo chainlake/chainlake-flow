@@ -1,168 +1,189 @@
+# DLQ
 
-### unified DLQ topic
-`evm.bsc.mainnet.dlq`
+`chainlake-flow` uses one unified DLQ topic:
 
-### 🔁 Retry pipeline
-`DLQ Topic → Retry Service → Main Topic`
-- auto retry (N times)
-- exponential backoff
-- manual replay UI
+- topic: `dlq.ingestion`
 
-### 🧠 DLQ tiers
-DLQ replay servcie (retry, backoff, idempotency)
+This topic stores the latest state of failed ingestion records and is used by:
 
-- DLQ_L1 → temporary errors (retryable)
-- DLQ_L2 → permanent errors (manual fix)
+- normal pipeline DLQ writes
+- automatic `retry`
+- manual `replay`
 
+## Status
+
+Each DLQ record has one of these statuses:
+
+- `pending`
+  First failure. The record has not been retried yet.
+- `retrying`
+  A retry was attempted and failed again, but more retries are still allowed.
+- `failed`
+  Retry budget is exhausted.
+- `resolved`
+  The data was recovered successfully by `retry` or `replay`.
+
+## When A Record Enters DLQ
+
+A record is written into `dlq.ingestion` when ingestion cannot complete for a block/entity.
+
+Typical cases:
+
+- RPC request failed
+- processor raised an exception
+- downstream write path failed before the pipeline could complete
+
+The DLQ record includes:
+
+- `chain`
+- `network`
+- `pipeline`
+- `entity`
+- `block_number`
+- `stage`
+- `error_type`
+- `error_message`
+- `payload`
+- `context`
+- `retry_count`
+- `max_retry`
+- `status`
+- `next_retry_at`
+
+## Retry vs Replay
+
+`retry` and `replay` both recover data, but they are not the same workflow.
+
+### Retry
+
+`retry` is for automatic recovery of retryable failures.
+
+Behavior:
+
+- consumes `dlq.ingestion`
+- only considers records whose latest status is retryable
+- checks retry timing and retry budget
+- re-runs ingestion for the record's `block_number`
+- if successful, writes a new DLQ state with `status=resolved`
+- if failed again, writes a new DLQ state with `status=retrying` or `status=failed`
+
+Use `retry` for:
+
+- transient RPC failures
+- temporary Kafka / infra issues
+- intermittent upstream instability
+
+### Replay
+
+`replay` is for manual or batch recovery after you have already fixed the root cause.
+
+Behavior:
+
+- scans the latest records in `dlq.ingestion`
+- filters by conditions such as `entity`, `status`, `stage`
+- extracts matching `block_number` values
+- re-runs the normal ingestion flow for those blocks
+- if successful, writes matching DLQ records back as `status=resolved`
+
+Use `replay` for:
+
+- code bug fixed after bad data entered DLQ
+- backfilling specific failed blocks
+- controlled manual recovery in local or Kubernetes jobs
+
+## Short State Flow
 
 ```text
-                ┌──────────────┐
-                │ BlockSource  │
-                └──────┬───────┘
-                       ↓
-                ┌──────────────┐
-                │   Engine     │
-                └──────┬───────┘
-                       ↓
-              ┌───────────────┐
-              │ Kafka Topics  │
-              └──────┬────────┘
-                     ↓
-               ┌──────────┐
-               │   DLQ    │  ← unified topic
-               └────┬─────┘
-                    ↓
-        ┌────────────────────────┐
-        │ Retry / Debug / Replay │
-        └────────────────────────┘
+ingestion failure
+  -> pending
+
+pending
+  -> retry success -> resolved
+  -> retry fail, retries left -> retrying
+  -> retry fail, no retries left -> failed
+
+retrying
+  -> retry success -> resolved
+  -> retry fail, retries left -> retrying
+  -> retry fail, no retries left -> failed
+
+pending / retrying / failed
+  -> manual replay success -> resolved
 ```
 
+## Operational Meaning
 
-```text
-                ┌──────────────────────┐
-                │   Ingestion Engine   │
-                └─────────┬────────────┘
-                          ↓
-               (failure happens anywhere)
-                          ↓
-        ┌──────────────────────────────────┐
-        │        DLQ Router Layer          │
-        └────────────────┬─────────────────┘
-                         ↓
-        ┌──────────────┬──────────────┬──────────────┐
-        │ Kafka DLQ    │ Retry Queue  │ Replay Store │
-        └──────────────┴──────────────┴──────────────┘
+You can read the latest DLQ state like this:
+
+- `pending`
+  New failed record waiting for retry or manual replay
+- `retrying`
+  System is still attempting automatic recovery
+- `failed`
+  Automatic retry is done; operator action is usually required
+- `resolved`
+  Recovery completed successfully
+
+## Local Commands
+
+Read current DLQ state:
+
+```bash
+UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
+  --config rpcstream/pipeline.yaml \
+  --summary \
+  --pretty
 ```
 
-```
-| Option                         | Use case           | Verdict          |
-| ------------------------------ | ------------------ | ---------------- |
-| Kafka DLQ topic                | streaming systems  | ✅ BEST PRACTICE  |
-| Redis queue                    | short-lived retry  | ⚠️ optional      |
-| In-memory queue                | debugging only     | ❌ not production |
-| Database (ClickHouse/Postgres) | analytics / replay | ✅ complement     |
-| S3 / object storage            | long-term archive  | ✅ optional       |
-```
+Read only unresolved trace records:
 
-# unify DLQ + retry + replay system
-```json
-{
-  "id": "uuid-or-hash",
-  "chain": "evm",
-  "network": "bsc-mainnet",
-
-  "pipeline": "block", 
-  "entity": "transaction",
-
-  "block_number": 90000100,
-
-  "stage": "rpc | processor | sink | downstream",
-  "error_type": "TimeoutError | DecodeError | ValidationError",
-  "error_message": "...",
-
-  "payload": {...},         // optional raw data
-  "context": {...},         // rpc params, request info
-
-  "retry_count": 0,
-  "max_retry": 3,
-
-  "status": "pending | retrying | failed | resolved",
-
-  "first_seen_at": "...",
-  "last_attempt_at": "...",
-  "next_retry_at": "...",
-
-  "ingest_timestamp": "..."
-}
+```bash
+UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
+  --config rpcstream/pipeline.yaml \
+  --entity trace \
+  --status pending \
+  --summary \
+  --pretty
 ```
 
-`dlq.ingestion`
-key = f"{chain}:{entity}:{block_number}"
+Run one local replay:
 
-
-## Retry architecture
-```
-Kafka DLQ Topic
-      ↓
-Retry Worker (async service)
-      ↓
-Re-inject into Engine OR RPC layer
+```bash
+UV_CACHE_DIR=/tmp/uvcache uv run python rpcstream/adapters/evm/jobs/dlq_replay.job.py \
+  --config rpcstream/pipeline.yaml \
+  --entity trace \
+  --status pending \
+  --stage processor \
+  --max-records 1
 ```
 
-## Retry flow
-1. DLQ receives failed message
-2. Retry worker consumes
-3. Checks:
+After replay succeeds, verify the record became `resolved`:
 
-## Retry backoff strategy
-
-## Replay system (manual / batch)
-Replay use case
-- RPC bug fixed
-- processor bug fixed
-- historical reprocessing
-
-### Replay architecture
-```text
-DLQ topic / storage
-      ↓
-Replay CLI / API
-      ↓
-Re-create BlockSource
-      ↓
-engine.run_stream(...)
-```
-example: 
-```python
-replay_source = DLQReplayBlockSource(
-    filter={"entity": "transaction", "status": "failed"}
-)
-
-await engine.run_stream(replay_source)
+```bash
+UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
+  --config rpcstream/pipeline.yaml \
+  --entity trace \
+  --status resolved \
+  --summary \
+  --pretty
 ```
 
-## Final architecture summary
-```text
-                ┌────────────────────┐
-                │  Ingestion Engine  │
-                └─────────┬──────────┘
-                          ↓
-                (error occurs)
-                          ↓
-                ┌────────────────┐
-                │   DLQ Sender   │
-                └────────┬───────┘
-                         ↓
-               Kafka Topic: dlq.ingestion
-                         ↓
-        ┌───────────────┴───────────────┐
-        ↓                               ↓
- Retry Worker                    Replay System
-        ↓                               ↓
-  Re-ingest                     Backfill Source
+## EOS Behavior
+
+If `pipeline.yaml` has:
+
+```yaml
+kafka:
+  eos:
+    enabled: true
 ```
 
-# 3️⃣ Unified schema validator (prevent bad DLQ writes)
+then all Kafka write paths use EOS transactions, including:
 
-fetcher → processor → ✅ validator → engine → sink
-engine error → ✅ validator → DLQ sink
+- main raw topics
+- `dlq.ingestion`
+- retry result writes
+- replay result writes
+- resolved-state writes
+
+If EOS is disabled in `pipeline.yaml`, all of those paths fall back to normal non-transactional writes.

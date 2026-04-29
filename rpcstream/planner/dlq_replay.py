@@ -30,6 +30,7 @@ class DlqReplayBlockSource(BlockSource):
         self._loaded = False
         self._blocks = []
         self._index = 0
+        self._records_by_block = {}
 
     async def next_block(self):
         if not self._loaded:
@@ -44,21 +45,33 @@ class DlqReplayBlockSource(BlockSource):
         return block_number
 
     def _load_blocks(self) -> None:
+        scanned = 0
+        matched = 0
         latest_records = {}
-        idle_polls = 0
 
-        self.dlq_client.subscribe()
-        while idle_polls < 3:
-            message = self.dlq_client.poll(timeout=1.0)
-            if message is None:
-                idle_polls += 1
-                continue
-
+        if hasattr(self.dlq_client, "read_latest_records"):
+            latest_records, scanned = self.dlq_client.read_latest_records(
+                offset_reset="earliest",
+                timeout_sec=30.0,
+            )
+        else:
             idle_polls = 0
-            latest_records[message.value["id"]] = message.value
+            self.dlq_client.subscribe()
+            if hasattr(self.dlq_client, "wait_until_ready"):
+                self.dlq_client.wait_until_ready(timeout_sec=10.0)
+            while idle_polls < 3:
+                message = self.dlq_client.poll(timeout=1.0)
+                if message is None:
+                    idle_polls += 1
+                    continue
+
+                idle_polls = 0
+                scanned += 1
+                latest_records[message.value["id"]] = message.value
 
         blocks = []
         seen_blocks = set()
+        records_by_block = {}
         for record in latest_records.values():
             if not matches_replay_filter(
                 record,
@@ -69,23 +82,37 @@ class DlqReplayBlockSource(BlockSource):
                 chain=self.chain,
             ):
                 continue
+            matched += 1
 
             block_number = record.get("block_number")
-            if block_number in (None, 0) or block_number in seen_blocks:
+            if block_number in (None, 0):
                 continue
+
+            if block_number in seen_blocks:
+                records_by_block.setdefault(block_number, []).append(record)
+                continue
+
+            if self.max_records is not None and len(blocks) >= self.max_records:
+                continue
+
+            records_by_block.setdefault(block_number, []).append(record)
             seen_blocks.add(block_number)
             blocks.append(block_number)
 
-            if self.max_records is not None and len(blocks) >= self.max_records:
-                break
-
         self._blocks = sorted(blocks)
+        self._records_by_block = records_by_block
         if self.logger:
             self.logger.info(
                 "dlq.replay_blocks_loaded",
                 component="dlq",
                 block_count=len(self._blocks),
+                scanned_records=scanned,
+                latest_record_count=len(latest_records),
+                matched_records=matched,
                 entity=self.entity,
                 status=self.status,
                 stage=self.stage,
             )
+
+    def records_for_block(self, block_number: int) -> list[dict]:
+        return list(self._records_by_block.get(block_number, []))

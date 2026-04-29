@@ -87,8 +87,9 @@ def build_runtime_stack(
     checkpoint_manager = None
     checkpoint_store = None
     resume_cursor = None
-    eos_active = with_checkpoint and runtime.kafka.eos_enabled
-    if eos_active and not runtime.checkpoint.enabled:
+    eos_active = runtime.kafka.eos_enabled
+    producer_config = dict(runtime.kafka.config)
+    if with_checkpoint and eos_active and not runtime.checkpoint.enabled:
         raise ValueError("kafka.eos.enabled requires pipeline.checkpoint.enabled=true")
     if with_checkpoint and runtime.checkpoint.enabled:
         checkpoint_store = KafkaCheckpointStore(
@@ -112,14 +113,14 @@ def build_runtime_stack(
         entity: PROCESSOR_REGISTRY[entity]
         for entity in runtime.entities
     }
-    producer = Producer(runtime.kafka.config)
+    producer = Producer(producer_config)
     kafka_writer = KafkaWriter(
         producer=producer,
         id_calculator=EventIdCalculator(),
         time_calculator=EventTimeCalculator(),
         logger=logger,
         config=runtime.kafka.streaming,
-        producer_config=runtime.kafka.config,
+        producer_config=producer_config,
         topic_maps=runtime.topic_map,
         protobuf_enabled=runtime.kafka.protobuf_enabled,
         schema_registry_url=runtime.kafka.schema_registry_url,

@@ -25,17 +25,30 @@ spec:
           command:
             - python
             - -m
-            - rpcstream.dlq_replay
-            - --entity
-            - transaction
-            - --status
-            - failed
+            - rpcstream.adapters.evm.jobs.dlq_replay_job
+            - run
           env:
             - name: PIPELINE_CONFIG
               value: /config/pipeline.yaml
 
             - name: DLQ_REPLAY_GROUP_ID
               value: rpcstream-dlq-replay-manual
+
+            - name: DLQ_REPLAY_OFFSET
+              value: earliest
+
+            - name: DLQ_REPLAY_ENTITY
+              value: transaction
+
+            - name: DLQ_REPLAY_STATUS
+              value: failed
+
+            # Optional
+            # - name: DLQ_REPLAY_STAGE
+            #   value: processor
+            #
+            # - name: DLQ_REPLAY_MAX_RECORDS
+            #   value: "100"
 
             - name: POD_UID
               valueFrom:

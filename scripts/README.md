@@ -112,49 +112,30 @@ UV_CACHE_DIR=/tmp/uvcache uv run python scripts/read_dlq.py \
 The script prints decoded records to stdout as JSON. Consumer metadata and the
 final scanned/emitted counters are printed to stderr.
 
-## Compact Existing DLQ Payloads
+## Verify Trace DLQ Write
 
-`compact_dlq_payloads.py` rewrites existing `dlq.ingestion` records so the
-`payload` field contains only the same summary shape used by new DLQ writes.
-This is useful after switching away from full raw payload storage.
+`verify_trace_dlq.py` triggers one synthetic `trace` processor failure and then
+reads `dlq.ingestion` back to confirm the record was actually written.
 
-Dry-run first:
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run python scripts/compact_dlq_payloads.py
-```
-
-Apply the migration:
+Run with the default pipeline config:
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run python scripts/compact_dlq_payloads.py --apply --yes
+UV_CACHE_DIR=/tmp/uvcache uv run python scripts/verify_trace_dlq.py
 ```
 
-Use an explicit snapshot path:
+Use a specific pipeline config:
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run python scripts/compact_dlq_payloads.py \
-  --snapshot-file /tmp/dlq_payload_snapshot.jsonl \
-  --apply \
-  --yes
+UV_CACHE_DIR=/tmp/uvcache uv run python scripts/verify_trace_dlq.py \
+  --config rpcstream/pipeline.yaml
 ```
 
-Restore records from a snapshot file:
+Use a fixed synthetic block number:
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run python scripts/compact_dlq_payloads.py \
-  --restore-from /tmp/dlq_payload_snapshot.jsonl \
-  --apply
+UV_CACHE_DIR=/tmp/uvcache uv run python scripts/verify_trace_dlq.py \
+  --block-number 95281318
 ```
 
-The apply flow:
-
-1. Reads all records up to the current topic high watermarks.
-2. Converts `payload` to a compact summary.
-3. Writes the converted records to a local JSONL snapshot.
-4. Deletes records before the captured high watermarks.
-5. Republishes the converted records to the same partitions.
-
-Pause pipeline writers before running this migration when possible. Records
-written after the snapshot high watermarks are not deleted, but replay/debug
-ordering is easier to reason about when the topic is idle.
+On success the script prints one JSON object containing `verified: true`, the
+DLQ topic name, the synthetic block number, and the matching error fields.

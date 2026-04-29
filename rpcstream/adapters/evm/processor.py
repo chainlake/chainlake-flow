@@ -23,9 +23,9 @@ class ReceiptLogProcessor:
         return {"receipt": receipts, "log": logs}
 
 class TraceProcessor:
-    def process(self, block_number, raw_block):
-        # Process the receipt and logs
-        traces = parse_traces_auto(raw_block["trace"], block_number, "debug_trace")
+    def process(self, block_number, value):
+        # debug_traceBlockByNumber returns the trace payload directly as the RPC result.
+        traces = parse_traces_auto(value, block_number, "debug_trace")
         return {"trace": traces}
 
 # Processor Registry

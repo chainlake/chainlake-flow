@@ -321,13 +321,18 @@ class IngestionEngine:
             self.metrics.TOTAL_TIME.record(total_ms, {"entity": current_entity})
 
         if success and self.eos_enabled:
-            checkpoint_key, checkpoint_value = self.checkpoint_store.build_record(
-                block_number,
-                status="running",
-            )
+            checkpoint_topic = None
+            checkpoint_key = None
+            checkpoint_value = None
+            if self.checkpoint_store is not None:
+                checkpoint_key, checkpoint_value = self.checkpoint_store.build_record(
+                    block_number,
+                    status="running",
+                )
+                checkpoint_topic = self.checkpoint_store.topic
             await self.sink.send_transaction(
                 transactional_topic_rows,
-                self.checkpoint_store.topic,
+                checkpoint_topic,
                 checkpoint_key,
                 checkpoint_value,
             )
@@ -395,7 +400,15 @@ class IngestionEngine:
                 next_retry_at=compute_next_retry_at(retry_count=1),
             )
 
-        await self.sink.send(topic, [record])
+        if self.eos_enabled:
+            await self.sink.send_transaction(
+                [(topic, [record])],
+                None,
+                None,
+                None,
+            )
+        else:
+            await self.sink.send(topic, [record])
 
         if self.logger:
             self.logger.warn(
@@ -423,7 +436,16 @@ class IngestionEngine:
     async def mark_dlq_resolved(self, record: dict) -> None:
         if not self.dlq_topic:
             return
-        await self.sink.send(self.dlq_topic, [build_resolved_record(record)])
+        resolved_record = build_resolved_record(record)
+        if self.eos_enabled:
+            await self.sink.send_transaction(
+                [(self.dlq_topic, [resolved_record])],
+                None,
+                None,
+                None,
+            )
+            return
+        await self.sink.send(self.dlq_topic, [resolved_record])
             
             
     async def _update_ingestion_lag(self, block_number, latest_block):
