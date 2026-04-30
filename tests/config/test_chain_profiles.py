@@ -29,12 +29,8 @@ def test_load_pipeline_config_resolves_chain_profile_fields(tmp_path):
                 "  timeout_sec: 10",
                 "  max_retries: 1",
                 "  inflight:",
-                "    min_inflight: 1",
                 "    max_inflight: 5",
-                "    initial_inflight: 1",
                 "    latency_target_ms: 1000",
-                "engine:",
-                "  concurrency: 1",
                 "kafka:",
                 "  connection:",
                 "    bootstrap_servers: localhost:9092",
@@ -56,6 +52,10 @@ def test_load_pipeline_config_resolves_chain_profile_fields(tmp_path):
     assert config.pipeline.name == "bsc_mainnet_realtime_checkpoint"
 
     runtime = resolve(config)
+    assert runtime.scheduler.min_inflight == 1
+    assert runtime.scheduler.max_inflight == 5
+    assert runtime.scheduler.initial_inflight == 2
+    assert runtime.engine.concurrency == 5
     assert runtime.tracker.poll_interval == pytest.approx(0.225)
 
 
@@ -102,14 +102,10 @@ def test_tracker_poll_interval_scales_with_chain_block_time(tmp_path):
                 "  timeout_sec: 10",
                 "  max_retries: 1",
                 "  inflight:",
-                "    min_inflight: 1",
                 "    max_inflight: 5",
-                "    initial_inflight: 1",
                 "    latency_target_ms: 1000",
                 "tracker:",
                 "  poll_interval: 0.5",
-                "engine:",
-                "  concurrency: 1",
                 "kafka:",
                 "  connection:",
                 "    bootstrap_servers: localhost:9092",
@@ -147,12 +143,8 @@ def test_tracker_poll_interval_defaults_when_section_is_omitted(tmp_path):
                 "  timeout_sec: 10",
                 "  max_retries: 1",
                 "  inflight:",
-                "    min_inflight: 1",
                 "    max_inflight: 5",
-                "    initial_inflight: 1",
                 "    latency_target_ms: 1000",
-                "engine:",
-                "  concurrency: 1",
                 "kafka:",
                 "  connection:",
                 "    bootstrap_servers: localhost:9092",

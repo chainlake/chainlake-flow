@@ -23,6 +23,7 @@ class KafkaWriter:
         protobuf_enabled=False,
         schema_registry_url=None,
         protobuf_topic_schemas=None,
+        protobuf_auto_register_schemas: bool = True,
         observability: ObservabilityContext | None = None,
         eos_enabled=False,
         eos_init_timeout_sec=30.0,
@@ -60,7 +61,7 @@ class KafkaWriter:
                 schema_registry_url=schema_registry_url,
                 producer_config=producer_config,
                 topic_schemas=protobuf_topic_schemas or {},
-                auto_register_schemas=False,
+                auto_register_schemas=protobuf_auto_register_schemas,
                 logger=logger,
             )
 
@@ -292,7 +293,7 @@ class KafkaWriter:
         event_id = row.get("id") or self.id_calc.calculate_event_id(row)
 
         if not event_id:
-            event_id = f"dlq-{row.get('block_number') or row.get('block')}-{time.time_ns()}"
+            event_id = f"dlq-{row.get('cursor')}-{time.time_ns()}"
 
         row["id"] = event_id
         row["ingest_timestamp"] = self.time_calc.calculate_ingest_timestamp()

@@ -1,7 +1,7 @@
 import asyncio
 import time
 
-from rpcstream.ingestion.fetcher import EvmRpcFetcher
+from rpcstream.adapters.evm.fetcher import EvmRpcFetcher
 
 
 class DummyScheduler:

@@ -66,7 +66,7 @@ class IngestionEngine:
         self.eos_enabled = eos_enabled
         self._checkpoint_tasks = set()
 
-    async def run_stream(self, block_source, shutdown_event: asyncio.Event | None = None):
+    async def run_stream(self, cursor_source, shutdown_event: asyncio.Event | None = None):
         sink_started = False
         checkpoint_started = False
         workers = []
@@ -82,12 +82,12 @@ class IngestionEngine:
         async def producer():
             try:
                 while not self._is_shutdown_requested(shutdown_event):
-                    block = await self._next_block_or_shutdown(block_source, shutdown_event)
-                    if block is None:
+                    cursor = await self._next_cursor_or_shutdown(cursor_source, shutdown_event)
+                    if cursor is None:
                         break
                     if self.watermark_manager is not None:
-                        await self.watermark_manager.mark_emitted(block)
-                    await queue.put(block)
+                        await self.watermark_manager.mark_emitted(cursor)
+                    await queue.put(cursor)
             finally:
                 # Signal workers to drain and stop after queued blocks are processed.
                 for _ in range(worker_count):
@@ -95,14 +95,14 @@ class IngestionEngine:
 
         async def worker():
             while True:
-                block = await queue.get()
-                if block is None:
+                cursor = await queue.get()
+                if cursor is None:
                     break
-                success, delivery_futures, expected_watermark = await self._run_one(block)
+                success, delivery_futures, expected_watermark = await self._run_one(cursor)
                 if self.watermark_manager is not None:
                     task = asyncio.create_task(
                         self._finalize_checkpoint(
-                            block,
+                            cursor,
                             success,
                             delivery_futures,
                             expected_watermark=expected_watermark,
@@ -148,30 +148,31 @@ class IngestionEngine:
     def _is_shutdown_requested(self, shutdown_event: asyncio.Event | None) -> bool:
         return shutdown_event is not None and shutdown_event.is_set()
 
-    async def _next_block_or_shutdown(self, block_source, shutdown_event: asyncio.Event | None):
+    async def _next_cursor_or_shutdown(self, cursor_source, shutdown_event: asyncio.Event | None):
         if shutdown_event is None:
-            return await block_source.next_block()
+            return await cursor_source.next_cursor()
 
-        next_block_task = asyncio.create_task(block_source.next_block())
+        next_cursor_task = asyncio.create_task(cursor_source.next_cursor())
         shutdown_task = asyncio.create_task(shutdown_event.wait())
         done, pending = await asyncio.wait(
-            {next_block_task, shutdown_task},
+            {next_cursor_task, shutdown_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
 
         if shutdown_task in done:
-            next_block_task.cancel()
+            next_cursor_task.cancel()
             with suppress(asyncio.CancelledError):
-                await next_block_task
+                await next_cursor_task
             return None
 
         shutdown_task.cancel()
         with suppress(asyncio.CancelledError):
             await shutdown_task
-        return await next_block_task
+        return await next_cursor_task
 
 
-    async def _run_one(self, block_number):
+    async def _run_one(self, cursor):
+        cursor = int(cursor)
         start_total = time.time()
         current_entity = "unknown"
         success = True
@@ -182,12 +183,13 @@ class IngestionEngine:
         try:
             with self._tracer.start_as_current_span("streaming.run") as root_span:
                 root_span.set_attribute("component", "engine")
-                root_span.set_attribute("block_number", block_number)
-                    
+                root_span.set_attribute("cursor", cursor)
+                root_span.set_attribute("cursor_value", cursor)
+
                 self.metrics.INFLIGHT.add(1)
-            
+
                 # 1. FETCH
-                raw_data = await self.fetcher.fetch(block_number)
+                raw_data = await self.fetcher.fetch(cursor)
 
                 for entity, processor in self.processors.items():
                     current_entity = entity
@@ -195,13 +197,13 @@ class IngestionEngine:
                         error_msg = raw_data[entity].error
                         error_details = raw_data[entity].details.copy()
                         self.metrics.ERROR_COUNTER.add(1, {"stage": "rpc"})
-                        
+
                         if self.logger:
                             self.logger.warn(
                                 "engine.rpc_failed",
                                 component="engine",
                                 entity=entity,
-                                block=block_number,
+                                cursor=cursor,
                                 error=error_msg,
                                 expected=raw_data[entity].expected,
                                 **{
@@ -212,7 +214,7 @@ class IngestionEngine:
                             )
                         await self._send_dlq(
                             entity=entity,
-                            block_number=block_number,
+                            cursor=cursor,
                             stage="rpc",
                             error_type="RpcError",
                             error_message=error_msg,
@@ -228,19 +230,19 @@ class IngestionEngine:
 
                     try:
                         value, meta = raw_data[entity]
-                        processed_data = processor.process(block_number, value)
+                        processed_data = processor.process(cursor, value)
                         for processed_entity, rows in processed_data.items():
                             parsed_bundle.setdefault(processed_entity, []).extend(rows)
 
-                        latest_block, chain_lag, ingestion_lag = await self._compute_lag(block_number)
-                        if chain_lag is not None:
-                            self.metrics.CHAIN_LAG.record(chain_lag)
+                        head_cursor, head_lag, ingestion_lag = await self._compute_lag(cursor)
+                        if head_lag is not None:
+                            self.metrics.CHAIN_LAG.record(head_lag)
                         if ingestion_lag is not None:
                             self.metrics.INGESTION_LAG.record(ingestion_lag)
-                        
+
                         latency = meta.extra.get("latency_ms", 0)
                         queue_wait = meta.extra.get("queue_wait_ms", 0)
-                        
+
                         self.metrics.BLOCK_COUNTER.add(1, {"entity": entity})
                         self.metrics.BLOCK_LATENCY.record(latency, {"entity": entity})
                         self.metrics.QUEUE_WAIT.record(queue_wait, {"entity": entity})
@@ -249,7 +251,7 @@ class IngestionEngine:
                             self.logger.info(
                                 "engine.processed",
                                 component="engine",
-                                block=block_number,
+                                cursor=cursor,
                                 entity=entity,
                                 latency_ms=latency,
                                 payload=emitted_rows,
@@ -258,7 +260,7 @@ class IngestionEngine:
                     except Exception as e:
                         await self._send_dlq(
                             entity=entity,
-                            block_number=block_number,
+                            cursor=cursor,
                             stage="processor",
                             error_type=type(e).__name__,
                             error_message=str(e),
@@ -292,23 +294,23 @@ class IngestionEngine:
                 error_span.set_status(Status(StatusCode.ERROR))
                 error_span.set_attribute("error.message", str(e))
                 error_span.set_attribute("entity", current_entity)
-                error_span.set_attribute("block_number", block_number)
-            
+                error_span.set_attribute("cursor_value", cursor)
+
             error_msg = repr(e)
             self.metrics.ERROR_COUNTER.add(1, {"stage": "processor"})
-            
+
             if self.logger:
                 self.logger.error(
                     "engine.processor_error",
                     component="engine",
                     entity=current_entity,
-                    block=block_number,
+                    cursor=cursor,
                     error=error_msg
                 )
 
             await self._send_dlq(
                 entity=current_entity,
-                block_number=block_number,
+                cursor=cursor,
                 stage="processor",
                 error_type=type(e).__name__,
                 error_message=str(e),
@@ -326,9 +328,9 @@ class IngestionEngine:
             should_persist_cursor_state = False
             if self.watermark_manager is not None:
                 should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
-                    block_number
+                    cursor
                 )
-                expected_watermark = await self.watermark_manager.preview_completed(block_number)
+                expected_watermark = await self.watermark_manager.preview_completed(cursor)
                 if should_persist_cursor_state:
                     transactional_topic_rows.append(
                         (
@@ -336,7 +338,7 @@ class IngestionEngine:
                             [
                                 build_watermark_state_row(
                                     self.watermark_manager.identity,
-                                    block_number,
+                                    cursor,
                                     status="completed",
                                 )
                             ],
@@ -360,14 +362,14 @@ class IngestionEngine:
 
     async def _finalize_checkpoint(
         self,
-        block_number,
+        cursor,
         success,
         delivery_futures,
         *,
         expected_watermark=None,
     ):
         if not success:
-            await self._record_failed_watermark_state(block_number)
+            await self._record_failed_watermark_state(cursor)
             return
         try:
             if delivery_futures:
@@ -375,7 +377,7 @@ class IngestionEngine:
             should_persist_cursor_state = False
             if self.watermark_manager is not None:
                 should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
-                    block_number
+                    cursor
                 )
             if not self.eos_enabled and should_persist_cursor_state:
                 await self.sink.send(
@@ -383,13 +385,13 @@ class IngestionEngine:
                     [
                         build_watermark_state_row(
                             self.watermark_manager.identity,
-                            block_number,
+                            cursor,
                             status="completed",
                         )
                     ],
                     wait_delivery=True,
                 )
-            advanced_watermark = await self.watermark_manager.mark_completed(block_number)
+            advanced_watermark = await self.watermark_manager.mark_completed(cursor)
             if (
                 self.eos_enabled
                 and expected_watermark is not None
@@ -399,28 +401,28 @@ class IngestionEngine:
                 self.logger.warn(
                     "watermark.advance_mismatch",
                     component="checkpoint",
-                    block=block_number,
+                    cursor=cursor,
                     expected=expected_watermark,
                     actual=advanced_watermark,
                 )
         except Exception as exc:
-            await self._record_failed_watermark_state(block_number, error=str(exc))
+            await self._record_failed_watermark_state(cursor, error=str(exc))
             return
 
-    async def _record_failed_watermark_state(self, block_number, error: str | None = None):
+    async def _record_failed_watermark_state(self, cursor, error: str | None = None):
         if self.watermark_manager is None:
             return
-        await self.watermark_manager.mark_failed(block_number, error=error)
+        await self.watermark_manager.mark_failed(cursor, error=error)
         row = build_watermark_state_row(
             self.watermark_manager.identity,
-            block_number,
+            cursor,
             status="failed",
             error=error,
         )
         if self.eos_enabled:
             await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
             return
-        await self.sink.send(
+            await self.sink.send(
             self.watermark_manager.state_topic,
             [row],
             wait_delivery=True,
@@ -431,7 +433,7 @@ class IngestionEngine:
     async def _send_dlq(
         self,
         entity,
-        block_number,
+        cursor,
         stage,
         error_type,
         error_message,
@@ -447,7 +449,7 @@ class IngestionEngine:
                     "engine.dlq_missing_topic",
                     component="engine",
                     entity=entity,
-                    block=block_number,
+                    cursor=cursor,
                 )
             return
 
@@ -465,7 +467,7 @@ class IngestionEngine:
                 network=getattr(self.chain, "network_label", "unknown"),
                 pipeline=getattr(self.pipeline, "name", "unknown"),
                 entity=entity,
-                block_number=block_number,
+                cursor=cursor,
                 stage=stage,
                 error_type=error_type,
                 error_message=error_message,
@@ -488,7 +490,7 @@ class IngestionEngine:
                 component="engine",
                 topic=topic,
                 entity=entity,
-                block=block_number,
+                cursor=cursor,
                 stage=stage,
                 error_type=error_type,
                 error=error_message,
@@ -500,10 +502,10 @@ class IngestionEngine:
         previous = self._active_dlq_record
         self._active_dlq_record = record
         try:
-            success, delivery_futures, expected_watermark = await self._run_one(record["block_number"])
+            success, delivery_futures, expected_watermark = await self._run_one(record.get("cursor"))
             if self.watermark_manager is not None:
                 await self._finalize_checkpoint(
-                    record["block_number"],
+                    record.get("cursor"),
                     success,
                     delivery_futures,
                     expected_watermark=expected_watermark,
@@ -522,57 +524,57 @@ class IngestionEngine:
         await self.sink.send(self.dlq_topic, [resolved_record])
             
             
-    async def _update_ingestion_lag(self, block_number, latest_block):
+    async def _update_ingestion_lag(self, cursor, head_cursor):
         async with self._lag_lock:
-            if block_number > self._latest_processed_block:
-                self._latest_processed_block = block_number
+            if cursor > self._latest_processed_block:
+                self._latest_processed_block = cursor
 
             ingestion_lag = None
-            if latest_block is not None:
-                ingestion_lag = latest_block - self._latest_processed_block
+            if head_cursor is not None:
+                ingestion_lag = head_cursor - self._latest_processed_block
 
             return ingestion_lag
         
     
-    async def _compute_lag(self, block_number):
-        latest_block = None
-        chain_lag = None
+    async def _compute_lag(self, cursor):
+        head_cursor = None
+        head_lag = None
         ingestion_lag = None
         pipeline_mode = getattr(self.pipeline, "mode", None)
 
         if pipeline_mode == "backfill":
-            end_block = getattr(self.pipeline, "end_block", None)
-            if end_block is not None:
-                ingestion_lag = max(int(end_block) - int(block_number), 0)
+            end_cursor = getattr(self.pipeline, "end_cursor", None)
+            if end_cursor is not None:
+                ingestion_lag = max(int(end_cursor) - int(cursor), 0)
                 if self.watermark_manager is not None and self.watermark_manager.cursor is not None:
                     self.watermark_manager.update_commit_delay(
-                        max(int(end_block) - int(self.watermark_manager.cursor), 0)
+                        max(int(end_cursor) - int(self.watermark_manager.cursor), 0)
                     )
                 elif self.watermark_manager is not None:
                     self.watermark_manager.update_commit_delay(None)
-            return latest_block, chain_lag, ingestion_lag
+            return head_cursor, head_lag, ingestion_lag
 
         tracker = getattr(self.fetcher, "tracker", None)
 
         if tracker:
-            latest_block = tracker.get_latest()
+            head_cursor = tracker.get_head_cursor() if hasattr(tracker, "get_head_cursor") else tracker.get_latest()
 
-            if latest_block is not None:
+            if head_cursor is not None:
                 # point-in-time lag
-                chain_lag = latest_block - block_number
+                head_lag = head_cursor - cursor
 
                 # true pipeline lag (protected update)
                 ingestion_lag = await self._update_ingestion_lag(
-                    block_number,
-                    latest_block
+                    cursor,
+                    head_cursor
                 )
                 if self.watermark_manager is not None and self.watermark_manager.cursor is not None:
                     self.watermark_manager.update_commit_delay(
-                        max(int(latest_block) - int(self.watermark_manager.cursor), 0)
+                        max(int(head_cursor) - int(self.watermark_manager.cursor), 0)
                     )
                 elif self.watermark_manager is not None:
                     self.watermark_manager.update_commit_delay(None)
         elif self.watermark_manager is not None:
             self.watermark_manager.update_commit_delay(None)
 
-        return latest_block, chain_lag, ingestion_lag
+        return head_cursor, head_lag, ingestion_lag

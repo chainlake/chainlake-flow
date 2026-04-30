@@ -2,10 +2,10 @@ import asyncio
 import json
 import aiohttp
 
-from rpcstream.rpc.rpc_client import RpcClient
+from rpcstream.client.jsonrpc import JsonRpcClient
 from rpcstream.adapters.sui.rpc_requests import build_get_latest_checkpoint
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
-from rpcstream.adapters.base import BaseRpcRequest
+from rpcstream.protocol.request import BaseRpcRequest
 
 
 # RPC_URL = "https://sui-rpc.publicnode.com"
@@ -14,7 +14,7 @@ RPC_URL = "https://fullnode.mainnet.sui.io:443"
 # Run the test
 # --------------------------
 async def main():
-    client = RpcClient(RPC_URL, timeout_sec=5)
+    client = JsonRpcClient(RPC_URL, timeout_sec=5)
     scheduler = AdaptiveRpcScheduler(client, min_inflight=1, max_inflight=1, latency_target_ms=500)
 
     try:

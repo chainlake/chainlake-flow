@@ -23,7 +23,6 @@ async def run_dlq_retry(
         config_path=config_path,
         config=config,
         with_tracker=False,
-        with_checkpoint=True,
     )
     client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
@@ -67,7 +66,7 @@ async def run_dlq_retry(
                     "dlq.retry_succeeded",
                     component="dlq",
                     entity=record.get("entity"),
-                    block_number=record.get("block_number"),
+                    cursor=record.get("cursor"),
                     retry_count=record.get("retry_count", 0),
                 )
             else:
@@ -75,7 +74,7 @@ async def run_dlq_retry(
                     "dlq.retry_failed",
                     component="dlq",
                     entity=record.get("entity"),
-                    block_number=record.get("block_number"),
+                    cursor=record.get("cursor"),
                     retry_count=record.get("retry_count", 0) + 1,
                 )
 

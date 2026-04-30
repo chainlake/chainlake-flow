@@ -67,10 +67,10 @@ class ChainConfig(BaseModel):
 
 
 class ErpcInflight(BaseModel):
-    min_inflight: int
     max_inflight: int
-    initial_inflight: int
     latency_target_ms: int
+    min_inflight: int = 1
+    initial_inflight: int | None = None
 
     @model_validator(mode="after")
     def validate_bounds(self):
@@ -78,7 +78,9 @@ class ErpcInflight(BaseModel):
             raise ValueError("erpc.inflight.min_inflight must be >= 1")
         if self.max_inflight < self.min_inflight:
             raise ValueError("erpc.inflight.max_inflight must be >= erpc.inflight.min_inflight")
-        if not (self.min_inflight <= self.initial_inflight <= self.max_inflight):
+        if self.initial_inflight is None:
+            self.initial_inflight = max(self.min_inflight, max(1, self.max_inflight // 2))
+        elif not (self.min_inflight <= self.initial_inflight <= self.max_inflight):
             raise ValueError(
                 "erpc.inflight.initial_inflight must be between "
                 "erpc.inflight.min_inflight and erpc.inflight.max_inflight"
@@ -129,27 +131,19 @@ class PipelineConfigModel(BaseModel):
                 if start_value == "latest":
                     start_value = "chainhead"
                 if start_value not in {"chainhead", "checkpoint"}:
-                    _parse_block_number(start_value, "pipeline.from")
+                    _parse_cursor_value(start_value, "pipeline.from")
                 self.from_ = start_value
             else:
-                _parse_block_number(self.from_, "pipeline.from")
+                _parse_cursor_value(self.from_, "pipeline.from")
             return self
 
-        start_block = _parse_block_number(self.from_, "pipeline.from")
-        end_block = _parse_block_number(self.to, "pipeline.to")
-        if start_block > end_block:
+        start_cursor = _parse_cursor_value(self.from_, "pipeline.from")
+        end_cursor = _parse_cursor_value(self.to, "pipeline.to")
+        if start_cursor > end_cursor:
             raise ValueError("pipeline.from must be <= pipeline.to in backfill mode")
-        self.from_ = start_block
-        self.to = end_block
+        self.from_ = start_cursor
+        self.to = end_cursor
         return self
-
-    @property
-    def start_block(self):
-        return self.from_
-
-    @property
-    def end_block(self):
-        return self.to
 
 class TrackerConfig(BaseModel):
     poll_interval: float = 0.5
@@ -162,7 +156,13 @@ class TrackerConfig(BaseModel):
 
 
 class EngineConfig(BaseModel):
-    concurrency: int
+    concurrency: int | None = None
+
+    @model_validator(mode="after")
+    def validate_concurrency(self):
+        if self.concurrency is not None and self.concurrency < 1:
+            raise ValueError("engine.concurrency must be >= 1")
+        return self
 
 
 class PipelineConfig(BaseModel):
@@ -174,7 +174,7 @@ class PipelineConfig(BaseModel):
     entities: list[str]
     erpc: ErpcConfig
     tracker: TrackerConfig = Field(default_factory=TrackerConfig)
-    engine: EngineConfig
+    engine: EngineConfig = Field(default_factory=EngineConfig)
     checkpoint: CheckpointConfig = Field(default_factory=CheckpointConfig)
     kafka: KafkaConfig
     observability: ObservabilityConfig = Field(
@@ -183,7 +183,7 @@ class PipelineConfig(BaseModel):
     )
 
 
-def _parse_block_number(value, field_name: str) -> int:
+def _parse_cursor_value(value, field_name: str) -> int:
     if value is None:
         raise ValueError(f"{field_name} is required")
 

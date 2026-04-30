@@ -65,8 +65,37 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
         def load(self):
             return None
 
+    class DummyTracker:
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    class DummyAdapter:
+        def build_tracker(self, **_kwargs):
+            return DummyTracker()
+
+        def build_fetcher(self, **_kwargs):
+            return object()
+
+        def build_processors(self, **_kwargs):
+            return {"trace": object()}
+
+        def build_enricher(self):
+            return object()
+
+        def build_event_id_calculator(self):
+            return object()
+
+        def build_event_time_calculator(self):
+            return object()
+
+        def build_protobuf_topic_schemas(self, *, topic_maps, entities):
+            return {}
+
     monkeypatch.setattr("rpcstream.app_runtime.load_pipeline_config", lambda _path: fake_config)
-    monkeypatch.setattr("rpcstream.app_runtime.resolve", lambda _cfg: fake_runtime)
+    monkeypatch.setattr("rpcstream.app_runtime.resolve", lambda _cfg, adapter=None: fake_runtime)
     monkeypatch.setattr(
         "rpcstream.app_runtime.build_observability",
         lambda *_args, **_kwargs: SimpleNamespace(
@@ -80,15 +109,14 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
     monkeypatch.setattr("rpcstream.app_runtime.JsonLogger", lambda **_kwargs: DummyLogger())
     monkeypatch.setattr("rpcstream.app_runtime.JsonRpcClient", lambda **_kwargs: DummyClient())
     monkeypatch.setattr("rpcstream.app_runtime.AdaptiveRpcScheduler", lambda *args, **kwargs: object())
-    monkeypatch.setattr("rpcstream.app_runtime.EvmRpcFetcher", lambda *args, **kwargs: object())
+    monkeypatch.setattr("rpcstream.app_runtime.build_chain_adapter", lambda _chain_type: DummyAdapter())
     monkeypatch.setattr("rpcstream.app_runtime.Producer", DummyProducer)
     monkeypatch.setattr("rpcstream.app_runtime.KafkaWriter", lambda **kwargs: DummyWriter(**kwargs))
     monkeypatch.setattr("rpcstream.app_runtime.KafkaCheckpointReader", DummyCheckpointReader)
     monkeypatch.setattr("rpcstream.app_runtime.KafkaWatermarkStateReader", DummyCheckpointReader)
     monkeypatch.setattr("rpcstream.app_runtime.IngestionEngine", lambda **kwargs: kwargs)
-    monkeypatch.setattr("rpcstream.app_runtime.build_protobuf_topic_schemas", lambda *_args, **_kwargs: {})
 
-    stack = build_runtime_stack(config_path="pipeline.yaml", with_tracker=False, with_checkpoint=True)
+    stack = build_runtime_stack(config_path="pipeline.yaml", with_tracker=False)
 
     assert stack.engine["eos_enabled"] is True
     assert stack.engine["sink"].eos_enabled is True

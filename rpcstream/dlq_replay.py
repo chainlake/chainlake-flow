@@ -5,14 +5,14 @@ import asyncio
 import os
 
 from rpcstream.app_runtime import build_runtime_stack
-from rpcstream.planner.dlq_replay import DlqReplayBlockSource
+from rpcstream.planner.dlq_replay import DlqReplayCursorSource
 from rpcstream.sinks.kafka.dlq import UnifiedDlqKafkaClient
 
 DEFAULT_REPLAY_GROUP = "rpcstream-dlq-replay"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Replay blocks from unified DLQ records")
+    parser = argparse.ArgumentParser(description="Replay cursors from unified DLQ records")
     parser.add_argument("--entity", default=None)
     parser.add_argument("--status", default="failed")
     parser.add_argument("--stage", default=None)
@@ -37,7 +37,6 @@ async def run_dlq_replay(
         config_path=config_path,
         config=config,
         with_tracker=False,
-        with_checkpoint=True,
     )
     dlq_client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
@@ -46,7 +45,7 @@ async def run_dlq_replay(
         group_id=group_id,
         logger=stack.logger,
     )
-    source = DlqReplayBlockSource(
+    source = DlqReplayCursorSource(
         dlq_client,
         entity=entity,
         status=status,

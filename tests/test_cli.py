@@ -1,3 +1,5 @@
+import json
+
 from typer.testing import CliRunner
 
 from rpcstream.cli import _infer_ingest_mode, app
@@ -26,13 +28,10 @@ def make_config() -> PipelineConfig:
             "timeout_sec": 10,
             "max_retries": 1,
             "inflight": {
-                "min_inflight": 1,
                 "max_inflight": 10,
-                "initial_inflight": 5,
                 "latency_target_ms": 100,
             },
         },
-        engine={"concurrency": 1},
         kafka={
             "connection": {"bootstrap_servers": "localhost:9092"},
             "common": {"topic_template": "{type}.{chain}.{network}.{kind}_{entity}"},
@@ -108,8 +107,8 @@ def test_ingest_backfill_invokes_existing_runner_with_effective_config(monkeypat
     assert result.exit_code == 0
     assert captured["config_path"] == "pipeline.yaml"
     assert captured["config"].pipeline.mode == "backfill"
-    assert captured["config"].pipeline.start_block == 100
-    assert captured["config"].pipeline.end_block == 110
+    assert captured["config"].pipeline.from_ == 100
+    assert captured["config"].pipeline.to == 110
     assert captured["config"].entities == ["transaction", "trace", "block"]
 
 
@@ -193,8 +192,8 @@ def test_root_command_invokes_realtime_when_only_from_is_set(monkeypatch):
 
     assert result.exit_code == 0
     assert captured["config"].pipeline.mode == "realtime"
-    assert captured["config"].pipeline.start_block == "100"
-    assert captured["config"].pipeline.end_block is None
+    assert captured["config"].pipeline.from_ == "100"
+    assert captured["config"].pipeline.to is None
     assert captured["config"].entities == ["block", "transaction"]
 
 
@@ -223,7 +222,7 @@ def test_root_command_uses_explicit_chainhead_without_disabling_eos(monkeypatch)
 
     assert result.exit_code == 0
     assert captured["config"].pipeline.mode == "realtime"
-    assert captured["config"].pipeline.start_block == "chainhead"
+    assert captured["config"].pipeline.from_ == "chainhead"
     assert captured["config"].kafka.eos.enabled is False
 
 
@@ -231,10 +230,85 @@ def test_root_help_lists_only_dlq_and_config_commands():
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
+    assert "benchmark" in result.stdout
     assert "init" in result.stdout
     assert "dlq" in result.stdout
     assert "config" in result.stdout
     assert "│ ingest" not in result.stdout
+
+
+def test_benchmark_command_invokes_runner(monkeypatch):
+    captured = {}
+
+    async def fake_run_benchmark_async(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("rpcstream.cli.benchmark._run_benchmark_async", fake_run_benchmark_async)
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "--config",
+            "pipeline.yaml",
+            "--sink",
+            "blackhole",
+            "--window",
+            "100",
+            "--eos-enabled",
+            "--entity",
+            "block,transaction",
+            "--output-file",
+            "benchmark.json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["config_path"] == "pipeline.yaml"
+    assert captured["sink"] == "blackhole"
+    assert captured["mode"] == "concurrent"
+    assert captured["eos_enabled"] is True
+    assert captured["window"] == 100
+    assert captured["entity"] == ["block,transaction"]
+    assert captured["output_file"] == "benchmark.json"
+
+
+def test_benchmark_output_file_helper_writes_json(tmp_path):
+    class FakeSummary:
+        def to_dict(self):
+            return {
+                "chain_name": "bsc",
+                "network": "mainnet",
+                "sink": "blackhole",
+                "eos_enabled": False,
+                "mode": "concurrent",
+                "start_cursor": 1,
+                "end_cursor": 2,
+                "total_cursors": 2,
+                "total_messages": 3,
+                "total_elapsed_sec": 1.5,
+                "blocks_per_sec": 1.333,
+                "messages_per_sec": 2.0,
+                "latency_ms": {
+                    "avg": 1.0,
+                    "min": 0.5,
+                    "max": 1.5,
+                    "p50": 1.0,
+                    "p95": 1.4,
+                    "p99": 1.49,
+                },
+            }
+
+    output_file = tmp_path / "benchmark"
+    from rpcstream.cli.benchmark import _write_benchmark_output_file
+
+    written = _write_benchmark_output_file(FakeSummary(), str(output_file))
+    assert written == output_file.with_suffix(".json")
+    payload = json.loads(written.read_text(encoding="utf-8"))
+    assert payload["chain_name"] == "bsc"
+    assert payload["mode"] == "concurrent"
+    assert "samples" not in payload
 
 
 def test_init_command_invokes_kafka_init_with_config_path(monkeypatch):

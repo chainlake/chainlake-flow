@@ -1,54 +1,50 @@
-from typing import Any, Dict, List
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from rpcstream.sinks.kafka.schema import EntitySchema, build_topic_schemas
 
 
-class BaseRpcRequest:
-    """
-    Base class for a generic RPC request.
-    Chain-specific implementations (EVM, SUI, SOL, etc.) should inherit from this class.
-    """
+class ChainAdapter(ABC):
+    def resolve_internal_entities(self, requested_entities):
+        return [entity.strip().lower() for entity in requested_entities]
 
-    def __init__(
-        self,
-        method: str = None,
-        params: List[Any] = None,
-        request_id: Any = None,
-        meta: Dict = None,
-        stub_method: str = None,
-        payload: Any = None,
-    ):
-        self.method = method
-        self.params = params or []
-        self.request_id = request_id
-        self.meta = meta or {}
+    def resolve_sink_entities(self, requested_entities):
+        return [entity.strip().lower() for entity in requested_entities]
 
-        self.stub_method = stub_method
-        self.payload = payload
+    def topic_kind_for_entity(self, entity: str) -> str:
+        return "raw"
 
-    def __repr__(self):
-        """
-        Pretty print request content.
-        """
-        return (
-            f"{self.__class__.__name__}("
-            f"method={self.method}, "
-            f"params={self.params}, "
-            f"request_id={self.request_id}, "
-            f"meta={self.meta})"
+    def build_entity_schemas(self) -> dict[str, EntitySchema]:
+        return {}
+
+    def build_protobuf_topic_schemas(self, *, topic_maps, entities: list[str]) -> dict[str, EntitySchema]:
+        return build_topic_schemas(
+            topic_maps=topic_maps,
+            entity_schemas=self.build_entity_schemas(),
+            entities=entities,
         )
 
-    def operation_name(self) -> str:
-        """
-        Unified request name for tracing / scheduler telemetry.
-        """
-        return (
-            self.method
-            or self.stub_method
-            or self.__class__.__name__
-        )
+    @abstractmethod
+    def build_tracker(self, *, client, poll_interval: float, logger=None):
+        raise NotImplementedError
 
-    def transport_type(self) -> str:
-        """
-        Default transport type.
-        Override in chain-specific requests if needed.
-        """
-        return "jsonrpc"
+    @abstractmethod
+    def build_fetcher(self, *, scheduler, entities, logger=None, tracker=None):
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_processors(self, *, entities):
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_enricher(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_event_id_calculator(self):
+        raise NotImplementedError
+
+    @abstractmethod
+    def build_event_time_calculator(self):
+        raise NotImplementedError

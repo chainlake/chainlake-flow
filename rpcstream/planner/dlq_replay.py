@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 
 from rpcstream.ingestion.dlq import matches_replay_filter
-from rpcstream.planner.block_source import BlockSource
+from rpcstream.planner.cursor_source import CursorSource
 
 
-class DlqReplayBlockSource(BlockSource):
+class DlqReplayCursorSource(CursorSource):
     def __init__(
         self,
         dlq_client,
@@ -28,23 +28,23 @@ class DlqReplayBlockSource(BlockSource):
         self.max_records = max_records
         self.logger = logger
         self._loaded = False
-        self._blocks = []
+        self._cursors = []
         self._index = 0
-        self._records_by_block = {}
+        self._records_by_cursor = {}
 
-    async def next_block(self):
+    async def next_cursor(self):
         if not self._loaded:
-            await asyncio.to_thread(self._load_blocks)
+            await asyncio.to_thread(self._load_cursors)
             self._loaded = True
 
-        if self._index >= len(self._blocks):
+        if self._index >= len(self._cursors):
             return None
 
-        block_number = self._blocks[self._index]
+        cursor = self._cursors[self._index]
         self._index += 1
-        return block_number
+        return cursor
 
-    def _load_blocks(self) -> None:
+    def _load_cursors(self) -> None:
         scanned = 0
         matched = 0
         latest_records = {}
@@ -69,9 +69,9 @@ class DlqReplayBlockSource(BlockSource):
                 scanned += 1
                 latest_records[message.value["id"]] = message.value
 
-        blocks = []
-        seen_blocks = set()
-        records_by_block = {}
+        cursors = []
+        seen_cursors = set()
+        records_by_cursor = {}
         for record in latest_records.values():
             if not matches_replay_filter(
                 record,
@@ -84,28 +84,28 @@ class DlqReplayBlockSource(BlockSource):
                 continue
             matched += 1
 
-            block_number = record.get("block_number")
-            if block_number in (None, 0):
+            cursor = record.get("cursor")
+            if cursor in (None, 0):
                 continue
 
-            if block_number in seen_blocks:
-                records_by_block.setdefault(block_number, []).append(record)
+            if cursor in seen_cursors:
+                records_by_cursor.setdefault(cursor, []).append(record)
                 continue
 
-            if self.max_records is not None and len(blocks) >= self.max_records:
+            if self.max_records is not None and len(cursors) >= self.max_records:
                 continue
 
-            records_by_block.setdefault(block_number, []).append(record)
-            seen_blocks.add(block_number)
-            blocks.append(block_number)
+            records_by_cursor.setdefault(cursor, []).append(record)
+            seen_cursors.add(cursor)
+            cursors.append(cursor)
 
-        self._blocks = sorted(blocks)
-        self._records_by_block = records_by_block
+        self._cursors = sorted(cursors)
+        self._records_by_cursor = records_by_cursor
         if self.logger:
             self.logger.info(
-                "dlq.replay_blocks_loaded",
+                "dlq.replay_cursors_loaded",
                 component="dlq",
-                block_count=len(self._blocks),
+                cursor_count=len(self._cursors),
                 scanned_records=scanned,
                 latest_record_count=len(latest_records),
                 matched_records=matched,
@@ -114,5 +114,5 @@ class DlqReplayBlockSource(BlockSource):
                 stage=self.stage,
             )
 
-    def records_for_block(self, block_number: int) -> list[dict]:
-        return list(self._records_by_block.get(block_number, []))
+    def records_for_cursor(self, cursor: int) -> list[dict]:
+        return list(self._records_by_cursor.get(cursor, []))

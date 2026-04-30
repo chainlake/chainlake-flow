@@ -1,4 +1,4 @@
-from rpcstream.adapters.evm.processor import TraceProcessor
+from rpcstream.adapters.evm.processors import TraceProcessor
 
 
 def test_trace_processor_accepts_debug_trace_result_list():

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Dict, Any
 
-from rpcstream.adapters.evm.dag import resolve_internal_entities
+from rpcstream.adapters import build_chain_adapter
 from rpcstream.config.builder import (
     build_erpc_endpoint,
     build_kafka_config,
@@ -57,8 +57,8 @@ class TrackerRuntime:
 class PipelineRuntime:
     name: str
     mode: str
-    start_block: str | int
-    end_block: int | None
+    start_cursor: str | int
+    end_cursor: int | None
 
 @dataclass
 class ChainRuntime:
@@ -89,8 +89,9 @@ class RuntimeConfig:
     observability: ObservabilityRuntime
 
 
-def resolve(cfg) -> RuntimeConfig:
+def resolve(cfg, adapter=None) -> RuntimeConfig:
     chain_profile = get_chain_profile(cfg.chain.name, cfg.chain.network)
+    adapter = adapter or build_chain_adapter(cfg.chain.type)
 
     kafka_config = build_kafka_config(cfg)
 
@@ -118,7 +119,7 @@ def resolve(cfg) -> RuntimeConfig:
     )
 
     engine = EngineRuntime(
-        concurrency=cfg.engine.concurrency
+        concurrency=cfg.engine.concurrency or cfg.erpc.inflight.max_inflight
     )
 
     pipeline = PipelineRuntime(
@@ -127,12 +128,12 @@ def resolve(cfg) -> RuntimeConfig:
             chain_name=chain_profile.chain_name,
             network=chain_profile.network,
             mode=cfg.pipeline.mode,
-            from_value=cfg.pipeline.start_block,
-            to_value=cfg.pipeline.end_block,
+            from_value=cfg.pipeline.from_,
+            to_value=cfg.pipeline.to,
         ),
         mode=cfg.pipeline.mode,
-        start_block=cfg.pipeline.start_block,
-        end_block=cfg.pipeline.end_block,
+        start_cursor=cfg.pipeline.from_,
+        end_cursor=cfg.pipeline.to,
     )
 
     chain = ChainRuntime(
@@ -144,7 +145,7 @@ def resolve(cfg) -> RuntimeConfig:
         network_label=f"{chain_profile.chain_name}-{chain_profile.network}",
     )
 
-    topic_map = build_topic_maps(cfg)
+    topic_map = build_topic_maps(cfg, adapter=adapter)
     checkpoint_cfg = _resolve_checkpoint_config(cfg)
     tracker = TrackerRuntime(
         poll_interval=chain_profile.interval_seconds * cfg.tracker.poll_interval
@@ -158,7 +159,7 @@ def resolve(cfg) -> RuntimeConfig:
     )
     
     entities = cfg.entities
-    internal_entities = resolve_internal_entities(cfg.entities)
+    internal_entities = adapter.resolve_internal_entities(cfg.entities)
     
     observability = ObservabilityRuntime(
         config=cfg.observability.model_copy(deep=True),

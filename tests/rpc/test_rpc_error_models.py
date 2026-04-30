@@ -17,7 +17,7 @@ summarize_exception = MODELS.summarize_exception
 def test_rpc_response_error_summarizes_upstream_block_not_ready():
     error = RpcResponseError.from_payload(
         method="eth_getBlockReceipts",
-        request_meta={"block_number": 94349617},
+        request_meta={"cursor": 94349617},
         error={
             "code": -32603,
             "message": "upstream does not have the requested block yet",
@@ -57,17 +57,17 @@ def test_rpc_response_error_summarizes_upstream_block_not_ready():
     assert is_expected_rpc_warning(error) is True
     assert summarize_exception(error) == (
         "rpc_response_error(method=eth_getBlockReceipts, code=-32603, "
-        "message=upstream does not have the requested block yet, block=94349617)"
+        "message=upstream does not have the requested block yet, cursor=94349617)"
     )
 
     fields = exception_log_fields(error)
-    assert fields["block"] == 94349617
+    assert fields["cursor"] == 94349617
     assert fields["network_id"] == "evm:56"
     assert fields["project_id"] == "main"
     assert fields["upstreams_total"] == 31
     assert fields["not_ready_upstreams"] == 2
-    assert fields["min_latest_block"] == 94349610
-    assert fields["max_latest_block"] == 94349616
+    assert fields["min_latest_cursor"] == 94349610
+    assert fields["max_latest_cursor"] == 94349616
 
 
 def test_rpc_response_error_non_expected_warning_keeps_basic_fields():

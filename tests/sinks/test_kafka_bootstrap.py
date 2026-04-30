@@ -1,8 +1,12 @@
 import asyncio
 from types import SimpleNamespace
 
-from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 from rpcstream.sinks.kafka.producer import KafkaWriter
+from rpcstream.sinks.kafka.schema import (
+    EntitySchema,
+    FieldSchema,
+    build_topic_schemas,
+)
 
 
 def test_build_protobuf_topic_schemas_includes_main_and_dlq_topics():
@@ -15,8 +19,22 @@ def test_build_protobuf_topic_schemas_includes_main_and_dlq_topics():
         checkpoint="evm.bsc.mainnet.commit_watermark",
         watermark_state="evm.bsc.mainnet.cursor_state",
     )
+    entity_schemas = {
+        "block": EntitySchema(
+            entity="block",
+            message_name="TestBlock",
+            package="rpcstream.test",
+            fields=(FieldSchema("id", "string"),),
+        ),
+        "trace": EntitySchema(
+            entity="trace",
+            message_name="TestTrace",
+            package="rpcstream.test",
+            fields=(FieldSchema("id", "string"),),
+        ),
+    }
 
-    schemas = build_protobuf_topic_schemas(topic_maps, ["block", "trace"])
+    schemas = build_topic_schemas(topic_maps, entity_schemas, ["block", "trace"])
 
     assert set(schemas) == {
         "evm.bsc.mainnet.raw_block",
@@ -36,8 +54,16 @@ def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
         checkpoint="evm.bsc.mainnet.commit_watermark",
         watermark_state="evm.bsc.mainnet.cursor_state",
     )
+    entity_schemas = {
+        "transaction": EntitySchema(
+            entity="transaction",
+            message_name="TestTx",
+            package="rpcstream.test",
+            fields=(FieldSchema("id", "string"),),
+        )
+    }
 
-    schemas = build_protobuf_topic_schemas(topic_maps, ["transaction"])
+    schemas = build_topic_schemas(topic_maps, entity_schemas, ["transaction"])
 
     assert set(schemas) == {
         "evm.bsc.mainnet.enriched_transaction",

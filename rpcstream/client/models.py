@@ -56,13 +56,13 @@ class RpcResponseError(Exception):
         if self.code is not None:
             parts.append(f"code={self.code}")
         parts.append(f"message={self.message}")
-        block_number = self.requested_block_number()
-        if block_number is not None:
-            parts.append(f"block={block_number}")
+        cursor = self.requested_cursor()
+        if cursor is not None:
+            parts.append(f"cursor={cursor}")
         return "rpc_response_error(" + ", ".join(parts) + ")"
 
-    def requested_block_number(self) -> Any:
-        return self.request_meta.get("block_number")
+    def requested_cursor(self) -> Any:
+        return self.request_meta.get("cursor")
 
     def _cause_list(self) -> list[dict[str, Any]]:
         cause = self.data.get("cause")
@@ -98,9 +98,9 @@ class RpcResponseError(Exception):
             "rpc_error_message": self.message,
         }
 
-        requested_block = self.requested_block_number()
-        if requested_block is not None:
-            fields["block"] = requested_block
+        requested_cursor = self.requested_cursor()
+        if requested_cursor is not None:
+            fields["cursor"] = requested_cursor
 
         if isinstance(self.data, dict):
             details = self.data.get("details") or {}
@@ -135,11 +135,11 @@ class RpcResponseError(Exception):
             if block_causes:
                 fields["not_ready_upstreams"] = len(block_causes)
             if latest_blocks:
-                fields["min_latest_block"] = min(latest_blocks)
-                fields["max_latest_block"] = max(latest_blocks)
+                fields["min_latest_cursor"] = min(latest_blocks)
+                fields["max_latest_cursor"] = max(latest_blocks)
             if finalized_blocks:
-                fields["min_finalized_block"] = min(finalized_blocks)
-                fields["max_finalized_block"] = max(finalized_blocks)
+                fields["min_finalized_cursor"] = min(finalized_blocks)
+                fields["max_finalized_cursor"] = max(finalized_blocks)
 
         return {key: value for key, value in fields.items() if value is not None}
 

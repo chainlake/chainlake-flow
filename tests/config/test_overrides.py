@@ -58,8 +58,8 @@ def test_apply_runtime_overrides_updates_backfill_fields_and_pipeline_name():
     )
 
     assert effective.pipeline.mode == "backfill"
-    assert effective.pipeline.start_block == 10
-    assert effective.pipeline.end_block == 20
+    assert effective.pipeline.from_ == 10
+    assert effective.pipeline.to == 20
     assert effective.pipeline.name == "bsc_mainnet_backfill_10_20"
     assert effective.entities == ["trace"]
 
@@ -71,8 +71,8 @@ def test_apply_runtime_overrides_clears_end_block_for_realtime():
     effective = apply_runtime_overrides(backfill, mode="realtime", from_value="chainhead")
 
     assert effective.pipeline.mode == "realtime"
-    assert effective.pipeline.start_block == "chainhead"
-    assert effective.pipeline.end_block is None
+    assert effective.pipeline.from_ == "chainhead"
+    assert effective.pipeline.to is None
     assert effective.pipeline.name == "bsc_mainnet_realtime_chainhead"
 
 

@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class FieldSchema:
-    name: str
-    scalar_type: str
-    repeated: bool = False
-
-
-@dataclass(frozen=True)
-class EntitySchema:
-    entity: str
-    message_name: str
-    fields: tuple[FieldSchema, ...]
+from rpcstream.sinks.kafka.schema import EntitySchema, FieldSchema
 
 
 BLOCK_SCHEMA = EntitySchema(
     entity="block",
     message_name="EvmBlock",
+    package="rpcstream.evm",
     fields=(
         FieldSchema("type", "string"),
         FieldSchema("number", "int64"),
@@ -54,6 +41,7 @@ BLOCK_SCHEMA = EntitySchema(
 TRANSACTION_SCHEMA = EntitySchema(
     entity="transaction",
     message_name="EvmEnrichedTransaction",
+    package="rpcstream.evm",
     fields=(
         FieldSchema("type", "string"),
         FieldSchema("hash", "string"),
@@ -98,6 +86,7 @@ TRANSACTION_SCHEMA = EntitySchema(
 LOG_SCHEMA = EntitySchema(
     entity="log",
     message_name="EvmLog",
+    package="rpcstream.evm",
     fields=(
         FieldSchema("type", "string"),
         FieldSchema("log_index", "int64"),
@@ -119,6 +108,7 @@ LOG_SCHEMA = EntitySchema(
 TRACE_SCHEMA = EntitySchema(
     entity="trace",
     message_name="EvmTrace",
+    package="rpcstream.evm",
     fields=(
         FieldSchema("type", "string"),
         FieldSchema("block_number", "int64"),

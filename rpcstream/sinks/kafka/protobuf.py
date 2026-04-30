@@ -3,74 +3,12 @@ from __future__ import annotations
 import json
 import warnings
 
-from rpcstream.adapters.evm.schema import EntitySchema, FieldSchema
-
-
-DLQ_SCHEMA = EntitySchema(
-    entity="dlq",
-    message_name="UnifiedDlqRecord",
-    fields=(
-        FieldSchema("chain", "string"),
-        FieldSchema("network", "string"),
-        FieldSchema("pipeline", "string"),
-        FieldSchema("entity", "string"),
-        FieldSchema("block_number", "int64"),
-        FieldSchema("stage", "string"),
-        FieldSchema("error_type", "string"),
-        FieldSchema("error_message", "string"),
-        FieldSchema("payload", "string"),
-        FieldSchema("context", "string"),
-        FieldSchema("retry_count", "int64"),
-        FieldSchema("max_retry", "int64"),
-        FieldSchema("status", "string"),
-        FieldSchema("first_seen_at", "int64"),
-        FieldSchema("last_attempt_at", "int64"),
-        FieldSchema("next_retry_at", "int64"),
-        FieldSchema("id", "string"),
-        FieldSchema("ingest_timestamp", "int64"),
-    ),
-)
-
-
-CHECKPOINT_SCHEMA = EntitySchema(
-    entity="checkpoint",
-    message_name="UnifiedCheckpointRecord",
-    fields=(
-        FieldSchema("cursor", "int64"),
-        FieldSchema("status", "string"),
-        FieldSchema("updated_at_ms", "int64"),
-        FieldSchema("pipeline", "string"),
-        FieldSchema("chain_uid", "string"),
-        FieldSchema("chain_type", "string"),
-        FieldSchema("network", "string"),
-        FieldSchema("mode", "string"),
-        FieldSchema("primary_unit", "string"),
-        FieldSchema("entities", "string", repeated=True),
-        FieldSchema("error", "string"),
-        FieldSchema("id", "string"),
-        FieldSchema("ingest_timestamp", "int64"),
-    ),
-)
-
-
-WATERMARK_STATE_SCHEMA = EntitySchema(
-    entity="watermark_state",
-    message_name="UnifiedWatermarkStateRecord",
-    fields=(
-        FieldSchema("cursor", "int64"),
-        FieldSchema("status", "string"),
-        FieldSchema("updated_at_ms", "int64"),
-        FieldSchema("pipeline", "string"),
-        FieldSchema("chain_uid", "string"),
-        FieldSchema("chain_type", "string"),
-        FieldSchema("network", "string"),
-        FieldSchema("mode", "string"),
-        FieldSchema("primary_unit", "string"),
-        FieldSchema("entities", "string", repeated=True),
-        FieldSchema("error", "string"),
-        FieldSchema("id", "string"),
-        FieldSchema("ingest_timestamp", "int64"),
-    ),
+from rpcstream.sinks.kafka.schema import (
+    CHECKPOINT_SCHEMA,
+    DLQ_SCHEMA,
+    WATERMARK_STATE_SCHEMA,
+    EntitySchema,
+    FieldSchema,
 )
 
 
@@ -204,7 +142,7 @@ def build_message_class(schema: EntitySchema):
 
     file_descriptor = descriptor_pb2.FileDescriptorProto()
     file_descriptor.name = f"{schema.entity}.proto"
-    file_descriptor.package = "rpcstream.evm"
+    file_descriptor.package = schema.package
     file_descriptor.syntax = "proto3"
 
     message_descriptor = file_descriptor.message_type.add()

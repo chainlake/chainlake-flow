@@ -29,16 +29,16 @@ def build_pipeline_name(
 
     normalized_mode = normalize_name_component(mode)
     if normalized_mode == "backfill":
-        parts.append(_format_block_name(from_value))
-        parts.append(_format_block_name(to_value))
+        parts.append(_format_cursor_name(from_value))
+        parts.append(_format_cursor_name(to_value))
         return "_".join(parts)
 
-    start_name = _format_block_name(from_value)
+    start_name = _format_cursor_name(from_value)
     parts.append(start_name)
     return "_".join(parts)
 
 
-def _format_block_name(value) -> str:
+def _format_cursor_name(value) -> str:
     if value is None:
         return "unknown"
     if isinstance(value, int):
@@ -49,8 +49,8 @@ def _format_block_name(value) -> str:
         return "unknown"
     if text == "latest":
         text = "chainhead"
-    if text in {"chainhead", "checkpoint", "checkpoint+1", "checkpoint_plus_1", "checkpointed_latest"}:
-        return text.replace("+", "_")
+    if text in {"chainhead", "checkpoint"}:
+        return text
     if text.isdigit():
         return text
     return normalize_name_component(text)

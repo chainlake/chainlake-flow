@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import asyncio
 
+from rpcstream.adapters.evm.rpc_requests import build_debug_trace_block
 from rpcstream.adapters.evm.rpc_requests import build_get_block_by_number
 from rpcstream.adapters.evm.rpc_requests import build_get_block_receipts
-from rpcstream.adapters.evm.rpc_requests import build_debug_trace_block
 
 
 class EvmRpcFetcher:
@@ -12,45 +14,55 @@ class EvmRpcFetcher:
         self.logger = logger
         self.tracker = tracker
 
-    async def fetch(self, block_number):
+    async def fetch(self, cursor):
+        cursor = int(cursor)
         if self.logger:
             self.logger.debug(
                 "fetcher.request",
                 component="fetcher",
                 entities=self.entities,
-                block=block_number,
+                block=cursor,
+                cursor=cursor,
             )
-        
+
         requests = []
 
         if "transaction" in self.entities:
             request_entities = ["transaction"]
             if "block" in self.entities:
                 request_entities.append("block")
-            requests.append((
-                tuple(request_entities),
-                build_get_block_by_number(block_number, True),
-            ))
+            requests.append(
+                (
+                    tuple(request_entities),
+                    build_get_block_by_number(cursor, True),
+                )
+            )
         elif "block" in self.entities:
-            requests.append((
-                ("block",),
-                build_get_block_by_number(block_number, False),
-            ))
+            requests.append(
+                (
+                    ("block",),
+                    build_get_block_by_number(cursor, False),
+                )
+            )
 
         if "receipt" in self.entities or "log" in self.entities:
             request_entities = ["receipt"]
             if "log" in self.entities:
                 request_entities.append("log")
-            requests.append((
-                tuple(request_entities),
-                build_get_block_receipts(block_number),
-            ))
+            requests.append(
+                (
+                    tuple(request_entities),
+                    build_get_block_receipts(cursor),
+                )
+            )
 
         if "trace" in self.entities:
-            requests.append((
-                ("trace",),
-                build_debug_trace_block(block_number),
-            ))
+            requests.append(
+                (
+                    ("trace",),
+                    build_debug_trace_block(cursor),
+                )
+            )
 
         results = await asyncio.gather(
             *(self.scheduler.submit_request(req) for _, req in requests)
@@ -69,8 +81,9 @@ class EvmRpcFetcher:
                     "fetcher.response",
                     component="fetcher",
                     method=req_method[entity],
-                    block=block_number,
-                    entity=entity
+                    block=cursor,
+                    cursor=cursor,
+                    entity=entity,
                 )
-        
+
         return raw_data

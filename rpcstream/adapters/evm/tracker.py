@@ -1,39 +1,39 @@
+from __future__ import annotations
+
 import asyncio
 import time
+
 from rpcstream.adapters.evm.rpc_requests import build_eth_blockNumber
 
-# control-plane: Tracker → direct RPC (fast lane)
-class BlockHeadTracker:
+
+class EvmChainHeadTracker:
     def __init__(
         self,
         client,
-        poll_interval=0.2,   # 200ms (BSC ~400ms block time)
+        poll_interval=0.2,
         logger=None,
     ):
         self.client = client
         self.poll_interval = poll_interval
         self.logger = logger
 
-        self._latest_block = None
+        self._head_cursor = None
         self._running = False
         self._task = None
 
         self._last_update_ts = 0
 
-    # ----------------------------
-    # Public API
-    # ----------------------------
+    def get_head_cursor(self):
+        return self._head_cursor
+
     def get_latest(self):
-        return self._latest_block
+        return self.get_head_cursor()
 
-    def get_lag(self, current_block):
-        if self._latest_block is None:
+    def get_lag(self, current_cursor):
+        if self._head_cursor is None:
             return None
-        return self._latest_block - current_block
+        return self._head_cursor - current_cursor
 
-    # ----------------------------
-    # Lifecycle
-    # ----------------------------
     async def start(self):
         self._running = True
         self._task = asyncio.create_task(self._run())
@@ -44,40 +44,32 @@ class BlockHeadTracker:
             await self._task
         await self.client.close()
 
-    # ----------------------------
-    # Core loop
-    # ----------------------------
     async def _run(self):
         while self._running:
             try:
                 start = time.time()
-                
+
                 request = build_eth_blockNumber()
                 result = await self.client.execute(request, trace_request=False)
-                
-                latency = (time.time() - start) * 1000
-                
-                self.logger.debug(
-                    "block_tracker.latency",
-                    latency_ms=latency
-                )
-                
-                if isinstance(result, str):
-                    latest = int(result, 16)
 
-                    if latest != self._latest_block:
-                        self._latest_block = latest
+                latency = (time.time() - start) * 1000
+
+                self.logger.debug("block_tracker.latency", latency_ms=latency)
+
+                if isinstance(result, str):
+                    head_cursor = int(result, 16)
+
+                    if head_cursor != self._head_cursor:
+                        self._head_cursor = head_cursor
                         self._last_update_ts = time.time()
 
                         if self.logger:
                             self.logger.debug(
                                 "block_tracker.update",
                                 component="tracker",
-                                latest_block=latest,
+                                head_cursor=head_cursor,
                             )
-
                 else:
-                    # unexpected response
                     if self.logger:
                         self.logger.warn(
                             "block_tracker.invalid_response",
@@ -94,3 +86,5 @@ class BlockHeadTracker:
                     )
 
             await asyncio.sleep(self.poll_interval)
+
+ChainHeadTracker = EvmChainHeadTracker

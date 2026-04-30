@@ -1,4 +1,4 @@
-from rpcstream.planner.dlq_replay import DlqReplayBlockSource
+from rpcstream.planner.dlq_replay import DlqReplayCursorSource
 
 
 class FakeDlqClient:
@@ -14,7 +14,7 @@ class FakeDlqClient:
                     "stage": "processor",
                     "pipeline": "pipe",
                     "chain": "evm",
-                    "block_number": 100,
+                    "cursor": 100,
                 },
                 "id-2": {
                     "id": "id-2",
@@ -23,15 +23,15 @@ class FakeDlqClient:
                     "stage": "processor",
                     "pipeline": "pipe",
                     "chain": "evm",
-                    "block_number": 100,
+                    "cursor": 100,
                 },
             },
             2,
         )
 
 
-def test_dlq_replay_source_tracks_records_per_block():
-    source = DlqReplayBlockSource(
+def test_dlq_replay_source_tracks_records_per_cursor():
+    source = DlqReplayCursorSource(
         FakeDlqClient(),
         entity="trace",
         status="pending",
@@ -42,9 +42,9 @@ def test_dlq_replay_source_tracks_records_per_block():
         logger=None,
     )
 
-    source._load_blocks()
+    source._load_cursors()
 
-    assert source._blocks == [100]
-    records = source.records_for_block(100)
+    assert source._cursors == [100]
+    records = source.records_for_cursor(100)
     assert len(records) == 2
     assert {record["id"] for record in records} == {"id-1", "id-2"}

@@ -1,5 +1,6 @@
-from typing import List, Dict, Any, Iterator
-from rpcstream.adapters.base import BaseRpcRequest
+from typing import Iterator
+
+from rpcstream.protocol.request import BaseRpcRequest
 
 
 class EvmRpcRequest(BaseRpcRequest):

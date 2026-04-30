@@ -1,5 +1,4 @@
-from typing import List, Any, Dict
-from rpcstream.adapters.base import BaseRpcRequest
+from rpcstream.protocol.request import BaseRpcRequest
 
 # --------------------------
 # Sui-specific RPC request

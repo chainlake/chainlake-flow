@@ -4,19 +4,13 @@ from dataclasses import dataclass
 
 from confluent_kafka import Producer
 
-from rpcstream.adapters.evm.enrich import EvmEnricher
-from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
-from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
-from rpcstream.adapters.evm.processor import PROCESSOR_REGISTRY
+from rpcstream.adapters import build_chain_adapter
 from rpcstream.client.jsonrpc import JsonRpcClient
 from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.resolver import resolve
 from rpcstream.ingestion.engine import IngestionEngine
-from rpcstream.ingestion.fetcher import EvmRpcFetcher
-from rpcstream.runtime.block_tracker import BlockHeadTracker
 from rpcstream.runtime.observability.provider import build_observability
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
-from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 from rpcstream.sinks.kafka.producer import KafkaWriter
 from rpcstream.state.checkpoint import (
     KafkaCheckpointReader,
@@ -34,7 +28,7 @@ class RuntimeStack:
     logger: JsonLogger
     observability: object
     client: JsonRpcClient
-    tracker: BlockHeadTracker | None
+    tracker: object | None
     engine: IngestionEngine
     resume_cursor: int | None = None
 
@@ -56,13 +50,13 @@ def build_runtime_stack(
     config_path: str | None = None,
     config: object | None = None,
     with_tracker: bool,
-    with_checkpoint: bool = False,
 ) -> RuntimeStack:
     if config is None:
         if config_path is None:
             raise ValueError("config_path is required when config is not provided")
         config = load_pipeline_config(config_path)
     runtime = resolve(config)
+    adapter = build_chain_adapter(runtime.chain.type)
     observability = build_observability(runtime.observability.config, runtime.pipeline.name)
     logger = JsonLogger(
         level=config.logLevel,
@@ -78,7 +72,7 @@ def build_runtime_stack(
     )
     tracker = None
     if with_tracker and runtime.pipeline.mode == "realtime":
-        tracker = BlockHeadTracker(
+        tracker = adapter.build_tracker(
             client=client,
             poll_interval=runtime.tracker.poll_interval,
             logger=logger,
@@ -94,88 +88,91 @@ def build_runtime_stack(
         observability=observability,
     )
     internal_entities = getattr(runtime, "internal_entities", runtime.entities)
-    fetcher = EvmRpcFetcher(scheduler, internal_entities, logger, tracker)
+    fetcher = adapter.build_fetcher(
+        scheduler=scheduler,
+        entities=internal_entities,
+        logger=logger,
+        tracker=tracker,
+    )
     watermark_manager = None
     checkpoint_reader = None
     state_reader = None
     checkpoint_identity = None
     resume_cursor = None
     state_records = {}
-    pipeline_start_block = getattr(runtime.pipeline, "start_block", "checkpoint")
+    pipeline_start_cursor = getattr(runtime.pipeline, "start_cursor", "checkpoint")
     checkpoint_resume_enabled = (
         runtime.pipeline.mode == "backfill"
-        or pipeline_start_block == "checkpoint"
+        or pipeline_start_cursor == "checkpoint"
     )
     eos_active = runtime.kafka.eos_enabled
     producer_config = dict(runtime.kafka.config)
-    if with_checkpoint:
-        checkpoint_identity = build_checkpoint_identity(runtime)
-        if checkpoint_resume_enabled:
-            checkpoint_reader = KafkaCheckpointReader(
-                topic=runtime.checkpoint.topic,
-                producer_config=runtime.kafka.config,
-                identity=checkpoint_identity,
-                schema_registry_url=(
-                    runtime.kafka.schema_registry_url
-                    if runtime.kafka.protobuf_enabled
-                    else None
-                ),
-                logger=logger,
-            )
-            checkpoint_record = checkpoint_reader.load()
-            if checkpoint_record is not None:
-                resume_cursor = checkpoint_record.cursor
-            state_reader = KafkaWatermarkStateReader(
-                topic=runtime.checkpoint.watermark_state_topic,
-                producer_config=runtime.kafka.config,
-                identity=checkpoint_identity,
-                schema_registry_url=(
-                    runtime.kafka.schema_registry_url
-                    if runtime.kafka.protobuf_enabled
-                    else None
-                ),
-                logger=logger,
-            )
-            state_records = state_reader.load()
-    processors = {
-        entity: PROCESSOR_REGISTRY[entity]
-        for entity in internal_entities
-    }
+    checkpoint_identity = build_checkpoint_identity(runtime)
+    if checkpoint_resume_enabled:
+        checkpoint_reader = KafkaCheckpointReader(
+            topic=runtime.checkpoint.topic,
+            producer_config=runtime.kafka.config,
+            identity=checkpoint_identity,
+            schema_registry_url=(
+                runtime.kafka.schema_registry_url
+                if runtime.kafka.protobuf_enabled
+                else None
+            ),
+            logger=logger,
+        )
+        checkpoint_record = checkpoint_reader.load()
+        if checkpoint_record is not None:
+            resume_cursor = checkpoint_record.cursor
+        state_reader = KafkaWatermarkStateReader(
+            topic=runtime.checkpoint.watermark_state_topic,
+            producer_config=runtime.kafka.config,
+            identity=checkpoint_identity,
+            schema_registry_url=(
+                runtime.kafka.schema_registry_url
+                if runtime.kafka.protobuf_enabled
+                else None
+            ),
+            logger=logger,
+        )
+        state_records = state_reader.load()
+    processors = adapter.build_processors(entities=internal_entities)
     producer = Producer(producer_config)
     kafka_writer = KafkaWriter(
         producer=producer,
-        id_calculator=EventIdCalculator(),
-        time_calculator=EventTimeCalculator(),
+        id_calculator=adapter.build_event_id_calculator(),
+        time_calculator=adapter.build_event_time_calculator(),
         logger=logger,
         config=runtime.kafka.streaming,
         producer_config=producer_config,
         topic_maps=runtime.topic_map,
         protobuf_enabled=runtime.kafka.protobuf_enabled,
         schema_registry_url=runtime.kafka.schema_registry_url,
-        protobuf_topic_schemas=build_protobuf_topic_schemas(runtime.topic_map, runtime.entities),
+        protobuf_topic_schemas=adapter.build_protobuf_topic_schemas(
+            topic_maps=runtime.topic_map,
+            entities=runtime.entities,
+        ),
         observability=observability,
         eos_enabled=eos_active,
         eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
     )
-    if with_checkpoint:
-        watermark_manager = WatermarkManager(
-            sink=kafka_writer,
-            topic=runtime.checkpoint.topic,
-            state_topic=runtime.checkpoint.watermark_state_topic,
-            identity=checkpoint_identity,
-            initial_cursor=resume_cursor,
-            state_records=state_records,
-            state_reader=state_reader,
-            flush_interval_ms=runtime.checkpoint.flush_interval_ms,
-            commit_batch_size=runtime.checkpoint.commit_batch_size,
-            flush_on_advance=not eos_active,
-            logger=logger,
-            meter=observability.get_meter("rpcstream.watermark"),
-        )
+    watermark_manager = WatermarkManager(
+        sink=kafka_writer,
+        topic=runtime.checkpoint.topic,
+        state_topic=runtime.checkpoint.watermark_state_topic,
+        identity=checkpoint_identity,
+        initial_cursor=resume_cursor,
+        state_records=state_records,
+        state_reader=state_reader,
+        flush_interval_ms=runtime.checkpoint.flush_interval_ms,
+        commit_batch_size=runtime.checkpoint.commit_batch_size,
+        flush_on_advance=not eos_active,
+        logger=logger,
+        meter=observability.get_meter("rpcstream.watermark"),
+    )
     engine = IngestionEngine(
         fetcher=fetcher,
         processors=processors,
-        enricher=EvmEnricher(),
+        enricher=adapter.build_enricher(),
         sink=kafka_writer,
         topics=runtime.topic_map.main,
         dlq_topic=runtime.topic_map.dlq,

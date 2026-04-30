@@ -2,7 +2,7 @@
 import os
 import socket
 
-from rpcstream.adapters.evm.dag import resolve_sink_entities
+from rpcstream.adapters import build_chain_adapter
 from rpcstream.runtime.topic import (
     TopicMaps,
     build_checkpoint_topic,
@@ -85,8 +85,8 @@ def build_transactional_id(cfg: PipelineConfig) -> str:
         chain_name=cfg.chain.name,
         network=cfg.chain.network,
         mode=cfg.pipeline.mode,
-        from_value=cfg.pipeline.start_block,
-        to_value=cfg.pipeline.end_block,
+        from_value=cfg.pipeline.from_,
+        to_value=cfg.pipeline.to,
     )
     return template.format(
         pipeline=pipeline_name,
@@ -115,16 +115,17 @@ def build_schema_registry_url(cfg: PipelineConfig) -> str | None:
     return f"https://{raw}"
 
 
-def build_topic_maps(cfg) -> TopicMaps:
+def build_topic_maps(cfg, adapter=None) -> TopicMaps:
     """
     Convert TopicSet → engine-compatible maps
     """
+    adapter = adapter or build_chain_adapter(cfg.chain.type)
 
     topics = {}
 
-    for entity in resolve_sink_entities(cfg.entities):
+    for entity in adapter.resolve_sink_entities(cfg.entities):
         normalized = normalize_entity(entity)
-        topic_set = build_topics(cfg, normalized)
+        topic_set = build_topics(cfg, normalized, adapter=adapter)
 
         topics[normalized] = topic_set.main
 

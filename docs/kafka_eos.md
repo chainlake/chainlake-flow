@@ -76,3 +76,11 @@ You can think of them as:
 The main ingestion process periodically refreshes `cursor_state`, so when an
 external retry or replay resolves a gap, the main ingestion process does not
 need to restart in order to continue advancing `commit_watermark`.
+
+Operational note:
+
+- `rpcstream init` is optional
+- it is useful when you want to provision topics and pre-register schemas up
+  front
+- it is not required before `rpcstream` ingestion starts, because the Kafka
+  writer auto-registers protobuf schemas on first use

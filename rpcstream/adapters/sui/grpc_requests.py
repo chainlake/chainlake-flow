@@ -1,4 +1,4 @@
-from rpcstream.adapters.base import BaseRpcRequest
+from rpcstream.protocol.request import BaseRpcRequest
 from rpcstream.generated.sui import node_service_pb2
 
 

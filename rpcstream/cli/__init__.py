@@ -8,6 +8,7 @@ import yaml
 
 from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.overrides import apply_runtime_overrides
+from rpcstream.cli.benchmark import benchmark as benchmark_command
 from rpcstream.dlq_replay import DEFAULT_REPLAY_GROUP, run_dlq_replay
 from rpcstream.dlq_retry import DEFAULT_RETRY_GROUP, run_dlq_retry
 from rpcstream.kafka_init import main as run_kafka_init
@@ -33,6 +34,9 @@ app = typer.Typer(
         "rpcstream --from chainhead --entity block\n\n"
         "rpcstream --from 95000000 --entity block,transaction\n\n"
         "rpcstream --from 95000000 --to 95000100 --entity block,transaction\n\n"
+
+        "rpcstream benchmark --mode concurrent --sink blackhole --output-file benchmark.json\n\n"
+
         "rpcstream dlq retry\n\n"
         "rpcstream config print"
     ),
@@ -43,6 +47,7 @@ config_app = typer.Typer(help="Validate and inspect effective config.", no_args_
 
 app.add_typer(dlq_app, name="dlq")
 app.add_typer(config_app, name="config")
+app.command("benchmark", help="Benchmark ingestion latency and throughput.")(benchmark_command)
 
 
 def _default_config_path() -> str:
@@ -191,7 +196,7 @@ def main(
         _fail(exc)
 
 
-@app.command("init")
+@app.command("init", help="Provision Kafka topics and pre-register adapter schemas.")
 def kafka_init(
     config_path: str = typer.Option(
         None,

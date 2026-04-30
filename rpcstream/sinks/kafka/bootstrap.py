@@ -1,27 +1,8 @@
 from __future__ import annotations
 
-from rpcstream.adapters.evm.schema import EVM_ENTITY_SCHEMAS, EntitySchema
+from rpcstream.adapters import build_chain_adapter
 from rpcstream.sinks.kafka.admin import KafkaTopicManager
-from rpcstream.sinks.kafka.protobuf import (
-    CHECKPOINT_SCHEMA,
-    DLQ_SCHEMA,
-    WATERMARK_STATE_SCHEMA,
-    ProtobufSerializerRegistry,
-)
-
-
-def build_protobuf_topic_schemas(topic_maps, entities: list[str]) -> dict[str, EntitySchema]:
-    topic_schemas = {
-        topic_maps.main[entity]: EVM_ENTITY_SCHEMAS[entity]
-        for entity in entities
-        if entity in EVM_ENTITY_SCHEMAS
-    }
-    topic_schemas[topic_maps.dlq] = DLQ_SCHEMA
-    if getattr(topic_maps, "checkpoint", None):
-        topic_schemas[topic_maps.checkpoint] = CHECKPOINT_SCHEMA
-    if getattr(topic_maps, "watermark_state", None):
-        topic_schemas[topic_maps.watermark_state] = WATERMARK_STATE_SCHEMA
-    return topic_schemas
+from rpcstream.sinks.kafka.protobuf import ProtobufSerializerRegistry
 
 
 def all_topics(topic_maps) -> list[str]:
@@ -34,7 +15,8 @@ def all_topics(topic_maps) -> list[str]:
     return topics
 
 
-def bootstrap_kafka_resources(runtime, logger=None) -> None:
+def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
+    adapter = adapter or build_chain_adapter(runtime.chain.type)
     topic_manager = KafkaTopicManager(
         producer_config=runtime.kafka.config,
         logger=logger,
@@ -63,7 +45,10 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
     protobuf_registry = ProtobufSerializerRegistry(
         schema_registry_url=runtime.kafka.schema_registry_url,
         producer_config=runtime.kafka.config,
-        topic_schemas=build_protobuf_topic_schemas(runtime.topic_map, runtime.entities),
+        topic_schemas=adapter.build_protobuf_topic_schemas(
+            topic_maps=runtime.topic_map,
+            entities=runtime.entities,
+        ),
         logger=logger,
     )
     protobuf_registry.start()

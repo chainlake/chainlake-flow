@@ -20,7 +20,7 @@ def build_unified_dlq_record(
     network: str,
     pipeline: str,
     entity: str,
-    block_number: int | None,
+    cursor: int | None,
     stage: str,
     error_type: str,
     error_message: str,
@@ -45,7 +45,7 @@ def build_unified_dlq_record(
         "network": network,
         "pipeline": pipeline,
         "entity": entity,
-        "block_number": block_number,
+        "cursor": cursor,
         "stage": stage,
         "error_type": error_type,
         "error_message": error_message,
@@ -60,8 +60,8 @@ def build_unified_dlq_record(
         "ingest_timestamp": ingest_ts,
     }
 
-    partition_block = block_number if block_number is not None else "unknown"
-    record["kafka_partition_key"] = f"{chain}_{entity}_{partition_block}"
+    partition_cursor = cursor if cursor is not None else "unknown"
+    record["kafka_partition_key"] = f"{chain}_{entity}_{partition_cursor}"
     record["id"] = record_id or _build_record_id(record)
     return record
 
@@ -122,7 +122,7 @@ def build_retry_record(
         network=previous_record["network"],
         pipeline=previous_record["pipeline"],
         entity=previous_record["entity"],
-        block_number=previous_record.get("block_number"),
+        cursor=previous_record.get("cursor"),
         stage=previous_record["stage"],
         error_type=error_type,
         error_message=error_message,
@@ -156,7 +156,7 @@ def build_resolved_record(
         network=previous_record["network"],
         pipeline=previous_record["pipeline"],
         entity=previous_record["entity"],
-        block_number=previous_record.get("block_number"),
+        cursor=previous_record.get("cursor"),
         stage=previous_record["stage"],
         error_type=previous_record.get("error_type", "Resolved"),
         error_message=previous_record.get("error_message", "resolved"),
@@ -205,7 +205,7 @@ def _build_record_id(record: dict[str, Any]) -> str:
                 "network": record["network"],
                 "pipeline": record["pipeline"],
                 "entity": record["entity"],
-                "block_number": record["block_number"],
+                "cursor": record["cursor"],
                 "stage": record["stage"],
                 "error_type": record["error_type"],
                 "error_message": record["error_message"],

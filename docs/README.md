@@ -44,6 +44,10 @@ Semantics:
   realtime from a specific cursor
 - `rpcstream --from <cursor> --to <cursor>`
   bounded backfill
+- `rpcstream init`
+  optional environment preparation only; it creates topics and pre-registers
+  protobuf schemas, but it is not required before starting ingestion because
+  schemas are auto-registered on first write
 
 ## Core Runtime Docs
 

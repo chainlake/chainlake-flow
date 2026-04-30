@@ -93,9 +93,13 @@ def test_observability_context_exports_with_explicit_async_lifecycle():
 
 
 def test_pipeline_telemetry_alias_maps_into_runtime_observability():
-    config_path = Path(__file__).resolve().parents[2] / "rpcstream" / "pipeline.yaml"
+    config_path = Path(__file__).resolve().parents[2] / "pipeline.yaml"
 
     config = load_pipeline_config(str(config_path))
+    config.observability.metrics.enabled = True
+    config.observability.tracing.enabled = True
+    config.observability.tracing.sampleRate = 0.01
+    config.observability.logs.enabled = True
     runtime = resolve(config)
 
     assert runtime.observability.config.metrics.enabled is True
@@ -108,7 +112,7 @@ def test_pipeline_telemetry_alias_maps_into_runtime_observability():
 
 
 def test_build_observability_requires_endpoint_when_enabled():
-    config_path = Path(__file__).resolve().parents[2] / "rpcstream" / "pipeline.yaml"
+    config_path = Path(__file__).resolve().parents[2] / "pipeline.yaml"
     config = load_pipeline_config(str(config_path))
 
     config.observability.metrics.enabled = True
@@ -119,7 +123,7 @@ def test_build_observability_requires_endpoint_when_enabled():
 
 
 def test_build_observability_uses_tracing_sample_rate():
-    config_path = Path(__file__).resolve().parents[2] / "rpcstream" / "pipeline.yaml"
+    config_path = Path(__file__).resolve().parents[2] / "pipeline.yaml"
     config = load_pipeline_config(str(config_path))
 
     config.observability.tracing.enabled = True

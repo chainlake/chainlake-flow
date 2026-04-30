@@ -102,7 +102,7 @@ def build_backfill_engine(*, sink):
         pipeline=SimpleNamespace(
             name="bsc_mainnet_backfill_10_20",
             mode="backfill",
-            end_block=20,
+            end_cursor=20,
         ),
         max_retry=1,
         concurrency=1,
@@ -129,7 +129,7 @@ def test_engine_sends_trace_dlq_record_when_processor_fails():
     assert len(rows) == 1
     record = rows[0]
     assert record["entity"] == "trace"
-    assert record["block_number"] == 95281318
+    assert record["cursor"] == 95281318
     assert record["stage"] == "processor"
     assert record["error_type"] == "TypeError"
     assert record["error_message"] == "list indices must be integers or slices, not str"
@@ -185,7 +185,7 @@ def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
         "network": "bsc-mainnet",
         "pipeline": "bsc_mainnet_realtime_checkpoint",
         "entity": "trace",
-        "block_number": 95281318,
+        "cursor": 95281318,
         "stage": "processor",
         "error_type": "TypeError",
         "error_message": "boom",

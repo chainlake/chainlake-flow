@@ -1,7 +1,5 @@
 from dataclasses import dataclass
 
-from rpcstream.adapters.evm.dag import topic_kind_for_entity
-
 UNIFIED_DLQ_TOPIC = "dlq.ingestion"
 
 
@@ -22,7 +20,7 @@ def normalize_entity(entity: str) -> str:
     return entity.strip().lower()
 
 
-def build_topics(cfg, entity: str) -> TopicSet:
+def build_topics(cfg, entity: str, adapter=None) -> TopicSet:
     template = (
         cfg.kafka.common.topic_template
         or "{type}.{chain}.{network}.{kind}_{entity}"
@@ -36,6 +34,12 @@ def build_topics(cfg, entity: str) -> TopicSet:
             entity=entity,
             kind=kind,
         )
+
+    topic_kind_for_entity = (
+        adapter.topic_kind_for_entity
+        if adapter is not None
+        else (lambda _entity: "raw")
+    )
 
     return TopicSet(
         main=render(topic_kind_for_entity(entity)),

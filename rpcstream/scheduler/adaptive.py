@@ -9,7 +9,7 @@ from rpcstream.client.models import (
     is_expected_rpc_warning,
     summarize_exception,
 )
-from rpcstream.adapters.base import BaseRpcRequest  # Generic RPC request
+from rpcstream.protocol.request import BaseRpcRequest  # Generic RPC request
 from rpcstream.scheduler.base import BaseScheduler
 from rpcstream.runtime.observability.context import ObservabilityContext
 

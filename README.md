@@ -112,7 +112,11 @@ rpcstream --from 95000000 --to 95000100 --entity block,transaction
 rpcstream init
 ```
 
-This initializes Kafka topics and protobuf schemas from `pipeline.yaml`.
+This is an optional environment-preparation step.
+It creates the Kafka topics and pre-registers protobuf schemas from
+`pipeline.yaml`, but ingestion does not depend on it.
+`rpcstream` can still start without it because protobuf schemas are
+auto-registered on first use.
 
 ### DLQ workflows
 

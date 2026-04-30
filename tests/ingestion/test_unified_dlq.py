@@ -16,7 +16,7 @@ def test_build_unified_dlq_record_uses_shared_topic_fields_and_partition_key():
         network="bsc-mainnet",
         pipeline="bsc_mainnet_ingestion",
         entity="transaction",
-        block_number=90000100,
+        cursor=90000100,
         stage="processor",
         error_type="DecodeError",
         error_message="bad payload",
@@ -34,7 +34,7 @@ def test_build_unified_dlq_record_uses_shared_topic_fields_and_partition_key():
     assert record["network"] == "bsc-mainnet"
     assert record["pipeline"] == "bsc_mainnet_ingestion"
     assert record["entity"] == "transaction"
-    assert record["block_number"] == 90000100
+    assert record["cursor"] == 90000100
     assert record["payload"]["type"] == "dict"
     assert record["payload"]["size"] == 2
     assert record["payload"]["preview"]["hash"] == "0x1"
@@ -50,7 +50,7 @@ def test_build_unified_dlq_record_summarizes_large_payload():
         network="bsc-mainnet",
         pipeline="bsc_mainnet_ingestion",
         entity="receipt",
-        block_number=90000100,
+        cursor=90000100,
         stage="processor",
         error_type="TimeoutError",
         error_message="timeout",
@@ -72,7 +72,7 @@ def test_retry_record_uses_exponential_backoff_and_preserves_identity():
         network="bsc-mainnet",
         pipeline="bsc_mainnet_ingestion",
         entity="transaction",
-        block_number=90000100,
+        cursor=90000100,
         stage="rpc",
         error_type="TimeoutError",
         error_message="timeout",
@@ -125,7 +125,7 @@ def test_resolved_record_and_replay_filter_match_latest_state():
         network="bsc-mainnet",
         pipeline="bsc_mainnet_ingestion",
         entity="transaction",
-        block_number=90000100,
+        cursor=90000100,
         stage="processor",
         error_type="DecodeError",
         error_message="bad payload",

@@ -6,23 +6,14 @@ from confluent_kafka import Producer
 
 from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.resolver import resolve
+from rpcstream.adapters import build_chain_adapter
 from rpcstream.runtime.observability.provider import build_observability
 
 from rpcstream.client.jsonrpc import JsonRpcClient
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
-
 from rpcstream.ingestion.engine import IngestionEngine
-from rpcstream.ingestion.fetcher import EvmRpcFetcher
 from rpcstream.sinks.kafka.producer import KafkaWriter
-
-from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
-from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
-from rpcstream.adapters.evm.enrich import EvmEnricher
-from rpcstream.adapters.evm.processor import PROCESSOR_REGISTRY
-from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
-
-from rpcstream.planner.block_source import build_block_source
-from rpcstream.runtime.block_tracker import BlockHeadTracker
+from rpcstream.planner.cursor_source import build_cursor_source
 from rpcstream.state.checkpoint import (
     KafkaCheckpointReader,
     KafkaWatermarkStateReader,
@@ -71,6 +62,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
 
     # Resolve config
     runtime = resolve(config)
+    adapter = build_chain_adapter(runtime.chain.type)
     topic_maps = runtime.topic_map
     main_topics = topic_maps.main
     dlq_topics = topic_maps.dlq
@@ -90,10 +82,10 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
     checkpoint_identity = None
     resume_cursor = None
     state_records = {}
-    pipeline_start_block = getattr(runtime.pipeline, "start_block", "checkpoint")
+    pipeline_start_cursor = getattr(runtime.pipeline, "start_cursor", "checkpoint")
     checkpoint_resume_enabled = (
         runtime.pipeline.mode == "backfill"
-        or pipeline_start_block == "checkpoint"
+        or pipeline_start_cursor == "checkpoint"
     )
     
     try:
@@ -111,7 +103,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         # TRACKER
         # -------------------------
         if runtime.pipeline.mode == "realtime":
-            tracker = BlockHeadTracker(
+            tracker = adapter.build_tracker(
                 client=client,
                 poll_interval=runtime.tracker.poll_interval,
                 logger=logger,
@@ -132,8 +124,12 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             observability=observability,
         )
 
-        # Pass tracker to fetcher
-        fetcher = EvmRpcFetcher(scheduler, internal_entities, logger, tracker)
+        fetcher = adapter.build_fetcher(
+            scheduler=scheduler,
+            entities=internal_entities,
+            logger=logger,
+            tracker=tracker,
+        )
 
         # -------------------------
         # CHECKPOINT
@@ -177,10 +173,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         # PROCESSOR
         # -------------------------
         # Load processors dynamically based on the YAML configuration
-        processors = {
-            entity: PROCESSOR_REGISTRY[entity]
-            for entity in internal_entities
-        }
+        processors = adapter.build_processors(entities=internal_entities)
                 
         
         # -------------------------
@@ -190,15 +183,18 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
 
         kafka_write = KafkaWriter(
             producer=producer,
-            id_calculator=EventIdCalculator(),
-            time_calculator=EventTimeCalculator(),
+            id_calculator=adapter.build_event_id_calculator(),
+            time_calculator=adapter.build_event_time_calculator(),
             logger=logger,
             config=runtime.kafka.streaming,
             producer_config=runtime.kafka.config,
             topic_maps=topic_maps,
             protobuf_enabled=runtime.kafka.protobuf_enabled,
             schema_registry_url=runtime.kafka.schema_registry_url,
-            protobuf_topic_schemas=build_protobuf_topic_schemas(topic_maps, runtime.entities),
+            protobuf_topic_schemas=adapter.build_protobuf_topic_schemas(
+                topic_maps=topic_maps,
+                entities=runtime.entities,
+            ),
             observability=observability,
             eos_enabled=runtime.kafka.eos_enabled,
             eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
@@ -225,7 +221,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         engine = IngestionEngine(
             fetcher=fetcher,
             processors=processors,
-            enricher=EvmEnricher(),
+            enricher=adapter.build_enricher(),
             sink=kafka_write,
             topics=main_topics,
             dlq_topic=dlq_topics,
@@ -243,14 +239,14 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         # -------------------------
         # RUN PIPELINE
         # -------------------------
-        block_source = build_block_source(
+        cursor_source = build_cursor_source(
             runtime,
             tracker,
             observability=observability,
             resume_cursor=resume_cursor,
         )
         
-        await engine.run_stream(block_source, shutdown_event=shutdown_event)
+        await engine.run_stream(cursor_source, shutdown_event=shutdown_event)
         
     finally:
         if tracker is not None:
