@@ -79,7 +79,8 @@ def test_build_topic_maps_only_includes_main_and_dlq_topics():
     assert topic_maps.main["block"] == "evm.bsc.mainnet.raw_block"
     assert topic_maps.main["trace"] == "evm.bsc.mainnet.raw_trace"
     assert topic_maps.dlq == "dlq.ingestion"
-    assert topic_maps.checkpoint == "evm.bsc.mainnet.checkpoint_cursor"
+    assert topic_maps.checkpoint == "evm.bsc.mainnet.commit_watermark"
+    assert topic_maps.watermark_state == "evm.bsc.mainnet.cursor_state"
 
 
 def test_build_topic_maps_uses_enriched_topic_for_transactions():
@@ -113,6 +114,7 @@ def test_build_topic_maps_supports_custom_checkpoint_topic():
     topic_maps = build_topic_maps(cfg)
 
     assert topic_maps.checkpoint == "custom.checkpoints"
+    assert topic_maps.watermark_state == "custom.checkpoints.cursor_state"
 
 
 def test_build_kafka_config_enables_eos_transactional_settings(monkeypatch):

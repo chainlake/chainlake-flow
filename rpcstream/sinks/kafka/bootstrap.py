@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from rpcstream.adapters.evm.schema import EVM_ENTITY_SCHEMAS, EntitySchema
 from rpcstream.sinks.kafka.admin import KafkaTopicManager
-from rpcstream.sinks.kafka.protobuf import CHECKPOINT_SCHEMA, DLQ_SCHEMA, ProtobufSerializerRegistry
+from rpcstream.sinks.kafka.protobuf import (
+    CHECKPOINT_SCHEMA,
+    DLQ_SCHEMA,
+    WATERMARK_STATE_SCHEMA,
+    ProtobufSerializerRegistry,
+)
 
 
 def build_protobuf_topic_schemas(topic_maps, entities: list[str]) -> dict[str, EntitySchema]:
@@ -14,6 +19,8 @@ def build_protobuf_topic_schemas(topic_maps, entities: list[str]) -> dict[str, E
     topic_schemas[topic_maps.dlq] = DLQ_SCHEMA
     if getattr(topic_maps, "checkpoint", None):
         topic_schemas[topic_maps.checkpoint] = CHECKPOINT_SCHEMA
+    if getattr(topic_maps, "watermark_state", None):
+        topic_schemas[topic_maps.watermark_state] = WATERMARK_STATE_SCHEMA
     return topic_schemas
 
 
@@ -22,6 +29,8 @@ def all_topics(topic_maps) -> list[str]:
     topics.extend(topic_maps.main.values())
     if topic_maps.dlq:
         topics.append(topic_maps.dlq)
+    if getattr(topic_maps, "watermark_state", None):
+        topics.append(topic_maps.watermark_state)
     return topics
 
 
@@ -31,7 +40,9 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
         logger=logger,
     )
     topic_manager.ensure_topics(all_topics(runtime.topic_map))
-    topic_manager.ensure_compacted_topics([runtime.checkpoint.topic])
+    topic_manager.ensure_compacted_topics(
+        [runtime.checkpoint.topic, runtime.checkpoint.watermark_state_topic]
+    )
 
     if not runtime.kafka.protobuf_enabled:
         if logger:
@@ -40,6 +51,7 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
                 component="sink",
                 protobuf_enabled=False,
                 checkpoint_topic=runtime.checkpoint.topic,
+                watermark_state_topic=runtime.checkpoint.watermark_state_topic,
             )
         return
 
@@ -64,4 +76,5 @@ def bootstrap_kafka_resources(runtime, logger=None) -> None:
             topic_count=len(all_topics(runtime.topic_map)),
             schema_topic_count=len(protobuf_registry.topic_schemas),
             checkpoint_topic=runtime.checkpoint.topic,
+            watermark_state_topic=runtime.checkpoint.watermark_state_topic,
         )

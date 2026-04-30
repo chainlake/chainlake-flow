@@ -73,7 +73,7 @@ class RealtimeBlockSource(BlockSource):
     def __init__(
         self,
         tracker,
-        start_block: int | str = "latest",
+        start_block: int | str = "chainhead",
         observability: ObservabilityContext | None = None,
     ):
         self.tracker = tracker
@@ -100,7 +100,7 @@ class RealtimeBlockSource(BlockSource):
             # FIRST BLOCK
             # -------------------------
             if self.last_emitted is None:
-                if self.start_block == "latest":
+                if self.start_block in {"latest", "chainhead"}:
                     self.last_emitted = latest
                     return latest
 
@@ -139,10 +139,12 @@ def build_block_source(
         )
 
     start_block = runtime.pipeline.start_block
-    if resume_cursor is not None:
+    if start_block == "checkpoint" and resume_cursor is not None:
         start_block = resume_cursor + 1
     elif start_block == "checkpoint":
-        start_block = "latest"
+        start_block = "chainhead"
+    elif start_block == "latest":
+        start_block = "chainhead"
 
     return RealtimeBlockSource(
         tracker,

@@ -126,7 +126,9 @@ class PipelineConfigModel(BaseModel):
                 raise ValueError("pipeline.to is not allowed in realtime mode")
             if isinstance(self.from_, str):
                 start_value = self.from_.strip().lower()
-                if start_value not in {"latest", "checkpoint"}:
+                if start_value == "latest":
+                    start_value = "chainhead"
+                if start_value not in {"chainhead", "checkpoint"}:
                     _parse_block_number(start_value, "pipeline.from")
                 self.from_ = start_value
             else:

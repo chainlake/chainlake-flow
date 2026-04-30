@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from rpcstream.adapters.evm.enrich import EvmEnricher
 from rpcstream.ingestion.engine import IngestionEngine
+from rpcstream.state.checkpoint import CheckpointIdentity, WatermarkManager
 
 
 class DummyFetcher:
@@ -60,11 +61,11 @@ def build_engine(*, sink, eos_enabled=False):
         topics={"trace": "evm.bsc.mainnet.raw_trace"},
         dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
-        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpointed_latest"),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
         max_retry=1,
         concurrency=1,
         logger=None,
-        checkpoint_manager=None,
+        watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=eos_enabled,
     )
@@ -79,11 +80,11 @@ def build_success_engine(*, sink, eos_enabled=False):
         topics={"trace": "evm.bsc.mainnet.raw_trace"},
         dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
-        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpointed_latest"),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
         max_retry=1,
         concurrency=1,
         logger=None,
-        checkpoint_manager=None,
+        watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=eos_enabled,
     )
@@ -106,7 +107,7 @@ def build_backfill_engine(*, sink):
         max_retry=1,
         concurrency=1,
         logger=None,
-        checkpoint_manager=None,
+        watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=False,
     )
@@ -116,10 +117,11 @@ def test_engine_sends_trace_dlq_record_when_processor_fails():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=False)
 
-    success, delivery_futures = asyncio.run(engine._run_one(95281318))
+    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(95281318))
 
     assert success is False
     assert delivery_futures == []
+    assert expected_watermark is None
     assert len(sink.sent) == 1
     topic, rows, wait_delivery = sink.sent[0]
     assert topic == "dlq.ingestion"
@@ -138,10 +140,11 @@ def test_engine_sends_trace_dlq_via_transaction_when_eos_enabled():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=True)
 
-    success, delivery_futures = asyncio.run(engine._run_one(95281318))
+    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(95281318))
 
     assert success is False
     assert delivery_futures == []
+    assert expected_watermark is None
     assert sink.sent == []
     assert len(sink.sent_transactions) == 1
     topic_rows = sink.sent_transactions[0]
@@ -156,10 +159,11 @@ def test_engine_sends_business_rows_via_transaction_when_eos_enabled_without_che
     sink = RecordingSink()
     engine = build_success_engine(sink=sink, eos_enabled=True)
 
-    success, delivery_futures = asyncio.run(engine._run_one(95281318))
+    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(95281318))
 
     assert success is True
     assert delivery_futures == []
+    assert expected_watermark is None
     assert sink.sent == []
     assert len(sink.sent_transactions) == 1
     topic_rows = sink.sent_transactions[0]
@@ -179,7 +183,7 @@ def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
         "id": "dlq-1",
         "chain": "evm",
         "network": "bsc-mainnet",
-        "pipeline": "bsc_mainnet_realtime_checkpointed_latest",
+        "pipeline": "bsc_mainnet_realtime_checkpoint",
         "entity": "trace",
         "block_number": 95281318,
         "stage": "processor",
@@ -211,3 +215,129 @@ def test_backfill_compute_lag_uses_end_block_as_remaining_work():
     assert latest_block is None
     assert chain_lag is None
     assert ingestion_lag == 8
+
+
+def test_engine_eos_checkpoint_uses_contiguous_watermark():
+    sink = RecordingSink()
+    identity = CheckpointIdentity(
+        pipeline="pipe",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="realtime",
+        primary_unit="block",
+        entities=("trace",),
+    )
+    watermark_manager = WatermarkManager(
+        sink=sink,
+        topic="evm.bsc.mainnet.commit_watermark",
+        state_topic="evm.bsc.mainnet.cursor_state",
+        identity=identity,
+        initial_cursor=99,
+        flush_on_advance=False,
+    )
+    engine = build_success_engine(sink=sink, eos_enabled=True)
+    engine.watermark_manager = watermark_manager
+
+    async def run():
+        await watermark_manager.mark_emitted(100)
+        await watermark_manager.mark_emitted(101)
+
+        success_101, delivery_futures_101, expected_101 = await engine._run_one(101)
+        await engine._finalize_checkpoint(
+            101,
+            success_101,
+            delivery_futures_101,
+            expected_watermark=expected_101,
+        )
+
+        success_100, delivery_futures_100, expected_100 = await engine._run_one(100)
+        await engine._finalize_checkpoint(
+            100,
+            success_100,
+            delivery_futures_100,
+            expected_watermark=expected_100,
+        )
+
+        return expected_101, expected_100
+
+    expected_101, expected_100 = asyncio.run(run())
+
+    assert expected_101 is None
+    assert expected_100 == 101
+    assert sink.sent == []
+    assert watermark_manager.cursor == 101
+    assert len(sink.sent_transactions) == 2
+    assert sink.sent_transactions[0][0] == (
+        "evm.bsc.mainnet.raw_trace",
+        [{"type": "trace", "block_number": 101, "trace_id": "101-root"}],
+    )
+    state_topic_101, state_rows_101 = sink.sent_transactions[0][1]
+    assert state_topic_101 == "evm.bsc.mainnet.cursor_state"
+    assert len(state_rows_101) == 1
+    assert state_rows_101[0]["cursor"] == 101
+    assert state_rows_101[0]["status"] == "completed"
+    assert sink.sent_transactions[1][0] == (
+        "evm.bsc.mainnet.raw_trace",
+        [{"type": "trace", "block_number": 100, "trace_id": "100-root"}],
+    )
+    checkpoint_topic, checkpoint_rows = sink.sent_transactions[1][1]
+    assert checkpoint_topic == "evm.bsc.mainnet.commit_watermark"
+    assert len(checkpoint_rows) == 1
+    checkpoint_row = checkpoint_rows[0]
+    assert checkpoint_row["cursor"] == 101
+    assert checkpoint_row["status"] == "running"
+    assert checkpoint_row["pipeline"] == "pipe"
+    assert checkpoint_row["chain_uid"] == "evm:56"
+    assert checkpoint_row["chain_type"] == "evm"
+    assert checkpoint_row["network"] == "mainnet"
+    assert checkpoint_row["mode"] == "realtime"
+    assert checkpoint_row["primary_unit"] == "block"
+    assert checkpoint_row["entities"] == ["trace"]
+    assert checkpoint_row["id"] == identity.key
+    assert checkpoint_row["kafka_partition_key"] == identity.key
+    assert checkpoint_row["updated_at_ms"] > 0
+
+
+def test_engine_eos_sequential_success_does_not_write_cursor_state():
+    sink = RecordingSink()
+    identity = CheckpointIdentity(
+        pipeline="pipe",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="realtime",
+        primary_unit="block",
+        entities=("trace",),
+    )
+    watermark_manager = WatermarkManager(
+        sink=sink,
+        topic="evm.bsc.mainnet.commit_watermark",
+        state_topic="evm.bsc.mainnet.cursor_state",
+        identity=identity,
+        initial_cursor=99,
+        flush_on_advance=False,
+    )
+    engine = build_success_engine(sink=sink, eos_enabled=True)
+    engine.watermark_manager = watermark_manager
+
+    async def run():
+        await watermark_manager.mark_emitted(100)
+        success, delivery_futures, expected_watermark = await engine._run_one(100)
+        await engine._finalize_checkpoint(
+            100,
+            success,
+            delivery_futures,
+            expected_watermark=expected_watermark,
+        )
+
+    asyncio.run(run())
+
+    assert len(sink.sent_transactions) == 1
+    assert sink.sent_transactions[0][0] == (
+        "evm.bsc.mainnet.raw_trace",
+        [{"type": "trace", "block_number": 100, "trace_id": "100-root"}],
+    )
+    checkpoint_topic, checkpoint_rows = sink.sent_transactions[0][1]
+    assert checkpoint_topic == "evm.bsc.mainnet.commit_watermark"
+    assert checkpoint_rows[0]["cursor"] == 100

@@ -31,9 +31,9 @@ def test_backfill_block_source_emits_bounded_range():
     assert asyncio.run(run()) == [10, 11, 12, None]
 
 
-def test_realtime_block_source_latest_starts_from_head():
+def test_realtime_block_source_chainhead_starts_from_head():
     async def run():
-        source = RealtimeBlockSource(DummyTracker([100, 100, 101]), start_block="latest")
+        source = RealtimeBlockSource(DummyTracker([100, 100, 101]), start_block="chainhead")
         return [
             await source.next_block(),
             await source.next_block(),
@@ -78,3 +78,27 @@ def test_build_block_source_resumes_realtime_after_checkpoint():
         return [await source.next_block(), await source.next_block()]
 
     assert asyncio.run(run()) == [104, 105]
+
+
+def test_build_block_source_chainhead_ignores_saved_commit_watermark():
+    runtime = SimpleNamespace(
+        pipeline=SimpleNamespace(mode="realtime", start_block="chainhead", end_block=None)
+    )
+
+    async def run():
+        source = build_block_source(runtime, DummyTracker([105, 106]), resume_cursor=103)
+        return [await source.next_block(), await source.next_block()]
+
+    assert asyncio.run(run()) == [105, 106]
+
+
+def test_build_block_source_explicit_realtime_start_ignores_saved_commit_watermark():
+    runtime = SimpleNamespace(
+        pipeline=SimpleNamespace(mode="realtime", start_block=100, end_block=None)
+    )
+
+    async def run():
+        source = build_block_source(runtime, DummyTracker([105, 106]), resume_cursor=103)
+        return [await source.next_block(), await source.next_block(), await source.next_block()]
+
+    assert asyncio.run(run()) == [100, 101, 102]

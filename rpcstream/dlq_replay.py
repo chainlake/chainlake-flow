@@ -33,7 +33,12 @@ async def run_dlq_replay(
     config_path = config_path or os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
     group_id = group_id or os.getenv("DLQ_REPLAY_GROUP_ID", DEFAULT_REPLAY_GROUP)
 
-    stack = build_runtime_stack(config_path=config_path, config=config, with_tracker=False)
+    stack = build_runtime_stack(
+        config_path=config_path,
+        config=config,
+        with_tracker=False,
+        with_checkpoint=True,
+    )
     dlq_client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
         producer_config=stack.runtime.kafka.config,

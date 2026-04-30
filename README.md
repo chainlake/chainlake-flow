@@ -1,176 +1,261 @@
 # Chainlake Flow
 
-**Chainlake Flow** is a blockchain-native streaming ingestion system for realtime and historical blockchain data.
+Chainlake Flow is a blockchain ingestion runtime built around `rpcstream`.
+It supports:
 
-Powered by **RPCStream Engine**, it delivers deterministic block streams over high-availability RPC pools — without requiring self-hosted archive nodes.
+- realtime streaming from chainhead or from saved progress
+- bounded historical backfill
+- Kafka delivery with optional EOS
+- DLQ retry and replay
+- EVM entity parsing and enrich
 
-> Deterministic blockchain streams over RPC.
+The current primary target is low-latency blockchain ingestion over RPC, without requiring self-hosted archive nodes.
 
----
+## Status
 
-## Why Chainlake Flow
+Current implementation is centered on:
 
-Most blockchain data pipelines rely on:
+- EVM chains
+- Kafka as the sink
+- Protobuf + Schema Registry
+- `commit_watermark` and `cursor_state` based recovery
 
-* full archive nodes
-* local chain file access
-* offline ETL workflows
-* batch-oriented exports
+Planned or partial work exists for additional chains and sinks, but the README below reflects the current runnable system.
 
-Chainlake Flow takes a different approach:
+## Install
 
-* RPC-native streaming
-* adaptive async concurrency
-* deterministic ordered delivery
-* realtime + backfill on the same runtime
-
-This makes blockchain ingestion lighter, cheaper, and easier to scale.
-
----
-
-## Core Capabilities
-
-* ultra-low latency realtime ingestion
-* high-throughput historical backfill
-* ordered block processing
-* adaptive RPC scheduling
-* Kafka-native downstream delivery
-* multi-chain extensibility
-
----
-
-## Unified Streaming Model
-
-Chainlake Flow runs both modes on the same engine:
-
-### Bounded Stream
-
-Historical block-range replay.
-
-### Unbounded Stream
-
-Realtime latest-block tailing.
-
-No duplicated ingestion path.
-
----
-
-## Architecture
-
-```mermaid
-flowchart TD
-
-A[eRPC High Availability RPC Pool]
-
-A --> B[RPCStream Engine]
-
-B --> C[Adaptive Scheduler]
-
-C --> D[Concurrent Block / Trace Fetch Workers]
-
-D --> E[Decode + Normalize Pipeline]
-
-E --> F[Deterministic Ordering Buffer]
-
-F --> G[Kafka / Lakehouse Sink]
-
-G --> H[Realtime Semantic Layer]
-
-G --> I[Historical Semantic Lakehouse]
-```
-
----
-
-## Project Structure
+From the repository root:
 
 ```bash
+uv pip install -e .
+```
+
+Or with the project virtualenv:
+
+```bash
+source .venv/bin/activate
+pip install -e .
+```
+
+After editable install, the main entrypoint is:
+
+```bash
+rpcstream
+```
+
+## Configuration
+
+The single default runtime config lives at:
+
+[pipeline.yaml](chainlake-flow/pipeline.yaml)
+
+By default, `rpcstream` looks for `pipeline.yaml` in the current working directory.
+
+Typical local usage is therefore:
+
+```bash
+cd chainlake-flow
+rpcstream
+```
+
+If you run from another directory, pass the config explicitly:
+
+```bash
+rpcstream --config chainlake-flow/pipeline.yaml
+```
+
+Environment variables are loaded from the nearest `.env` discovered from the config path upward. For local environment switching, prefer one `pipeline.yaml` plus explicit env files loaded in the shell.
+
+## CLI
+
+The root command handles ingestion directly.
+
+### Realtime from checkpoint
+
+Resume from saved `commit_watermark` when present. If no checkpoint exists yet, start from the current chainhead.
+
+```bash
+rpcstream
+```
+
+Equivalent to:
+
+```bash
+rpcstream --from checkpoint
+```
+
+### Realtime from chainhead
+
+Ignore saved progress and start from the current chainhead.
+
+```bash
+rpcstream --from chainhead
+```
+
+`--from latest` is still accepted as a compatibility alias, but `chainhead` is the canonical form.
+
+### Realtime from a specific cursor
+
+```bash
+rpcstream --from 95000000 --entity block,transaction
+```
+
+### Bounded backfill
+
+```bash
+rpcstream --from 95000000 --to 95000100 --entity block,transaction
+```
+
+### Topic and schema initialization
+
+```bash
+rpcstream init
+```
+
+This initializes Kafka topics and protobuf schemas from `pipeline.yaml`.
+
+### DLQ workflows
+
+```bash
+rpcstream dlq retry
+rpcstream dlq replay --entity trace --status pending --stage processor --max-records 5
+```
+
+### Config inspection
+
+```bash
+rpcstream config validate
+rpcstream config print
+```
+
+## Pipeline semantics
+
+`pipeline.yaml` describes:
+
+- chain and network
+- entities to ingest
+- RPC endpoint and inflight settings
+- Kafka connection and topic pattern
+- protobuf and schema registry
+- EOS settings
+- telemetry
+
+The runtime mode is inferred from `from` and `to`:
+
+- `from: checkpoint` or `from: chainhead` or `from: <cursor>` with no `to`: realtime
+- `from: <cursor>` with `to: <cursor>`: backfill
+
+Example:
+
+```yaml
+pipeline:
+  from: "checkpoint"
+
+chain:
+  name: "bsc"
+  network: "mainnet"
+
+entities:
+  - "block"
+  - "transaction"
+```
+
+## Kafka topics
+
+For EVM, the runtime can produce topics such as:
+
+- `evm.bsc.mainnet.raw_block`
+- `evm.bsc.mainnet.enriched_transaction`
+- `evm.bsc.mainnet.raw_log`
+- `evm.bsc.mainnet.raw_trace`
+
+Progress and recovery use:
+
+- `evm.bsc.mainnet.commit_watermark`
+- `evm.bsc.mainnet.cursor_state`
+- `dlq.ingestion`
+
+High-level meaning:
+
+- `commit_watermark`: the last contiguous successfully committed cursor
+- `cursor_state`: gap-only state used to explain and recover holes
+- `dlq.ingestion`: failure records used for retry and replay
+
+Detailed behavior is documented in:
+
+[docs/kafka_eos.md](chainlake-flow/docs/kafka_eos.md)
+
+## EOS and recovery
+
+When Kafka EOS is enabled:
+
+- business topic rows
+- `cursor_state`
+- `commit_watermark`
+
+are committed transactionally.
+
+When EOS is disabled, the same logical model is preserved, but commits are not atomic across topics.
+
+The recovery rule is the same in both modes:
+
+- the durable resume point is `commit_watermark`
+- it only advances when all earlier cursors are contiguous and successful
+
+## EVM entity model
+
+Current EVM ingestion uses:
+
+- internal entities under `rpcstream/adapters/evm/entities`
+- parser + enrich stages
+- final sink schema defined in `rpcstream/adapters/evm/schema.py`
+
+Notable behaviors:
+
+- `transaction` is emitted as `enriched_transaction`
+- `receipt` is treated as an internal dependency and is not emitted as a final raw topic
+- `log` and `trace` are enriched with block context
+
+More detail:
+
+[docs/pipeline_and_entites.md](chainlake-flow/docs/pipeline_and_entites.md)
+
+## Repository layout
+
+```text
 chainlake-flow/
-├── scripts/              # local tooling
-├── docs/                 # design docs
-├── tests/                # integration / benchmark tests
-│
-├── rpcstream/            # RPCStream Engine core
-│   ├── client/           # RPC transport clients
-│   ├── scheduler/        # adaptive RPC scheduling
-│   ├── planner/          # cursor/block source planning
-│   ├── ingestion/        # fetch + process + DLQ flow
-│   ├── adapters/         # chain-specific parsing/enrich/schema logic
-│   ├── runtime/          # runtime assembly + observability
-│   ├── state/            # checkpoint / cursor / replay
-│   ├── sinks/            # kafka / storage outputs
-│   ├── metrics/          # telemetry
-│   ├── config/           # typed config + runtime resolution
-│   ├── cli/              # unified top-level CLI
-│   └── utils/
-│
 ├── pipeline.yaml
-├── pyproject.toml
-├── README.md
-└── LICENSE
+├── docs/
+├── tests/
+├── scripts/
+└── rpcstream/
+    ├── adapters/
+    ├── cli/
+    ├── config/
+    ├── ingestion/
+    ├── planner/
+    ├── runtime/
+    ├── scheduler/
+    ├── sinks/
+    └── state/
 ```
 
----
+## Useful docs
 
-## Supported Chains
+- [docs/README.md](chainlake-flow/docs/README.md)
+- [docs/ingestion_flow.md](chainlake-flow/docs/ingestion_flow.md)
+- [docs/kafka_eos.md](chainlake-flow/docs/kafka_eos.md)
+- [docs/dlq.md](chainlake-flow/docs/dlq.md)
+- [docs/async_rpc_scheduler.md](chainlake-flow/docs/async_rpc_scheduler.md)
+- [docs/observability.md](chainlake-flow/docs/observability.md)
 
-### EVM (current)
+## Current focus
 
-* Ethereum
-* BNB Chain
-* Polygon
+The project is currently optimized for:
 
-### Planned
+- sub-second realtime ingestion latency
+- low `ingestion_lag`
+- deterministic recovery
+- Kafka-native downstream integration
 
-* Sui
-* Aptos
-* Solana
-
----
-
-## Run
-
-### Realtime
-
-```bash
-python cli/realtime.py --chain bsc --start-block latest
-```
-
-### Backfill
-
-```bash
-python cli/backfill.py --chain bsc --start-block 90000000 --end-block 90001000
-```
-
----
-
-## Output Targets
-
-Designed for:
-
-* Apache Kafka
-* Apache Iceberg
-* ClickHouse
-
----
-
-## Positioning
-
-Chainlake Flow is not a traditional blockchain ETL exporter.
-
-It is designed as:
-
-> a deterministic blockchain streaming runtime
-
-for semantic data systems and realtime blockchain lakehouses.
-
----
-
-## Roadmap
-
-* stricter ordering buffer
-* adaptive concurrency controller
-* multi-region RPC routing
-* non-EVM adapter framework
-* semantic-native sinks
-
-Detailed design notes live under `docs`.
+For BSC-style fast block intervals, the current architecture prioritizes stable realtime ingestion over maximum backfill throughput.

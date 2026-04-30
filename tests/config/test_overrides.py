@@ -68,12 +68,12 @@ def test_apply_runtime_overrides_clears_end_block_for_realtime():
     config = make_config()
     backfill = apply_runtime_overrides(config, mode="backfill", from_value=10, to_value=20)
 
-    effective = apply_runtime_overrides(backfill, mode="realtime", from_value="latest")
+    effective = apply_runtime_overrides(backfill, mode="realtime", from_value="chainhead")
 
     assert effective.pipeline.mode == "realtime"
-    assert effective.pipeline.start_block == "latest"
+    assert effective.pipeline.start_block == "chainhead"
     assert effective.pipeline.end_block is None
-    assert effective.pipeline.name == "bsc_mainnet_realtime_latest"
+    assert effective.pipeline.name == "bsc_mainnet_realtime_chainhead"
 
 
 def test_apply_runtime_overrides_can_disable_eos():

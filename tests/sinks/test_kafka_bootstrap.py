@@ -12,7 +12,8 @@ def test_build_protobuf_topic_schemas_includes_main_and_dlq_topics():
             "trace": "evm.bsc.mainnet.raw_trace",
         },
         dlq="dlq.ingestion",
-        checkpoint="evm.bsc.mainnet.checkpoint_cursor",
+        checkpoint="evm.bsc.mainnet.commit_watermark",
+        watermark_state="evm.bsc.mainnet.cursor_state",
     )
 
     schemas = build_protobuf_topic_schemas(topic_maps, ["block", "trace"])
@@ -21,7 +22,8 @@ def test_build_protobuf_topic_schemas_includes_main_and_dlq_topics():
         "evm.bsc.mainnet.raw_block",
         "evm.bsc.mainnet.raw_trace",
         "dlq.ingestion",
-        "evm.bsc.mainnet.checkpoint_cursor",
+        "evm.bsc.mainnet.commit_watermark",
+        "evm.bsc.mainnet.cursor_state",
     }
 
 
@@ -31,7 +33,8 @@ def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
             "transaction": "evm.bsc.mainnet.enriched_transaction",
         },
         dlq="dlq.ingestion",
-        checkpoint="evm.bsc.mainnet.checkpoint_cursor",
+        checkpoint="evm.bsc.mainnet.commit_watermark",
+        watermark_state="evm.bsc.mainnet.cursor_state",
     )
 
     schemas = build_protobuf_topic_schemas(topic_maps, ["transaction"])
@@ -39,7 +42,8 @@ def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
     assert set(schemas) == {
         "evm.bsc.mainnet.enriched_transaction",
         "dlq.ingestion",
-        "evm.bsc.mainnet.checkpoint_cursor",
+        "evm.bsc.mainnet.commit_watermark",
+        "evm.bsc.mainnet.cursor_state",
     }
 
 

@@ -53,6 +53,27 @@ CHECKPOINT_SCHEMA = EntitySchema(
 )
 
 
+WATERMARK_STATE_SCHEMA = EntitySchema(
+    entity="watermark_state",
+    message_name="UnifiedWatermarkStateRecord",
+    fields=(
+        FieldSchema("cursor", "int64"),
+        FieldSchema("status", "string"),
+        FieldSchema("updated_at_ms", "int64"),
+        FieldSchema("pipeline", "string"),
+        FieldSchema("chain_uid", "string"),
+        FieldSchema("chain_type", "string"),
+        FieldSchema("network", "string"),
+        FieldSchema("mode", "string"),
+        FieldSchema("primary_unit", "string"),
+        FieldSchema("entities", "string", repeated=True),
+        FieldSchema("error", "string"),
+        FieldSchema("id", "string"),
+        FieldSchema("ingest_timestamp", "int64"),
+    ),
+)
+
+
 TYPE_MAP = {
     "string": "string",
     "int64": "int64",

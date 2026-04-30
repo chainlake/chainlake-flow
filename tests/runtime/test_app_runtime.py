@@ -30,8 +30,13 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
             eos_init_timeout_sec=12,
         ),
         topic_map=SimpleNamespace(main={"trace": "topic-a"}, dlq="dlq.ingestion"),
-        checkpoint=SimpleNamespace(topic="checkpoint-topic", flush_interval_ms=100, commit_batch_size=100),
-        chain=SimpleNamespace(type="evm"),
+        checkpoint=SimpleNamespace(
+            topic="checkpoint-topic",
+            watermark_state_topic="watermark-state-topic",
+            flush_interval_ms=100,
+            commit_batch_size=100,
+        ),
+        chain=SimpleNamespace(uid="evm:56", type="evm", network="mainnet"),
         engine=SimpleNamespace(concurrency=1),
     )
     fake_config = SimpleNamespace(logLevel="info")
@@ -52,6 +57,14 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
             self.producer_config = kwargs["producer_config"]
             self.eos_enabled = kwargs["eos_enabled"]
 
+    class DummyCheckpointReader:
+        def __init__(self, **kwargs):
+            self.topic = kwargs["topic"]
+            self.identity = kwargs["identity"]
+
+        def load(self):
+            return None
+
     monkeypatch.setattr("rpcstream.app_runtime.load_pipeline_config", lambda _path: fake_config)
     monkeypatch.setattr("rpcstream.app_runtime.resolve", lambda _cfg: fake_runtime)
     monkeypatch.setattr(
@@ -70,12 +83,16 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
     monkeypatch.setattr("rpcstream.app_runtime.EvmRpcFetcher", lambda *args, **kwargs: object())
     monkeypatch.setattr("rpcstream.app_runtime.Producer", DummyProducer)
     monkeypatch.setattr("rpcstream.app_runtime.KafkaWriter", lambda **kwargs: DummyWriter(**kwargs))
+    monkeypatch.setattr("rpcstream.app_runtime.KafkaCheckpointReader", DummyCheckpointReader)
+    monkeypatch.setattr("rpcstream.app_runtime.KafkaWatermarkStateReader", DummyCheckpointReader)
     monkeypatch.setattr("rpcstream.app_runtime.IngestionEngine", lambda **kwargs: kwargs)
     monkeypatch.setattr("rpcstream.app_runtime.build_protobuf_topic_schemas", lambda *_args, **_kwargs: {})
 
-    stack = build_runtime_stack(config_path="pipeline.yaml", with_tracker=False)
+    stack = build_runtime_stack(config_path="pipeline.yaml", with_tracker=False, with_checkpoint=True)
 
     assert stack.engine["eos_enabled"] is True
     assert stack.engine["sink"].eos_enabled is True
     assert stack.engine["sink"].producer_config["transactional.id"] == "tx-1"
     assert stack.engine["sink"].producer_config["transaction.timeout.ms"] == 60000
+    assert stack.engine["watermark_manager"] is not None
+    assert stack.engine["watermark_manager"].flush_on_advance is False

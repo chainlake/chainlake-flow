@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 from rpcstream.state.checkpoint import (
     CheckpointIdentity,
-    CheckpointManager,
     KafkaCheckpointReader,
+    WatermarkManager,
     build_checkpoint_identity,
 )
 
@@ -17,7 +17,16 @@ class MemoryStore:
         self.writes.append((topic, row, wait_delivery))
 
 
-def test_checkpoint_manager_advances_only_contiguous_completed_cursors():
+class FakeStateReader:
+    def __init__(self, topic: str, records: dict | None = None):
+        self.topic = topic
+        self.records = records or {}
+
+    def load(self):
+        return self.records
+
+
+def test_watermark_manager_advances_only_contiguous_completed_cursors():
     async def run():
         sink = MemoryStore()
         identity = CheckpointIdentity(
@@ -29,9 +38,10 @@ def test_checkpoint_manager_advances_only_contiguous_completed_cursors():
             primary_unit="block",
             entities=("block",),
         )
-        manager = CheckpointManager(
+        manager = WatermarkManager(
             sink=sink,
             topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
             identity=identity,
             initial_cursor=99,
             flush_interval_ms=10000,
@@ -61,7 +71,7 @@ def test_checkpoint_manager_advances_only_contiguous_completed_cursors():
     assert row["id"].startswith("pipeline=pipe|")
 
 
-def test_checkpoint_manager_waits_for_first_emitted_cursor_before_advancing():
+def test_watermark_manager_waits_for_first_emitted_cursor_before_advancing():
     async def run():
         sink = MemoryStore()
         identity = CheckpointIdentity(
@@ -73,9 +83,10 @@ def test_checkpoint_manager_waits_for_first_emitted_cursor_before_advancing():
             primary_unit="block",
             entities=("block",),
         )
-        manager = CheckpointManager(
+        manager = WatermarkManager(
             sink=sink,
             topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
             identity=identity,
             flush_interval_ms=10000,
         )
@@ -87,6 +98,42 @@ def test_checkpoint_manager_waits_for_first_emitted_cursor_before_advancing():
         assert manager.cursor is None
 
         await manager.mark_completed(100)
+        assert manager.cursor == 101
+
+    asyncio.run(run())
+
+
+def test_watermark_manager_preview_does_not_jump_failed_gap():
+    async def run():
+        sink = MemoryStore()
+        identity = CheckpointIdentity(
+            pipeline="pipe",
+            chain_uid="evm:56",
+            chain_type="evm",
+            network="mainnet",
+            mode="realtime",
+            primary_unit="block",
+            entities=("block",),
+        )
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=identity,
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            flush_on_advance=False,
+        )
+
+        await manager.mark_emitted(100)
+        await manager.mark_emitted(101)
+
+        assert await manager.preview_completed(101) is None
+        assert await manager.mark_completed(101) is None
+        assert manager.cursor == 99
+
+        assert await manager.preview_completed(100) == 101
+        assert await manager.mark_completed(100) == 101
         assert manager.cursor == 101
 
     asyncio.run(run())
@@ -107,6 +154,47 @@ def test_build_checkpoint_identity_uses_multichain_key_fields():
     assert "entities=checkpoint,transaction" in identity.key
 
 
+def test_watermark_manager_merges_external_state_records():
+    async def run():
+        sink = MemoryStore()
+        identity = CheckpointIdentity(
+            pipeline="pipe",
+            chain_uid="evm:56",
+            chain_type="evm",
+            network="mainnet",
+            mode="realtime",
+            primary_unit="block",
+            entities=("block",),
+        )
+        state_reader = FakeStateReader("watermark-state-topic")
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=identity,
+            initial_cursor=99,
+            flush_on_advance=False,
+        )
+
+        await manager.mark_emitted(100)
+        await manager.mark_emitted(101)
+        await manager.mark_completed(101)
+        assert manager.cursor == 99
+
+        state_reader.records = {
+            100: SimpleNamespace(
+                cursor=100,
+                status="completed",
+                updated_at_ms=1,
+            )
+        }
+        await manager.merge_external_state_records(state_reader.load())
+
+        assert manager.cursor == 101
+
+    asyncio.run(run())
+
+
 def test_kafka_checkpoint_reader_consumer_config_enables_partition_eof():
     identity = CheckpointIdentity(
         pipeline="pipe",
@@ -118,7 +206,7 @@ def test_kafka_checkpoint_reader_consumer_config_enables_partition_eof():
         entities=("block",),
     )
     store = KafkaCheckpointReader(
-        topic="evm.bsc.mainnet.checkpoint_cursor",
+        topic="evm.bsc.mainnet.commit_watermark",
         producer_config={"bootstrap.servers": "localhost:9092", "linger.ms": 50},
         identity=identity,
     )

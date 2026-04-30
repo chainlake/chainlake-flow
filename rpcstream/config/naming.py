@@ -34,8 +34,6 @@ def build_pipeline_name(
         return "_".join(parts)
 
     start_name = _format_block_name(from_value)
-    if start_name == "checkpoint":
-        start_name = "checkpointed_latest"
     parts.append(start_name)
     return "_".join(parts)
 
@@ -49,7 +47,9 @@ def _format_block_name(value) -> str:
     text = str(value).strip().lower()
     if not text:
         return "unknown"
-    if text in {"latest", "checkpoint", "checkpoint+1", "checkpoint_plus_1", "checkpointed_latest"}:
+    if text == "latest":
+        text = "chainhead"
+    if text in {"chainhead", "checkpoint", "checkpoint+1", "checkpoint_plus_1", "checkpointed_latest"}:
         return text.replace("+", "_")
     if text.isdigit():
         return text

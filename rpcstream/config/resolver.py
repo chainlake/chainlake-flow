@@ -28,6 +28,7 @@ class KafkaRuntime:
 @dataclass
 class CheckpointRuntime:
     topic: str
+    watermark_state_topic: str
     flush_interval_ms: int
     commit_batch_size: int
 
@@ -151,6 +152,7 @@ def resolve(cfg) -> RuntimeConfig:
 
     checkpoint = CheckpointRuntime(
         topic=topic_map.checkpoint,
+        watermark_state_topic=topic_map.watermark_state,
         flush_interval_ms=checkpoint_cfg.flush_interval_ms,
         commit_batch_size=checkpoint_cfg.commit_batch_size,
     )

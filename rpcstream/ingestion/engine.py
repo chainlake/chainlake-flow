@@ -15,7 +15,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from rpcstream.metrics.engine import EngineMetrics
 from rpcstream.runtime.observability.context import ObservabilityContext
-from rpcstream.state.checkpoint import build_checkpoint_row
+from rpcstream.state.checkpoint import build_checkpoint_row, build_watermark_state_row
 
 class IngestionEngine:
     def __init__(
@@ -33,7 +33,7 @@ class IngestionEngine:
         concurrency=10, 
         logger=None,
         observability: ObservabilityContext | None = None,
-        checkpoint_manager=None,
+        watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=False,
     ):
@@ -61,7 +61,7 @@ class IngestionEngine:
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
         self.metrics = EngineMetrics(self.observability.get_meter("rpcstream.engine"))
-        self.checkpoint_manager = checkpoint_manager
+        self.watermark_manager = watermark_manager
         self.checkpoint_reader = checkpoint_reader
         self.eos_enabled = eos_enabled
         self._checkpoint_tasks = set()
@@ -72,8 +72,8 @@ class IngestionEngine:
         workers = []
         await self.sink.start()
         sink_started = True
-        if self.checkpoint_manager is not None:
-            await self.checkpoint_manager.start()
+        if self.watermark_manager is not None:
+            await self.watermark_manager.start()
             checkpoint_started = True
 
         worker_count = 1 if self.eos_enabled else self.concurrency
@@ -85,8 +85,8 @@ class IngestionEngine:
                     block = await self._next_block_or_shutdown(block_source, shutdown_event)
                     if block is None:
                         break
-                    if self.checkpoint_manager is not None:
-                        await self.checkpoint_manager.mark_emitted(block)
+                    if self.watermark_manager is not None:
+                        await self.watermark_manager.mark_emitted(block)
                     await queue.put(block)
             finally:
                 # Signal workers to drain and stop after queued blocks are processed.
@@ -98,10 +98,15 @@ class IngestionEngine:
                 block = await queue.get()
                 if block is None:
                     break
-                success, delivery_futures = await self._run_one(block)
-                if self.checkpoint_manager is not None:
+                success, delivery_futures, expected_watermark = await self._run_one(block)
+                if self.watermark_manager is not None:
                     task = asyncio.create_task(
-                        self._finalize_checkpoint(block, success, delivery_futures)
+                        self._finalize_checkpoint(
+                            block,
+                            success,
+                            delivery_futures,
+                            expected_watermark=expected_watermark,
+                        )
                     )
                     self._checkpoint_tasks.add(task)
                     task.add_done_callback(self._checkpoint_tasks.discard)
@@ -136,9 +141,9 @@ class IngestionEngine:
                 await self.sink.close()
             if self._checkpoint_tasks:
                 await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
-            if self.checkpoint_manager is not None and checkpoint_started:
+            if self.watermark_manager is not None and checkpoint_started:
                 status = "eos" if getattr(self.pipeline, "mode", None) == "backfill" else "running"
-                await self.checkpoint_manager.stop(status=status)
+                await self.watermark_manager.stop(status=status)
 
     def _is_shutdown_requested(self, shutdown_event: asyncio.Event | None) -> bool:
         return shutdown_event is not None and shutdown_event.is_set()
@@ -171,6 +176,7 @@ class IngestionEngine:
         current_entity = "unknown"
         success = True
         delivery_futures = []
+        expected_watermark = None
         transactional_topic_rows = []
         parsed_bundle = {}
         try:
@@ -277,7 +283,7 @@ class IngestionEngine:
                             delivery_future = await self.sink.send(
                                 topic,
                                 rows,
-                                wait_delivery=self.checkpoint_manager is not None,
+                                wait_delivery=self.watermark_manager is not None,
                             )
                             if delivery_future is not None:
                                 delivery_futures.append(delivery_future)
@@ -317,32 +323,108 @@ class IngestionEngine:
             self.metrics.TOTAL_TIME.record(total_ms, {"entity": current_entity})
 
         if success and self.eos_enabled:
-            if self.checkpoint_reader is not None:
+            should_persist_cursor_state = False
+            if self.watermark_manager is not None:
+                should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
+                    block_number
+                )
+                expected_watermark = await self.watermark_manager.preview_completed(block_number)
+                if should_persist_cursor_state:
+                    transactional_topic_rows.append(
+                        (
+                            self.watermark_manager.state_topic,
+                            [
+                                build_watermark_state_row(
+                                    self.watermark_manager.identity,
+                                    block_number,
+                                    status="completed",
+                                )
+                            ],
+                        )
+                    )
+            if expected_watermark is not None and self.watermark_manager is not None:
                 transactional_topic_rows.append(
                     (
-                        self.checkpoint_reader.topic,
+                        self.watermark_manager.topic,
                         [
                             build_checkpoint_row(
-                                self.checkpoint_reader.identity,
-                                block_number,
+                                self.watermark_manager.identity,
+                                expected_watermark,
                                 status="running",
                             )
                         ],
                     )
                 )
             await self.sink.send_transaction(transactional_topic_rows)
-        return success, delivery_futures
+        return success, delivery_futures, expected_watermark
 
-    async def _finalize_checkpoint(self, block_number, success, delivery_futures):
+    async def _finalize_checkpoint(
+        self,
+        block_number,
+        success,
+        delivery_futures,
+        *,
+        expected_watermark=None,
+    ):
         if not success:
-            await self.checkpoint_manager.mark_failed(block_number)
+            await self._record_failed_watermark_state(block_number)
             return
         try:
             if delivery_futures:
                 await asyncio.gather(*delivery_futures)
-            await self.checkpoint_manager.mark_completed(block_number)
+            should_persist_cursor_state = False
+            if self.watermark_manager is not None:
+                should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
+                    block_number
+                )
+            if not self.eos_enabled and should_persist_cursor_state:
+                await self.sink.send(
+                    self.watermark_manager.state_topic,
+                    [
+                        build_watermark_state_row(
+                            self.watermark_manager.identity,
+                            block_number,
+                            status="completed",
+                        )
+                    ],
+                    wait_delivery=True,
+                )
+            advanced_watermark = await self.watermark_manager.mark_completed(block_number)
+            if (
+                self.eos_enabled
+                and expected_watermark is not None
+                and advanced_watermark != expected_watermark
+                and self.logger is not None
+            ):
+                self.logger.warn(
+                    "watermark.advance_mismatch",
+                    component="checkpoint",
+                    block=block_number,
+                    expected=expected_watermark,
+                    actual=advanced_watermark,
+                )
         except Exception as exc:
-            await self.checkpoint_manager.mark_failed(block_number, error=str(exc))
+            await self._record_failed_watermark_state(block_number, error=str(exc))
+            return
+
+    async def _record_failed_watermark_state(self, block_number, error: str | None = None):
+        if self.watermark_manager is None:
+            return
+        await self.watermark_manager.mark_failed(block_number, error=error)
+        row = build_watermark_state_row(
+            self.watermark_manager.identity,
+            block_number,
+            status="failed",
+            error=error,
+        )
+        if self.eos_enabled:
+            await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
+            return
+        await self.sink.send(
+            self.watermark_manager.state_topic,
+            [row],
+            wait_delivery=True,
+        )
 
 
 
@@ -418,7 +500,14 @@ class IngestionEngine:
         previous = self._active_dlq_record
         self._active_dlq_record = record
         try:
-            success, _delivery_futures = await self._run_one(record["block_number"])
+            success, delivery_futures, expected_watermark = await self._run_one(record["block_number"])
+            if self.watermark_manager is not None:
+                await self._finalize_checkpoint(
+                    record["block_number"],
+                    success,
+                    delivery_futures,
+                    expected_watermark=expected_watermark,
+                )
             return success
         finally:
             self._active_dlq_record = previous

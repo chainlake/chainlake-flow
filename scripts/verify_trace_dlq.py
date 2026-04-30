@@ -149,7 +149,7 @@ async def send_one_trace_dlq(runtime, logger, marker: str, block_number: int) ->
 
     await writer.start()
     try:
-        success, _delivery_futures = await engine._run_one(block_number)
+        success, _delivery_futures, _expected_watermark = await engine._run_one(block_number)
         if success:
             raise RuntimeError("expected synthetic trace processor failure, but block succeeded")
     finally:

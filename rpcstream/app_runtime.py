@@ -18,7 +18,12 @@ from rpcstream.runtime.observability.provider import build_observability
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
 from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 from rpcstream.sinks.kafka.producer import KafkaWriter
-from rpcstream.state.checkpoint import CheckpointManager, KafkaCheckpointReader, build_checkpoint_identity
+from rpcstream.state.checkpoint import (
+    KafkaCheckpointReader,
+    KafkaWatermarkStateReader,
+    WatermarkManager,
+    build_checkpoint_identity,
+)
 from rpcstream.utils.logger import JsonLogger
 
 
@@ -90,28 +95,48 @@ def build_runtime_stack(
     )
     internal_entities = getattr(runtime, "internal_entities", runtime.entities)
     fetcher = EvmRpcFetcher(scheduler, internal_entities, logger, tracker)
-    checkpoint_manager = None
+    watermark_manager = None
     checkpoint_reader = None
+    state_reader = None
     checkpoint_identity = None
     resume_cursor = None
+    state_records = {}
+    pipeline_start_block = getattr(runtime.pipeline, "start_block", "checkpoint")
+    checkpoint_resume_enabled = (
+        runtime.pipeline.mode == "backfill"
+        or pipeline_start_block == "checkpoint"
+    )
     eos_active = runtime.kafka.eos_enabled
     producer_config = dict(runtime.kafka.config)
     if with_checkpoint:
         checkpoint_identity = build_checkpoint_identity(runtime)
-        checkpoint_reader = KafkaCheckpointReader(
-            topic=runtime.checkpoint.topic,
-            producer_config=runtime.kafka.config,
-            identity=checkpoint_identity,
-            schema_registry_url=(
-                runtime.kafka.schema_registry_url
-                if runtime.kafka.protobuf_enabled
-                else None
-            ),
-            logger=logger,
-        )
-        checkpoint_record = checkpoint_reader.load()
-        if checkpoint_record is not None:
-            resume_cursor = checkpoint_record.cursor
+        if checkpoint_resume_enabled:
+            checkpoint_reader = KafkaCheckpointReader(
+                topic=runtime.checkpoint.topic,
+                producer_config=runtime.kafka.config,
+                identity=checkpoint_identity,
+                schema_registry_url=(
+                    runtime.kafka.schema_registry_url
+                    if runtime.kafka.protobuf_enabled
+                    else None
+                ),
+                logger=logger,
+            )
+            checkpoint_record = checkpoint_reader.load()
+            if checkpoint_record is not None:
+                resume_cursor = checkpoint_record.cursor
+            state_reader = KafkaWatermarkStateReader(
+                topic=runtime.checkpoint.watermark_state_topic,
+                producer_config=runtime.kafka.config,
+                identity=checkpoint_identity,
+                schema_registry_url=(
+                    runtime.kafka.schema_registry_url
+                    if runtime.kafka.protobuf_enabled
+                    else None
+                ),
+                logger=logger,
+            )
+            state_records = state_reader.load()
     processors = {
         entity: PROCESSOR_REGISTRY[entity]
         for entity in internal_entities
@@ -132,14 +157,18 @@ def build_runtime_stack(
         eos_enabled=eos_active,
         eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
     )
-    if with_checkpoint and not eos_active:
-        checkpoint_manager = CheckpointManager(
+    if with_checkpoint:
+        watermark_manager = WatermarkManager(
             sink=kafka_writer,
             topic=runtime.checkpoint.topic,
+            state_topic=runtime.checkpoint.watermark_state_topic,
             identity=checkpoint_identity,
             initial_cursor=resume_cursor,
+            state_records=state_records,
+            state_reader=state_reader,
             flush_interval_ms=runtime.checkpoint.flush_interval_ms,
             commit_batch_size=runtime.checkpoint.commit_batch_size,
+            flush_on_advance=not eos_active,
             logger=logger,
         )
     engine = IngestionEngine(
@@ -155,7 +184,7 @@ def build_runtime_stack(
         concurrency=runtime.engine.concurrency,
         logger=logger,
         observability=observability,
-        checkpoint_manager=checkpoint_manager,
+        watermark_manager=watermark_manager,
         checkpoint_reader=checkpoint_reader,
         eos_enabled=eos_active,
     )

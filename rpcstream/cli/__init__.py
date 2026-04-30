@@ -10,6 +10,7 @@ from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.overrides import apply_runtime_overrides
 from rpcstream.dlq_replay import DEFAULT_REPLAY_GROUP, run_dlq_replay
 from rpcstream.dlq_retry import DEFAULT_RETRY_GROUP, run_dlq_retry
+from rpcstream.kafka_init import main as run_kafka_init
 from rpcstream.main import run_pipeline
 
 app = typer.Typer(
@@ -20,16 +21,16 @@ app = typer.Typer(
     epilog=(
         "Ingestion rules:\n\n"
         "1. No --from and no --to:\n"
-        "   realtime mode; resume from checkpoint when enabled, otherwise latest.\n\n"
-        "2. --from latest:\n"
-        "   realtime mode; ignore any saved checkpoint and start from latest.\n\n"
+        "   realtime mode; resume from checkpoint when available, otherwise start from chainhead.\n\n"
+        "2. --from chainhead:\n"
+        "   realtime mode; ignore any saved checkpoint and start from the current chainhead.\n\n"
         "3. --from <cursor> only:\n"
         "   realtime mode; start from that cursor and continue streaming.\n\n"
         "4. --from <cursor> and --to <cursor>:\n"
         "   backfill mode; run a bounded cursor range.\n\n"
         "Examples:\n\n"
         "rpcstream --entity block,transaction\n\n"
-        "rpcstream --from latest --entity block\n\n"
+        "rpcstream --from chainhead --entity block\n\n"
         "rpcstream --from 95000000 --entity block,transaction\n\n"
         "rpcstream --from 95000000 --to 95000100 --entity block,transaction\n\n"
         "rpcstream dlq retry\n\n"
@@ -123,7 +124,7 @@ def _run_inferred_ingest(
 
     if _infer_ingest_mode(from_value=from_value, to_value=to_value) == "backfill":
         normalized_from = str(effective_from).strip().lower()
-        if normalized_from in {"checkpoint", "latest"}:
+        if normalized_from in {"checkpoint", "latest", "chainhead"}:
             raise ValueError("--from must be a numeric cursor when --to is provided")
 
     config = _load_effective_config(
@@ -160,7 +161,7 @@ def main(
         None,
         "--from",
         help=(
-            "Realtime start cursor or special value. Use checkpoint, latest, or a "
+            "Realtime start cursor or special value. Use checkpoint, chainhead, or a "
             "numeric cursor. With --to it becomes bounded backfill."
         ),
     ),
@@ -188,6 +189,28 @@ def main(
         )
     except Exception as exc:
         _fail(exc)
+
+
+@app.command("init")
+def kafka_init(
+    config_path: str = typer.Option(
+        None,
+        "--config",
+        help="Path to pipeline.yaml.",
+    ),
+) -> None:
+    config_path = config_path or _default_config_path()
+    previous = os.environ.get("PIPELINE_CONFIG")
+    os.environ["PIPELINE_CONFIG"] = config_path
+    try:
+        run_kafka_init()
+    except Exception as exc:
+        _fail(exc)
+    finally:
+        if previous is None:
+            os.environ.pop("PIPELINE_CONFIG", None)
+        else:
+            os.environ["PIPELINE_CONFIG"] = previous
 
 
 @dlq_app.command("retry")

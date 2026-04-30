@@ -24,8 +24,9 @@ from rpcstream.sinks.kafka.bootstrap import build_protobuf_topic_schemas
 from rpcstream.planner.block_source import build_block_source
 from rpcstream.runtime.block_tracker import BlockHeadTracker
 from rpcstream.state.checkpoint import (
-    CheckpointManager,
     KafkaCheckpointReader,
+    KafkaWatermarkStateReader,
+    WatermarkManager,
     build_checkpoint_identity,
 )
 
@@ -83,10 +84,17 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
 
     client = None
     tracker = None
-    checkpoint_manager = None
+    watermark_manager = None
     checkpoint_reader = None
+    state_reader = None
     checkpoint_identity = None
     resume_cursor = None
+    state_records = {}
+    pipeline_start_block = getattr(runtime.pipeline, "start_block", "checkpoint")
+    checkpoint_resume_enabled = (
+        runtime.pipeline.mode == "backfill"
+        or pipeline_start_block == "checkpoint"
+    )
     
     try:
         internal_entities = getattr(runtime, "internal_entities", runtime.entities)
@@ -131,26 +139,39 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         # CHECKPOINT
         # -------------------------
         checkpoint_identity = build_checkpoint_identity(runtime)
-        checkpoint_reader = KafkaCheckpointReader(
-            topic=runtime.checkpoint.topic,
-            producer_config=runtime.kafka.config,
-            identity=checkpoint_identity,
-            schema_registry_url=(
-                runtime.kafka.schema_registry_url
-                if runtime.kafka.protobuf_enabled
-                else None
-            ),
-            logger=logger,
-        )
-        logger.info(
-            "checkpoint.load_started",
-            component="checkpoint",
-            topic=runtime.checkpoint.topic,
-            key=checkpoint_reader.identity.key,
-        )
-        checkpoint_record = await asyncio.to_thread(checkpoint_reader.load)
-        if checkpoint_record is not None:
-            resume_cursor = checkpoint_record.cursor
+        if checkpoint_resume_enabled:
+            checkpoint_reader = KafkaCheckpointReader(
+                topic=runtime.checkpoint.topic,
+                producer_config=runtime.kafka.config,
+                identity=checkpoint_identity,
+                schema_registry_url=(
+                    runtime.kafka.schema_registry_url
+                    if runtime.kafka.protobuf_enabled
+                    else None
+                ),
+                logger=logger,
+            )
+            logger.info(
+                "checkpoint.load_started",
+                component="checkpoint",
+                topic=runtime.checkpoint.topic,
+                key=checkpoint_reader.identity.key,
+            )
+            checkpoint_record = await asyncio.to_thread(checkpoint_reader.load)
+            if checkpoint_record is not None:
+                resume_cursor = checkpoint_record.cursor
+            state_reader = KafkaWatermarkStateReader(
+                topic=runtime.checkpoint.watermark_state_topic,
+                producer_config=runtime.kafka.config,
+                identity=checkpoint_identity,
+                schema_registry_url=(
+                    runtime.kafka.schema_registry_url
+                    if runtime.kafka.protobuf_enabled
+                    else None
+                ),
+                logger=logger,
+            )
+            state_records = await asyncio.to_thread(state_reader.load)
 
         # -------------------------
         # PROCESSOR
@@ -183,16 +204,19 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
         )
 
-        if not runtime.kafka.eos_enabled:
-            checkpoint_manager = CheckpointManager(
-                sink=kafka_write,
-                topic=runtime.checkpoint.topic,
-                identity=checkpoint_identity,
-                initial_cursor=resume_cursor,
-                flush_interval_ms=runtime.checkpoint.flush_interval_ms,
-                commit_batch_size=runtime.checkpoint.commit_batch_size,
-                logger=logger,
-            )
+        watermark_manager = WatermarkManager(
+            sink=kafka_write,
+            topic=runtime.checkpoint.topic,
+            state_topic=runtime.checkpoint.watermark_state_topic,
+            identity=checkpoint_identity,
+            initial_cursor=resume_cursor,
+            state_records=state_records,
+            state_reader=state_reader,
+            flush_interval_ms=runtime.checkpoint.flush_interval_ms,
+            commit_batch_size=runtime.checkpoint.commit_batch_size,
+            flush_on_advance=not runtime.kafka.eos_enabled,
+            logger=logger,
+        )
 
         # -------------------------
         # ENGINE
@@ -210,7 +234,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             concurrency=runtime.engine.concurrency,
             logger=logger,
             observability=observability,
-            checkpoint_manager=checkpoint_manager,
+            watermark_manager=watermark_manager,
             checkpoint_reader=checkpoint_reader,
             eos_enabled=runtime.kafka.eos_enabled,
         )

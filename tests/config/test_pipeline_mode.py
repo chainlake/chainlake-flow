@@ -19,15 +19,15 @@ def test_realtime_mode_rejects_to():
         PipelineConfigModel(
             name="demo",
             mode="realtime",
-            **{"from": "latest", "to": "100"},
+            **{"from": "chainhead", "to": "100"},
         )
 
 
-def test_realtime_mode_accepts_latest_or_numeric_start():
-    latest = PipelineConfigModel(
+def test_realtime_mode_accepts_chainhead_or_numeric_start():
+    chainhead = PipelineConfigModel(
         name="demo",
         mode="realtime",
-        **{"from": "latest"},
+        **{"from": "chainhead"},
     )
     numeric = PipelineConfigModel(
         name="demo",
@@ -40,9 +40,19 @@ def test_realtime_mode_accepts_latest_or_numeric_start():
         **{"from": "checkpoint"},
     )
 
-    assert latest.start_block == "latest"
+    assert chainhead.start_block == "chainhead"
     assert numeric.start_block == "90000000"
     assert checkpoint.start_block == "checkpoint"
+
+
+def test_realtime_mode_normalizes_latest_alias_to_chainhead():
+    latest = PipelineConfigModel(
+        name="demo",
+        mode="realtime",
+        **{"from": "latest"},
+    )
+
+    assert latest.start_block == "chainhead"
 
 
 def test_pipeline_checkpoint_defaults_present():

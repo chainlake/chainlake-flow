@@ -15,6 +15,7 @@ class TopicMaps:
     main: dict[str, str]
     dlq: str
     checkpoint: str
+    watermark_state: str
 
 
 def normalize_entity(entity: str) -> str:
@@ -57,4 +58,13 @@ def build_checkpoint_topic(cfg) -> str:
     if configured:
         return configured
 
-    return f"{cfg.chain.type}.{cfg.chain.name}.{cfg.chain.network}.checkpoint_cursor"
+    return f"{cfg.chain.type}.{cfg.chain.name}.{cfg.chain.network}.commit_watermark"
+
+
+def build_watermark_state_topic(cfg) -> str:
+    checkpoint_topic = build_checkpoint_topic(cfg)
+    if checkpoint_topic.endswith(".commit_watermark"):
+        return checkpoint_topic.removesuffix(".commit_watermark") + ".cursor_state"
+    if checkpoint_topic.endswith(".checkpoint_cursor"):
+        return checkpoint_topic.removesuffix(".checkpoint_cursor") + ".cursor_state"
+    return f"{checkpoint_topic}.cursor_state"

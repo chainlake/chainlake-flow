@@ -53,7 +53,7 @@ def test_load_pipeline_config_resolves_chain_profile_fields(tmp_path):
     assert config.chain.type == "evm"
     assert config.chain.name == "bsc"
     assert config.chain.network == "mainnet"
-    assert config.pipeline.name == "bsc_mainnet_realtime_checkpointed_latest"
+    assert config.pipeline.name == "bsc_mainnet_realtime_checkpoint"
 
     runtime = resolve(config)
     assert runtime.tracker.poll_interval == pytest.approx(0.225)
@@ -64,15 +64,15 @@ def test_build_pipeline_name_covers_realtime_and_backfill_variants():
         chain_name="bsc",
         network="mainnet",
         mode="realtime",
-        from_value="latest",
-    ) == "bsc_mainnet_realtime_latest"
+        from_value="chainhead",
+    ) == "bsc_mainnet_realtime_chainhead"
 
     assert build_pipeline_name(
         chain_name="bsc",
         network="mainnet",
         mode="realtime",
         from_value="checkpoint",
-    ) == "bsc_mainnet_realtime_checkpointed_latest"
+    ) == "bsc_mainnet_realtime_checkpoint"
 
     assert build_pipeline_name(
         chain_name="bsc",
@@ -168,7 +168,7 @@ def test_tracker_poll_interval_defaults_when_section_is_omitted(tmp_path):
     config = load_pipeline_config(str(config_file))
     runtime = resolve(config)
 
-    assert config.pipeline.name == "bsc_mainnet_realtime_checkpointed_latest"
+    assert config.pipeline.name == "bsc_mainnet_realtime_checkpoint"
     assert runtime.tracker.poll_interval == pytest.approx(0.225)
 
 

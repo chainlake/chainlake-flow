@@ -53,7 +53,7 @@ The script creates Kafka-native ACLs for:
 - `Cluster` `IdempotentWrite` when Kafka EOS is enabled.
 - Main sink topics derived from `kafka.common.topic_template` and `entities`.
 - The unified DLQ topic.
-- The checkpoint topic and `checkpoint-loader-` consumer group when checkpointing is enabled.
+- The `commit_watermark` topic and `checkpoint-loader-` consumer group when checkpointing is enabled.
 
 Notes:
 

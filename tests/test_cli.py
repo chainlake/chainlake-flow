@@ -198,7 +198,7 @@ def test_root_command_invokes_realtime_when_only_from_is_set(monkeypatch):
     assert captured["config"].entities == ["block", "transaction"]
 
 
-def test_root_command_uses_explicit_latest_without_disabling_eos(monkeypatch):
+def test_root_command_uses_explicit_chainhead_without_disabling_eos(monkeypatch):
     captured = {}
 
     monkeypatch.setattr("rpcstream.cli.load_pipeline_config", lambda _path: make_config())
@@ -215,7 +215,7 @@ def test_root_command_uses_explicit_latest_without_disabling_eos(monkeypatch):
             "--config",
             "pipeline.yaml",
             "--from",
-            "latest",
+            "chainhead",
             "--entity",
             "block",
         ],
@@ -223,7 +223,7 @@ def test_root_command_uses_explicit_latest_without_disabling_eos(monkeypatch):
 
     assert result.exit_code == 0
     assert captured["config"].pipeline.mode == "realtime"
-    assert captured["config"].pipeline.start_block == "latest"
+    assert captured["config"].pipeline.start_block == "chainhead"
     assert captured["config"].kafka.eos.enabled is False
 
 
@@ -231,6 +231,30 @@ def test_root_help_lists_only_dlq_and_config_commands():
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
+    assert "init" in result.stdout
     assert "dlq" in result.stdout
     assert "config" in result.stdout
     assert "│ ingest" not in result.stdout
+
+
+def test_init_command_invokes_kafka_init_with_config_path(monkeypatch):
+    captured = {}
+
+    def fake_run_kafka_init():
+        import os
+
+        captured["config_path"] = os.environ.get("PIPELINE_CONFIG")
+
+    monkeypatch.setattr("rpcstream.cli.run_kafka_init", fake_run_kafka_init)
+
+    result = runner.invoke(
+        app,
+        [
+            "init",
+            "--config",
+            "pipeline.yaml",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["config_path"] == "pipeline.yaml"

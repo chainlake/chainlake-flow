@@ -8,6 +8,7 @@ from rpcstream.runtime.topic import (
     build_checkpoint_topic,
     build_topics,
     build_unified_dlq_topic,
+    build_watermark_state_topic,
     normalize_entity,
 )
 
@@ -131,6 +132,7 @@ def build_topic_maps(cfg) -> TopicMaps:
         main=topics,
         dlq=build_unified_dlq_topic(cfg),
         checkpoint=build_checkpoint_topic(cfg),
+        watermark_state=build_watermark_state_topic(cfg),
     )
 
 

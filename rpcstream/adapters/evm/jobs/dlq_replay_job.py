@@ -437,7 +437,7 @@ def render_manifest(args: argparse.Namespace) -> int:
 
 async def run_replay(args: argparse.Namespace) -> None:
     config_path = getattr(args, "config", None) or os.getenv("PIPELINE_CONFIG", DEFAULT_CONFIG_PATH)
-    stack = build_runtime_stack(config_path=config_path, with_tracker=False)
+    stack = build_runtime_stack(config_path=config_path, with_tracker=False, with_checkpoint=True)
     client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
         producer_config=stack.runtime.kafka.config,
@@ -478,7 +478,14 @@ async def run_replay(args: argparse.Namespace) -> None:
             if block_number is None:
                 break
 
-            success, _delivery_futures = await stack.engine._run_one(block_number)
+            success, delivery_futures, expected_watermark = await stack.engine._run_one(block_number)
+            if stack.engine.watermark_manager is not None:
+                await stack.engine._finalize_checkpoint(
+                    block_number,
+                    success,
+                    delivery_futures,
+                    expected_watermark=expected_watermark,
+                )
             if not success:
                 stack.logger.warn(
                     "dlq.replay_block_failed",

@@ -11,7 +11,7 @@ from rpcstream.adapters.evm.jobs.dlq_replay_job import (
 def test_build_replay_job_manifest_uses_runtime_metadata_and_env_filters():
     runtime = SimpleNamespace(
         chain=SimpleNamespace(name="bsc", type="evm"),
-        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpointed_latest"),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
     )
     options = ReplayJobOptions(
         entity="trace",
@@ -27,7 +27,7 @@ def test_build_replay_job_manifest_uses_runtime_metadata_and_env_filters():
     assert manifest["metadata"]["labels"]["chain"] == "bsc"
     assert (
         manifest["metadata"]["labels"]["pipeline"]
-        == "bsc_mainnet_realtime_checkpointed_latest"
+        == "bsc_mainnet_realtime_checkpoint"
     )
 
     container = manifest["spec"]["template"]["spec"]["containers"][0]
@@ -50,7 +50,7 @@ def test_build_replay_job_manifest_uses_runtime_metadata_and_env_filters():
 def test_build_replay_job_manifest_skips_optional_filters_when_unset():
     runtime = SimpleNamespace(
         chain=SimpleNamespace(name="bsc", type="evm"),
-        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpointed_latest"),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
     )
     options = ReplayJobOptions(entity=None, stage=None, max_records=None)
 

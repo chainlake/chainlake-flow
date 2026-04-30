@@ -19,7 +19,12 @@ async def run_dlq_retry(
     config_path = config_path or os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
     group_id = group_id or os.getenv("DLQ_RETRY_GROUP_ID", DEFAULT_RETRY_GROUP)
 
-    stack = build_runtime_stack(config_path=config_path, config=config, with_tracker=False)
+    stack = build_runtime_stack(
+        config_path=config_path,
+        config=config,
+        with_tracker=False,
+        with_checkpoint=True,
+    )
     client = UnifiedDlqKafkaClient(
         topic=stack.runtime.topic_map.dlq,
         producer_config=stack.runtime.kafka.config,

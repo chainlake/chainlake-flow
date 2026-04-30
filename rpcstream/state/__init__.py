@@ -3,8 +3,12 @@ from rpcstream.state.checkpoint import (
     CheckpointManager,
     CheckpointRecord,
     KafkaCheckpointReader,
+    KafkaWatermarkStateReader,
+    WatermarkStateRecord,
+    WatermarkManager,
     build_checkpoint_identity,
     build_checkpoint_row,
+    build_watermark_state_row,
 )
 
 __all__ = [
@@ -12,6 +16,10 @@ __all__ = [
     "CheckpointManager",
     "CheckpointRecord",
     "KafkaCheckpointReader",
+    "KafkaWatermarkStateReader",
+    "WatermarkStateRecord",
+    "WatermarkManager",
     "build_checkpoint_identity",
     "build_checkpoint_row",
+    "build_watermark_state_row",
 ]
