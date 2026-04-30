@@ -216,6 +216,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             commit_batch_size=runtime.checkpoint.commit_batch_size,
             flush_on_advance=not runtime.kafka.eos_enabled,
             logger=logger,
+            meter=observability.get_meter("rpcstream.watermark"),
         )
 
         # -------------------------

@@ -170,6 +170,7 @@ def build_runtime_stack(
             commit_batch_size=runtime.checkpoint.commit_batch_size,
             flush_on_advance=not eos_active,
             logger=logger,
+            meter=observability.get_meter("rpcstream.watermark"),
         )
     engine = IngestionEngine(
         fetcher=fetcher,

@@ -544,6 +544,12 @@ class IngestionEngine:
             end_block = getattr(self.pipeline, "end_block", None)
             if end_block is not None:
                 ingestion_lag = max(int(end_block) - int(block_number), 0)
+                if self.watermark_manager is not None and self.watermark_manager.cursor is not None:
+                    self.watermark_manager.update_commit_delay(
+                        max(int(end_block) - int(self.watermark_manager.cursor), 0)
+                    )
+                elif self.watermark_manager is not None:
+                    self.watermark_manager.update_commit_delay(None)
             return latest_block, chain_lag, ingestion_lag
 
         tracker = getattr(self.fetcher, "tracker", None)
@@ -560,5 +566,13 @@ class IngestionEngine:
                     block_number,
                     latest_block
                 )
+                if self.watermark_manager is not None and self.watermark_manager.cursor is not None:
+                    self.watermark_manager.update_commit_delay(
+                        max(int(latest_block) - int(self.watermark_manager.cursor), 0)
+                    )
+                elif self.watermark_manager is not None:
+                    self.watermark_manager.update_commit_delay(None)
+        elif self.watermark_manager is not None:
+            self.watermark_manager.update_commit_delay(None)
 
         return latest_block, chain_lag, ingestion_lag

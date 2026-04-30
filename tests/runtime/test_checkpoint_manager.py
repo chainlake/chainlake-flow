@@ -195,6 +195,42 @@ def test_watermark_manager_merges_external_state_records():
     asyncio.run(run())
 
 
+def test_watermark_manager_metrics_snapshot_tracks_cursor_gaps_and_delay():
+    async def run():
+        sink = MemoryStore()
+        identity = CheckpointIdentity(
+            pipeline="pipe",
+            chain_uid="evm:56",
+            chain_type="evm",
+            network="mainnet",
+            mode="realtime",
+            primary_unit="block",
+            entities=("block",),
+        )
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=identity,
+            initial_cursor=99,
+            flush_on_advance=False,
+        )
+
+        await manager.mark_emitted(100)
+        await manager.mark_emitted(101)
+        await manager.mark_failed(100, "boom")
+        await manager.mark_completed(101)
+        manager.update_commit_delay(7)
+
+        return manager.get_metrics_snapshot()
+
+    snapshot = asyncio.run(run())
+    assert snapshot["commit_cursor"] == 99
+    assert snapshot["gap_count"] == 1
+    assert snapshot["oldest_gap"] == 100
+    assert snapshot["commit_delay"] == 7
+
+
 def test_kafka_checkpoint_reader_consumer_config_enables_partition_eof():
     identity = CheckpointIdentity(
         pipeline="pipe",

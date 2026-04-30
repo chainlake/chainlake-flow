@@ -10,6 +10,7 @@ from typing import Any
 
 from confluent_kafka.serialization import MessageField, SerializationContext
 
+from rpcstream.metrics.watermark import WatermarkMetrics
 from rpcstream.sinks.kafka.protobuf import (
     CHECKPOINT_SCHEMA,
     WATERMARK_STATE_SCHEMA,
@@ -497,6 +498,7 @@ class WatermarkManager:
         flush_on_advance: bool = True,
         state_refresh_interval_ms: int = 1000,
         logger=None,
+        meter=None,
     ):
         self.sink = sink
         self.topic = topic
@@ -519,7 +521,19 @@ class WatermarkManager:
         self._lock = asyncio.Lock()
         self._flush_event = asyncio.Event()
         self._state_versions: dict[int, tuple[int, str]] = {}
+        self.metrics = WatermarkMetrics(
+            meter,
+            attributes={
+                "pipeline": identity.pipeline,
+                "chain_uid": identity.chain_uid,
+                "chain_type": identity.chain_type,
+                "network": identity.network,
+                "mode": identity.mode,
+                "primary_unit": identity.primary_unit,
+            },
+        )
         self._hydrate_state_records(state_records or {})
+        self._refresh_metrics()
 
     async def start(self) -> None:
         self._running = True
@@ -547,7 +561,9 @@ class WatermarkManager:
 
             self._completed.add(cursor)
             self._failed.discard(cursor)
-            return self._advance_locked()
+            advanced = self._advance_locked()
+            self._refresh_metrics()
+            return advanced
 
     async def preview_completed(self, cursor: int) -> int | None:
         async with self._lock:
@@ -561,7 +577,9 @@ class WatermarkManager:
         async with self._lock:
             if self._next_cursor is None:
                 self._next_cursor = cursor
-            return self._advance_locked()
+            advanced = self._advance_locked()
+            self._refresh_metrics()
+            return advanced
 
     async def requires_cursor_state(self, cursor: int) -> bool:
         async with self._lock:
@@ -600,6 +618,7 @@ class WatermarkManager:
                 self._failed.add(cursor)
 
         self._advance_locked()
+        self._refresh_metrics()
 
     def _advance_locked(self) -> int | None:
         if self._next_cursor is None:
@@ -625,6 +644,7 @@ class WatermarkManager:
             if self.cursor is not None and cursor <= self.cursor:
                 return
             self._failed.add(cursor)
+            self._refresh_metrics()
         if self.logger:
             self.logger.warn(
                 "watermark.cursor_failed",
@@ -655,7 +675,22 @@ class WatermarkManager:
                     self._failed.add(cursor)
 
             advanced_watermark = self._advance_locked()
+            self._refresh_metrics()
             return advanced_watermark
+
+    def update_commit_delay(self, delay: int | None) -> None:
+        self.metrics.update(commit_delay=delay)
+
+    def get_metrics_snapshot(self) -> dict[str, int | None]:
+        return self.metrics.snapshot()
+
+    def _refresh_metrics(self) -> None:
+        oldest_gap = min(self._failed) if self._failed else None
+        self.metrics.update(
+            commit_cursor=self.cursor,
+            gap_count=len(self._failed),
+            oldest_gap=oldest_gap,
+        )
 
     async def mark_eos(self) -> None:
         await self.flush(status="eos", force=True)
