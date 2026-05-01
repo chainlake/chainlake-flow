@@ -154,6 +154,11 @@ def build_checkpoint_identity(runtime) -> CheckpointIdentity:
     )
 
 
+def _is_missing_schema_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "schema" in message and ("not found" in message or "40403" in message)
+
+
 class KafkaCheckpointReader:
     def __init__(
         self,
@@ -172,6 +177,7 @@ class KafkaCheckpointReader:
         self._producer = None
         self._serializer_registry = None
         self._deserializer = None
+        self.schema_missing = False
 
         if self.schema_registry_url:
             self._serializer_registry = ProtobufSerializerRegistry(
@@ -234,7 +240,21 @@ class KafkaCheckpointReader:
                 if message.key().decode("utf-8") != self.identity.key:
                     continue
 
-                value = self._decode_record(message.value())
+                try:
+                    value = self._decode_record(message.value())
+                except Exception as exc:
+                    if _is_missing_schema_error(exc):
+                        self.schema_missing = True
+                        if self.logger:
+                            self.logger.warn(
+                                "checkpoint.schema_missing",
+                                component="checkpoint",
+                                topic=self.topic,
+                                key=self.identity.key,
+                                error=str(exc),
+                            )
+                        return None
+                    raise
                 latest_record = CheckpointRecord(
                     cursor=int(value["cursor"]),
                     status=value.get("status", "running"),
@@ -337,6 +357,7 @@ class KafkaWatermarkStateReader:
         self.schema_registry_url = schema_registry_url
         self.logger = logger
         self._deserializer = None
+        self.schema_missing = False
 
         if self.schema_registry_url:
             self._deserializer = self._build_deserializer()
@@ -394,7 +415,21 @@ class KafkaWatermarkStateReader:
                 if not key.startswith(prefix):
                     continue
 
-                value = self._decode_record(message.value())
+                try:
+                    value = self._decode_record(message.value())
+                except Exception as exc:
+                    if _is_missing_schema_error(exc):
+                        self.schema_missing = True
+                        if self.logger:
+                            self.logger.warn(
+                                "watermark.schema_missing",
+                                component="checkpoint",
+                                topic=self.topic,
+                                key=self.identity.key,
+                                error=str(exc),
+                            )
+                        return {}
+                    raise
                 record = WatermarkStateRecord(
                     cursor=int(value["cursor"]),
                     status=value.get("status", ""),
@@ -704,11 +739,13 @@ class WatermarkManager:
             cursor = self.cursor
             self._dirty = False
 
-        await self.sink.send_checkpoint(
+        delivery_future = await self.sink.send_checkpoint(
             self.topic,
             build_checkpoint_row(self.identity, cursor, status=status),
             wait_delivery=True,
         )
+        if delivery_future is not None:
+            await delivery_future
 
     async def _flush_loop(self) -> None:
         while self._running:

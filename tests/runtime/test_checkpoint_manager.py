@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from rpcstream.state.checkpoint import (
     CheckpointIdentity,
     KafkaCheckpointReader,
+    KafkaWatermarkStateReader,
     WatermarkManager,
     build_checkpoint_identity,
 )
@@ -253,3 +254,159 @@ def test_kafka_checkpoint_reader_consumer_config_enables_partition_eof():
     assert config["isolation.level"] == "read_committed"
     assert config["auto.offset.reset"] == "earliest"
     assert "linger.ms" not in config
+
+
+def test_kafka_checkpoint_reader_returns_none_when_schema_is_missing(monkeypatch):
+    class FakeMessage:
+        def error(self):
+            return None
+
+        def partition(self):
+            return 0
+
+        def offset(self):
+            return 0
+
+        def key(self):
+            return b"pipeline=pipe|chain=evm:56|network=mainnet|mode=realtime|unit=block|entities=block"
+
+        def value(self):
+            return b"payload"
+
+    class FakeTopicMeta:
+        error = None
+
+        def __init__(self):
+            self.partitions = {0: object()}
+
+    class FakeMetadata:
+        def __init__(self):
+            self.topics = {"evm.bsc.mainnet.commit_watermark": FakeTopicMeta()}
+
+    class FakeConsumer:
+        def __init__(self, *_args, **_kwargs):
+            self._polled = False
+
+        def list_topics(self, *_args, **_kwargs):
+            return FakeMetadata()
+
+        def get_watermark_offsets(self, *_args, **_kwargs):
+            return (0, 1)
+
+        def assign(self, *_args, **_kwargs):
+            return None
+
+        def poll(self, *_args, **_kwargs):
+            if self._polled:
+                return None
+            self._polled = True
+            return FakeMessage()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("confluent_kafka.Consumer", FakeConsumer)
+
+    identity = CheckpointIdentity(
+        pipeline="pipe",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="realtime",
+        primary_unit="block",
+        entities=("block",),
+    )
+    reader = KafkaCheckpointReader(
+        topic="evm.bsc.mainnet.commit_watermark",
+        producer_config={"bootstrap.servers": "localhost:9092"},
+        identity=identity,
+        schema_registry_url="http://localhost:30081",
+    )
+    monkeypatch.setattr(
+        reader,
+        "_decode_record",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("Schema 12 not found (HTTP status code 404, SR code 40403)")
+        ),
+    )
+
+    assert reader.load() is None
+    assert reader.schema_missing is True
+
+
+def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monkeypatch):
+    class FakeMessage:
+        def error(self):
+            return None
+
+        def partition(self):
+            return 0
+
+        def offset(self):
+            return 0
+
+        def key(self):
+            return b"pipeline=pipe|chain=evm:56|network=mainnet|mode=realtime|unit=block|entities=block|cursor=1"
+
+        def value(self):
+            return b"payload"
+
+    class FakeTopicMeta:
+        error = None
+
+        def __init__(self):
+            self.partitions = {0: object()}
+
+    class FakeMetadata:
+        def __init__(self):
+            self.topics = {"evm.bsc.mainnet.cursor_state": FakeTopicMeta()}
+
+    class FakeConsumer:
+        def __init__(self, *_args, **_kwargs):
+            self._polled = False
+
+        def list_topics(self, *_args, **_kwargs):
+            return FakeMetadata()
+
+        def get_watermark_offsets(self, *_args, **_kwargs):
+            return (0, 1)
+
+        def assign(self, *_args, **_kwargs):
+            return None
+
+        def poll(self, *_args, **_kwargs):
+            if self._polled:
+                return None
+            self._polled = True
+            return FakeMessage()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("confluent_kafka.Consumer", FakeConsumer)
+
+    identity = CheckpointIdentity(
+        pipeline="pipe",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="realtime",
+        primary_unit="block",
+        entities=("block",),
+    )
+    reader = KafkaWatermarkStateReader(
+        topic="evm.bsc.mainnet.cursor_state",
+        producer_config={"bootstrap.servers": "localhost:9092"},
+        identity=identity,
+        schema_registry_url="http://localhost:30081",
+    )
+    monkeypatch.setattr(
+        reader,
+        "_decode_record",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("Schema 12 not found (HTTP status code 404, SR code 40403)")
+        ),
+    )
+
+    assert reader.load() == {}
+    assert reader.schema_missing is True

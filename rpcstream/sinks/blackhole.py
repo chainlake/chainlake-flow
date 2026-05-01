@@ -35,4 +35,7 @@ class BlackholeSink:
         for topic, rows in topic_rows:
             self.message_count += len(rows)
             self.topic_counts[topic] += len(rows)
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(True)
+        return future
         return None

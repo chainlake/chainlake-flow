@@ -30,6 +30,29 @@ class KafkaTopicManager:
         )
         self._ensure_compaction(topics)
 
+    def delete_topics(self, topics: Iterable[str]) -> None:
+        from confluent_kafka.admin import AdminClient
+
+        admin = self._admin_client()
+        unique_topics = sorted({topic for topic in topics if topic})
+        if not unique_topics:
+            return
+
+        futures = admin.delete_topics(unique_topics)
+        for topic, future in futures.items():
+            try:
+                future.result()
+                if self.logger:
+                    self.logger.info(
+                        "kafka.topic_deleted",
+                        component="sink",
+                        topic=topic,
+                    )
+            except Exception as exc:
+                if "UNKNOWN_TOPIC_OR_PARTITION" in str(exc) or "UNKNOWN_TOPIC" in str(exc):
+                    continue
+                raise
+
     def _ensure_topics(self, topics: Iterable[str], config: dict[str, str]) -> None:
         from confluent_kafka.admin import NewTopic
 

@@ -50,7 +50,7 @@ def make_config() -> PipelineConfig:
 
 
 def test_config_print_outputs_effective_overridden_yaml(monkeypatch):
-    monkeypatch.setattr("rpcstream.cli.load_pipeline_config", lambda _path: make_config())
+    monkeypatch.setattr("rpcstream.cli.common.load_pipeline_config", lambda _path: make_config())
 
     result = runner.invoke(
         app,
@@ -80,13 +80,13 @@ def test_config_print_outputs_effective_overridden_yaml(monkeypatch):
 def test_ingest_backfill_invokes_existing_runner_with_effective_config(monkeypatch):
     captured = {}
 
-    monkeypatch.setattr("rpcstream.cli.load_pipeline_config", lambda _path: make_config())
+    monkeypatch.setattr("rpcstream.cli.common.load_pipeline_config", lambda _path: make_config())
 
     async def fake_run_pipeline(*, config_path=None, config=None):
         captured["config_path"] = config_path
         captured["config"] = config
 
-    monkeypatch.setattr("rpcstream.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("rpcstream.cli.ingest.run_pipeline", fake_run_pipeline)
 
     result = runner.invoke(
         app,
@@ -115,12 +115,12 @@ def test_ingest_backfill_invokes_existing_runner_with_effective_config(monkeypat
 def test_dlq_replay_invokes_existing_runner(monkeypatch):
     captured = {}
 
-    monkeypatch.setattr("rpcstream.cli.load_pipeline_config", lambda _path: make_config())
+    monkeypatch.setattr("rpcstream.cli.common.load_pipeline_config", lambda _path: make_config())
 
     async def fake_run_dlq_replay(**kwargs):
         captured.update(kwargs)
 
-    monkeypatch.setattr("rpcstream.cli.run_dlq_replay", fake_run_dlq_replay)
+    monkeypatch.setattr("rpcstream.cli.dlq.run_dlq_replay", fake_run_dlq_replay)
 
     result = runner.invoke(
         app,
@@ -170,13 +170,13 @@ def test_infer_ingest_mode_matches_from_to_combination():
 def test_root_command_invokes_realtime_when_only_from_is_set(monkeypatch):
     captured = {}
 
-    monkeypatch.setattr("rpcstream.cli.load_pipeline_config", lambda _path: make_config())
+    monkeypatch.setattr("rpcstream.cli.common.load_pipeline_config", lambda _path: make_config())
 
     async def fake_run_pipeline(*, config_path=None, config=None):
         captured["config_path"] = config_path
         captured["config"] = config
 
-    monkeypatch.setattr("rpcstream.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("rpcstream.cli.ingest.run_pipeline", fake_run_pipeline)
 
     result = runner.invoke(
         app,
@@ -200,13 +200,13 @@ def test_root_command_invokes_realtime_when_only_from_is_set(monkeypatch):
 def test_root_command_uses_explicit_chainhead_without_disabling_eos(monkeypatch):
     captured = {}
 
-    monkeypatch.setattr("rpcstream.cli.load_pipeline_config", lambda _path: make_config())
+    monkeypatch.setattr("rpcstream.cli.common.load_pipeline_config", lambda _path: make_config())
 
     async def fake_run_pipeline(*, config_path=None, config=None):
         captured["config_path"] = config_path
         captured["config"] = config
 
-    monkeypatch.setattr("rpcstream.cli.run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("rpcstream.cli.ingest.run_pipeline", fake_run_pipeline)
 
     result = runner.invoke(
         app,
@@ -319,7 +319,7 @@ def test_init_command_invokes_kafka_init_with_config_path(monkeypatch):
 
         captured["config_path"] = os.environ.get("PIPELINE_CONFIG")
 
-    monkeypatch.setattr("rpcstream.cli.run_kafka_init", fake_run_kafka_init)
+    monkeypatch.setattr("rpcstream.cli.init.run_kafka_init", fake_run_kafka_init)
 
     result = runner.invoke(
         app,

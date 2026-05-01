@@ -20,6 +20,14 @@ def main() -> None:
         config_path=config_path,
         pipeline=runtime.pipeline.name,
     )
+    logger.info(
+        "kafka.bootstrap_context",
+        component="sink",
+        schema_registry_url=runtime.kafka.schema_registry_url,
+        checkpoint_topic=runtime.checkpoint.topic,
+        watermark_state_topic=runtime.checkpoint.watermark_state_topic,
+        protobuf_enabled=runtime.kafka.protobuf_enabled,
+    )
     bootstrap_kafka_resources(runtime, adapter=adapter, logger=logger)
 
 

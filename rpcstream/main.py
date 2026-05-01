@@ -8,6 +8,8 @@ from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.resolver import resolve
 from rpcstream.adapters import build_chain_adapter
 from rpcstream.runtime.observability.provider import build_observability
+from rpcstream.sinks.kafka.admin import KafkaTopicManager
+from rpcstream.sinks.kafka.bootstrap import bootstrap_kafka_resources
 
 from rpcstream.client.jsonrpc import JsonRpcClient
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
@@ -73,6 +75,19 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
     )
     shutdown_event = install_shutdown_handlers(logger)
     await observability.start()
+    pipeline_start_cursor = runtime.pipeline.start_cursor
+    logger.info(
+        "runtime.startup_context",
+        component="runtime",
+        schema_registry_url=runtime.kafka.schema_registry_url,
+        checkpoint_topic=runtime.checkpoint.topic,
+        watermark_state_topic=runtime.checkpoint.watermark_state_topic,
+        protobuf_enabled=runtime.kafka.protobuf_enabled,
+        pipeline_start_cursor=pipeline_start_cursor,
+        checkpoint_resume_enabled=(
+            runtime.pipeline.mode == "backfill" or pipeline_start_cursor == "checkpoint"
+        ),
+    )
 
     client = None
     tracker = None
@@ -82,11 +97,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
     checkpoint_identity = None
     resume_cursor = None
     state_records = {}
-    pipeline_start_cursor = getattr(runtime.pipeline, "start_cursor", "checkpoint")
-    checkpoint_resume_enabled = (
-        runtime.pipeline.mode == "backfill"
-        or pipeline_start_cursor == "checkpoint"
-    )
+    checkpoint_resume_enabled = runtime.pipeline.mode == "backfill" or pipeline_start_cursor == "checkpoint"
     
     try:
         internal_entities = getattr(runtime, "internal_entities", runtime.entities)
@@ -168,6 +179,30 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
                 logger=logger,
             )
             state_records = await asyncio.to_thread(state_reader.load)
+
+            if getattr(checkpoint_reader, "schema_missing", False) or getattr(
+                state_reader, "schema_missing", False
+            ):
+                logger.warn(
+                    "checkpoint.schema_reset_requested",
+                    component="checkpoint",
+                    checkpoint_topic=runtime.checkpoint.topic,
+                    watermark_state_topic=runtime.checkpoint.watermark_state_topic,
+                    schema_registry_url=runtime.kafka.schema_registry_url,
+                )
+                topic_manager = KafkaTopicManager(
+                    producer_config=runtime.kafka.config,
+                    logger=logger,
+                )
+                await asyncio.to_thread(
+                    topic_manager.delete_topics,
+                    [runtime.checkpoint.topic, runtime.checkpoint.watermark_state_topic],
+                )
+                bootstrap_kafka_resources(runtime, adapter=adapter, logger=logger)
+                resume_cursor = None
+                state_records = {}
+                checkpoint_reader = None
+                state_reader = None
 
         # -------------------------
         # PROCESSOR

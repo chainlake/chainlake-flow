@@ -51,6 +51,7 @@ class KafkaWriter:
 
         self._running = False
         self._worker_task = None
+        self._last_delivery_summary = None
 
         if self.protobuf_enabled:
             if not schema_registry_url:
@@ -89,16 +90,113 @@ class KafkaWriter:
                     offset=msg.offset(),
                 )
 
+    def _build_delivery_tracker(self, *, topic_rows, wait_delivery: bool):
+        if not wait_delivery:
+            return None
+
+        event_timestamps = []
+        ingest_timestamps = []
+        topic_counts = defaultdict(int)
+        total_rows = 0
+        for topic, rows in topic_rows:
+            topic_counts[topic] += len(rows)
+            total_rows += len(rows)
+            for row in rows:
+                event_ts = self.time_calc.calculate_event_timestamp_ms(row)
+                if event_ts is not None:
+                    event_timestamps.append(event_ts)
+                ingest_ts = row.get("ingest_timestamp")
+                if ingest_ts is not None:
+                    ingest_timestamps.append(int(ingest_ts))
+
+        future = asyncio.get_running_loop().create_future()
+        tracker = {
+            "future": future,
+            "pending": total_rows,
+            "started_at_ms": int(time.time() * 1000),
+            "ack_count": 0,
+            "topic_counts": dict(topic_counts),
+            "event_timestamps": event_timestamps,
+            "ingest_timestamps": ingest_timestamps,
+            "kafka_append_timestamps": [],
+        }
+
+        if total_rows == 0:
+            future.set_result(
+                self._summarize_delivery_tracker(tracker)
+            )
+        return tracker
+
+    def _summarize_delivery_tracker(self, tracker: dict) -> dict:
+        event_timestamp_ms = min(tracker["event_timestamps"]) if tracker["event_timestamps"] else None
+        ingest_timestamp_ms = min(tracker["ingest_timestamps"]) if tracker["ingest_timestamps"] else None
+        kafka_append_timestamp_ms = (
+            max(tracker["kafka_append_timestamps"]) if tracker["kafka_append_timestamps"] else None
+        )
+        delivery_wait_ms = None
+        if tracker.get("started_at_ms") is not None:
+            delivery_wait_ms = round((int(time.time() * 1000) - tracker["started_at_ms"]), 2)
+
+        summary = {
+            "message_count": tracker.get("ack_count", 0),
+            "topic_counts": dict(tracker.get("topic_counts", {})),
+            "event_timestamp_ms": event_timestamp_ms,
+            "ingest_timestamp_ms": ingest_timestamp_ms,
+            "kafka_append_timestamp_ms": kafka_append_timestamp_ms,
+            "event_to_ingest_ms": (
+                round(ingest_timestamp_ms - event_timestamp_ms, 2)
+                if event_timestamp_ms is not None and ingest_timestamp_ms is not None
+                else None
+            ),
+            "ingest_to_kafka_ms": (
+                round(kafka_append_timestamp_ms - ingest_timestamp_ms, 2)
+                if kafka_append_timestamp_ms is not None and ingest_timestamp_ms is not None
+                else None
+            ),
+            "event_to_kafka_ms": (
+                round(kafka_append_timestamp_ms - event_timestamp_ms, 2)
+                if kafka_append_timestamp_ms is not None and event_timestamp_ms is not None
+                else None
+            ),
+            "delivery_wait_ms": delivery_wait_ms,
+        }
+        self._last_delivery_summary = summary
+        return summary
+
+    def _record_delivery_ack(self, delivery_tracker, msg):
+        if delivery_tracker is None:
+            return
+
+        delivery_tracker["ack_count"] += 1
+
+        kafka_append_timestamp_ms = None
+        if msg is not None and hasattr(msg, "timestamp"):
+            try:
+                _msg_type, kafka_append_timestamp_ms = msg.timestamp()
+            except Exception:
+                kafka_append_timestamp_ms = None
+
+        if kafka_append_timestamp_ms is not None:
+            try:
+                kafka_append_timestamp_ms = int(kafka_append_timestamp_ms)
+            except Exception:
+                kafka_append_timestamp_ms = None
+
+        if kafka_append_timestamp_ms is not None:
+            delivery_tracker["kafka_append_timestamps"].append(kafka_append_timestamp_ms)
+
     # ----------------------------
     # Public API (NON-BLOCKING)
     # ----------------------------
     async def send(self, topic, rows, wait_delivery=False):
         linked_span_context = trace.get_current_span().get_span_context()
         delivery_future = None
-        if wait_delivery:
-            delivery_future = asyncio.get_running_loop().create_future()
-            if not rows:
-                delivery_future.set_result(True)
+        delivery_tracker = self._build_delivery_tracker(
+            topic_rows=[(topic, rows)],
+            wait_delivery=wait_delivery,
+        )
+        if delivery_tracker is not None:
+            delivery_future = delivery_tracker["future"]
 
         with self._tracer.start_as_current_span("kafka.enqueue") as span:
             span.set_attribute("component", "sink")
@@ -117,7 +215,7 @@ class KafkaWriter:
                 )
 
             await asyncio.wait_for(
-                self.queue.put((topic, rows, linked_span_context, delivery_future)),
+                self.queue.put((topic, rows, linked_span_context, delivery_tracker)),
                 timeout=0.1,
             ) # batch enqueue, Apply backpressure to engine
             self._queue_depth += 1
@@ -148,10 +246,10 @@ class KafkaWriter:
             if item:
                 self._queue_depth = max(self._queue_depth - 1, 0)
                 self.metrics.QUEUE_SIZE.add(-1)
-                topic, rows, parent_span_context, delivery_future = item
+                topic, rows, parent_span_context, delivery_tracker = item
                 tracker = None
-                if delivery_future is not None and rows:
-                    tracker = {"future": delivery_future, "pending": len(rows)}
+                if delivery_tracker is not None and rows:
+                    tracker = delivery_tracker
                 buffer.extend((topic, r, parent_span_context, tracker) for r in rows)
 
             now = time.time()
@@ -218,10 +316,16 @@ class KafkaWriter:
             
             for topic, r, _, delivery_tracker in items:
                 try:
-                    kafka_key, payload = self._prepare_message(topic, r)
+                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = self._prepare_message(topic, r)
                 except Exception as exc:
                     self._fail_delivery_tracker(delivery_tracker, exc)
                     raise
+
+                if delivery_tracker is not None:
+                    if event_timestamp_ms is not None:
+                        delivery_tracker.setdefault("event_timestamps", []).append(event_timestamp_ms)
+                    if ingest_timestamp_ms is not None:
+                        delivery_tracker.setdefault("ingest_timestamps", []).append(ingest_timestamp_ms)
 
                 if self.logger:
                     self.logger.debug(
@@ -259,14 +363,28 @@ class KafkaWriter:
             latency = (time.time() - start) * 1000
             self.metrics.BATCH_LATENCY.record(latency)
             span.set_attribute("batch_latency_ms", latency)
+            if self._last_delivery_summary is None:
+                self._last_delivery_summary = {
+                    "message_count": len(items),
+                    "topic_counts": dict(topic_counts),
+                    "delivery_wait_ms": latency,
+                }
 
     async def send_transaction(
         self,
         topic_rows,
     ):
-        self._send_transaction_sync(topic_rows)
+        delivery_tracker = self._build_delivery_tracker(
+            topic_rows=topic_rows,
+            wait_delivery=True,
+        )
+        if delivery_tracker is None:
+            return None
 
-    def _send_transaction_sync(self, topic_rows):
+        self._send_transaction_sync(topic_rows, delivery_tracker=delivery_tracker)
+        return delivery_tracker["future"]
+
+    def _send_transaction_sync(self, topic_rows, *, delivery_tracker=None):
         if not self.eos_enabled:
             raise RuntimeError("Kafka EOS transaction mode is not enabled")
 
@@ -274,15 +392,26 @@ class KafkaWriter:
         try:
             for topic, rows in topic_rows:
                 for row in rows:
-                    kafka_key, payload = self._prepare_message(topic, row)
+                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = self._prepare_message(topic, row)
+                    if delivery_tracker is not None:
+                        if event_timestamp_ms is not None:
+                            delivery_tracker.setdefault("event_timestamps", []).append(event_timestamp_ms)
+                        if ingest_timestamp_ms is not None:
+                            delivery_tracker.setdefault("ingest_timestamps", []).append(ingest_timestamp_ms)
                     self.producer.produce(
                         topic=topic,
                         key=kafka_key,
                         value=payload,
-                        callback=self.delivery_report,
+                        callback=self._delivery_callback(delivery_tracker),
                     )
                     self.producer.poll(0)
             self.producer.commit_transaction()
+            if delivery_tracker is not None and not delivery_tracker["future"].done():
+                deadline = time.time() + 5.0
+                while not delivery_tracker["future"].done() and time.time() < deadline:
+                    self.producer.poll(0.05)
+            if delivery_tracker is not None and not delivery_tracker["future"].done():
+                delivery_tracker["future"].set_result(self._summarize_delivery_tracker(delivery_tracker))
         except Exception:
             self.producer.abort_transaction()
             raise
@@ -291,6 +420,7 @@ class KafkaWriter:
         self.metrics.MESSAGE_COUNTER.add(1, {"topic": topic})
         partition_key = row.pop("kafka_partition_key", None)
         event_id = row.get("id") or self.id_calc.calculate_event_id(row)
+        event_timestamp_ms = self.time_calc.calculate_event_timestamp_ms(row)
 
         if not event_id:
             event_id = f"dlq-{row.get('cursor')}-{time.time_ns()}"
@@ -300,24 +430,23 @@ class KafkaWriter:
         kafka_key = partition_key or event_id
 
         payload = self._serialize(topic, row)
-        return kafka_key, payload
+        return kafka_key, payload, event_timestamp_ms, row["ingest_timestamp"]
 
     def _delivery_callback(self, delivery_tracker):
         def callback(err, msg):
             self.delivery_report(err, msg)
             if delivery_tracker is None:
                 return
+            if err:
+                self._fail_delivery_tracker(delivery_tracker, RuntimeError(str(err)))
+                return
+            self._record_delivery_ack(delivery_tracker, msg)
             future = delivery_tracker["future"]
             if future.done():
                 return
-            loop = future.get_loop()
-            if err:
-                loop.call_soon_threadsafe(future.set_exception, RuntimeError(str(err)))
-                return
-
             delivery_tracker["pending"] -= 1
             if delivery_tracker["pending"] == 0:
-                loop.call_soon_threadsafe(future.set_result, True)
+                future.set_result(self._summarize_delivery_tracker(delivery_tracker))
 
         return callback
 
@@ -326,7 +455,7 @@ class KafkaWriter:
             return
         future = delivery_tracker["future"]
         if not future.done():
-            future.get_loop().call_soon_threadsafe(future.set_exception, exc)
+            future.set_exception(exc)
             
     # ----------------------------
     # Lifecycle

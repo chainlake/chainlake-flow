@@ -9,7 +9,7 @@ ENTITY_DEPENDENCIES = {
     "transaction": {"transaction", "receipt"},
     "log": {"block", "receipt", "log"},
     "trace": {"block", "trace"},
-    "receipt": {"receipt"},
+    "receipt": {"block", "receipt"},
 }
 
 

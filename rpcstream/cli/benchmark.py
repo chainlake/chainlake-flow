@@ -1,292 +1,39 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import math
-import os
-import statistics
 import sys
 import time
 from collections import defaultdict
-from collections import deque
-from dataclasses import dataclass
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
-
-import select
-import termios
-import tty
 
 import typer
 from confluent_kafka import Producer
-from rich import box
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
 
 from rpcstream.adapters import build_chain_adapter
 from rpcstream.client.jsonrpc import JsonRpcClient
+from rpcstream.config.builder import build_erpc_endpoint
 from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.overrides import apply_runtime_overrides
-from rpcstream.config.builder import build_erpc_endpoint
 from rpcstream.config.resolver import resolve
+from rpcstream.dashboard import (
+    BenchmarkLogBuffer,
+    BenchmarkProgress,
+    BenchmarkSample,
+    BenchmarkSummary,
+    render_benchmark_dashboard,
+    wait_for_exit_keypress,
+    write_benchmark_output_file,
+)
 from rpcstream.ingestion.engine import IngestionEngine
-from rpcstream.planner.cursor_source import BackfillCursorSource
+from rpcstream.planner.cursor_source import build_cursor_source
+from rpcstream.runtime.observability.provider import build_observability
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
 from rpcstream.sinks.blackhole import BlackholeSink
 from rpcstream.sinks.kafka.producer import KafkaWriter
 from rpcstream.state.checkpoint import build_checkpoint_identity
-from rpcstream.runtime.observability.provider import build_observability
-
-
-@dataclass
-class BenchmarkSample:
-    cursor: int
-    latency_ms: float
-    message_count: int
-
-
-@dataclass
-class BenchmarkSummary:
-    mode: str
-    chain_name: str
-    network: str
-    sink: str
-    eos_enabled: bool
-    start_cursor: int
-    end_cursor: int
-    total_cursors: int
-    total_messages: int
-    total_elapsed_sec: float
-    samples: list[BenchmarkSample]
-
-    def to_dict(self) -> dict[str, Any]:
-        latencies = [sample.latency_ms for sample in self.samples]
-        latencies.sort()
-        avg = statistics.mean(latencies) if latencies else None
-        minimum = latencies[0] if latencies else None
-        maximum = latencies[-1] if latencies else None
-        p50 = _percentile(latencies, 50)
-        p95 = _percentile(latencies, 95)
-        p99 = _percentile(latencies, 99)
-        blocks_per_sec = self.total_cursors / self.total_elapsed_sec if self.total_elapsed_sec > 0 else None
-        messages_per_sec = self.total_messages / self.total_elapsed_sec if self.total_elapsed_sec > 0 else None
-
-        return {
-            "mode": self.mode,
-            "chain_name": self.chain_name,
-            "network": self.network,
-            "sink": self.sink,
-            "eos_enabled": self.eos_enabled,
-            "start_cursor": self.start_cursor,
-            "end_cursor": self.end_cursor,
-            "total_cursors": self.total_cursors,
-            "total_messages": self.total_messages,
-            "total_elapsed_sec": self.total_elapsed_sec,
-            "blocks_per_sec": blocks_per_sec,
-            "messages_per_sec": messages_per_sec,
-            "latency_ms": {
-                "avg": avg,
-                "min": minimum,
-                "max": maximum,
-                "p50": p50,
-                "p95": p95,
-                "p99": p99,
-            },
-        }
-
-
-class BenchmarkLogBuffer:
-    def __init__(self, max_records: int = 100):
-        self.records = deque(maxlen=max_records)
-
-    def debug(self, message, **kwargs):
-        self._append("debug", message, **kwargs)
-
-    def info(self, message, **kwargs):
-        self._append("info", message, **kwargs)
-
-    def warn(self, message, **kwargs):
-        self._append("warn", message, **kwargs)
-
-    def error(self, message, **kwargs):
-        self._append("error", message, **kwargs)
-
-    def _append(self, level: str, message: str, **kwargs):
-        if level == "debug":
-            return
-        self.records.append(
-            {
-                "time": time.time(),
-                "level": level,
-                "message": message,
-                "fields": {
-                    key: value
-                    for key, value in kwargs.items()
-                    if value is not None
-                },
-            }
-        )
-
-    def recent(self, limit: int = 5) -> list[dict[str, Any]]:
-        return list(self.records)[-limit:]
-
-
-class BenchmarkProgress:
-    def __init__(self, total_cursors: int):
-        self.total_cursors = total_cursors
-        self.started_at = time.perf_counter()
-        self.last_refresh_at = self.started_at
-        self.completed = 0
-        self.total_messages = 0
-        self.latencies: list[float] = []
-        self.last_cursor: int | None = None
-        self.last_latency_ms: float | None = None
-        self.last_messages: int = 0
-        self.last_recorded_messages = 0
-        self.last_refresh_completed = 0
-        self.last_refresh_messages = 0
-
-    def record_completion(self, cursor: int, *, latency_ms: float, total_messages: int) -> int:
-        self.completed += 1
-        delta_messages = max(total_messages - self.last_recorded_messages, 0)
-        self.total_messages = total_messages
-        self.latencies.append(latency_ms)
-        self.last_cursor = cursor
-        self.last_latency_ms = latency_ms
-        self.last_messages = delta_messages
-        self.last_recorded_messages = total_messages
-        return delta_messages
-
-    def snapshot(self) -> dict[str, Any]:
-        now = time.perf_counter()
-        elapsed = now - self.started_at
-        since_refresh = max(now - self.last_refresh_at, 1e-6)
-        completed_delta = self.completed - self.last_refresh_completed
-        messages_delta = self.total_messages - self.last_refresh_messages
-        rate = self.completed / elapsed if elapsed > 0 else None
-        msg_rate = self.total_messages / elapsed if elapsed > 0 else None
-        remaining = max(self.total_cursors - self.completed, 0)
-        eta = remaining / rate if rate and rate > 0 else None
-        latencies = sorted(self.latencies)
-        p95 = _percentile(latencies, 95)
-        avg = statistics.mean(latencies) if latencies else None
-        progress = (self.completed / self.total_cursors) if self.total_cursors > 0 else 1.0
-        last_sec_completed = completed_delta / since_refresh if since_refresh > 0 else None
-        last_sec_messages = messages_delta / since_refresh if since_refresh > 0 else None
-        minimum = latencies[0] if latencies else None
-        maximum = latencies[-1] if latencies else None
-
-        return {
-            "progress": progress,
-            "completed": self.completed,
-            "total_cursors": self.total_cursors,
-            "remaining": remaining,
-            "elapsed_sec": elapsed,
-            "eta_sec": eta,
-            "rate_cursors": rate,
-            "rate_messages": msg_rate,
-            "last_sec_completed": last_sec_completed,
-            "last_sec_messages": last_sec_messages,
-            "last_cursor": self.last_cursor,
-            "last_latency_ms": self.last_latency_ms,
-            "last_messages": self.last_messages,
-            "avg_latency_ms": avg,
-            "min_latency_ms": minimum,
-            "max_latency_ms": maximum,
-            "p95_latency_ms": p95,
-            "total_messages": self.total_messages,
-        }
-
-    def mark_refreshed(self):
-        self.last_refresh_at = time.perf_counter()
-        self.last_refresh_completed = self.completed
-        self.last_refresh_messages = self.total_messages
-
-
-def _format_rate(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.2f}/s"
-
-
-def _format_duration(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    if value < 60:
-        return f"{value:.1f}s"
-    minutes = int(value // 60)
-    seconds = value - (minutes * 60)
-    return f"{minutes}m{seconds:04.1f}s"
-
-
-def _truncate(text: str, limit: int = 72) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"
-
-
-class NoopWatermarkManager:
-    def __init__(self, runtime, sink_topic: str = "benchmark.commit_watermark"):
-        self.identity = build_checkpoint_identity(runtime)
-        self.topic = sink_topic
-        self.state_topic = sink_topic.replace("commit_watermark", "cursor_state")
-        self.cursor = None
-
-    async def start(self):
-        return None
-
-    async def stop(self, status: str | None = None):
-        return None
-
-    async def mark_emitted(self, cursor: int):
-        return None
-
-    async def mark_completed(self, cursor: int):
-        self.cursor = cursor
-        return cursor
-
-    async def mark_failed(self, cursor: int, error: str | None = None):
-        return None
-
-    async def requires_cursor_state(self, cursor: int) -> bool:
-        return False
-
-    async def preview_completed(self, cursor: int):
-        return cursor
-
-    def update_commit_delay(self, delay):
-        return None
-
-
-class CountingSink:
-    def __init__(self, sink):
-        self.sink = sink
-        self.message_count = 0
-        self.batch_count = 0
-        self.transaction_count = 0
-        self.topic_counts: dict[str, int] = defaultdict(int)
-
-    async def start(self):
-        return await self.sink.start()
-
-    async def close(self):
-        return await self.sink.close()
-
-    async def send(self, topic, rows, wait_delivery=False):
-        self.batch_count += 1
-        self.message_count += len(rows)
-        self.topic_counts[topic] += len(rows)
-        return await self.sink.send(topic, rows, wait_delivery=wait_delivery)
-
-    async def send_transaction(self, topic_rows):
-        self.transaction_count += 1
-        for topic, rows in topic_rows:
-            self.message_count += len(rows)
-            self.topic_counts[topic] += len(rows)
-        return await self.sink.send_transaction(topic_rows)
 
 
 def _default_config_path() -> str:
@@ -307,211 +54,6 @@ def _parse_entities(values: list[str] | None) -> list[str] | None:
             seen.add(entity)
             entities.append(entity)
     return entities or None
-
-
-def _percentile(sorted_values: list[float], pct: float) -> float | None:
-    if not sorted_values:
-        return None
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-
-    position = (len(sorted_values) - 1) * (pct / 100.0)
-    lower = math.floor(position)
-    upper = math.ceil(position)
-    if lower == upper:
-        return sorted_values[lower]
-    lower_value = sorted_values[lower]
-    upper_value = sorted_values[upper]
-    return lower_value + ((upper_value - lower_value) * (position - lower))
-
-
-def _format_ms(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.2f}"
-
-
-def _format_int(value: int | None) -> str:
-    if value is None:
-        return "n/a"
-    return str(value)
-
-
-def _format_percent(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value * 100:.1f}%"
-
-
-def _format_ms_short(value: float | None) -> str:
-    if value is None:
-        return "n/a"
-    return f"{value:.1f}ms"
-
-
-def _render_progress_bar(progress: float, width: int = 36) -> str:
-    progress = max(0.0, min(progress, 1.0))
-    filled = int(width * progress)
-    empty = width - filled
-    return "█" * filled + "░" * empty
-
-
-def _render_benchmark_dashboard(
-    *,
-    mode: str,
-    sink: str,
-    eos_enabled: bool,
-    window: int,
-    head_cursor: int,
-    progress: BenchmarkProgress,
-    logger: BenchmarkLogBuffer,
-) -> Panel:
-    snap = progress.snapshot()
-    bar = _render_progress_bar(snap["progress"], width=48)
-    source_label = "CursorSource-0"
-    sink_label = "KafkaWriter-0" if sink == "kafka" else "BlackholeSink-0"
-    last_minute_messages = snap["last_sec_messages"] * 60 if snap["last_sec_messages"] is not None else None
-    messages_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    messages_table.add_column("MESSAGE", style="bold", no_wrap=True)
-    messages_table.add_column("no. messages in\nthe last minibatch", justify="right")
-    messages_table.add_column("in the last\nminute", justify="right")
-    messages_table.add_column("since start", justify="right")
-    messages_table.add_column("operator", justify="center", no_wrap=True)
-    messages_table.add_column("latency to wall clock [ms]", justify="right")
-    messages_table.add_column("lag to input [ms]", justify="right")
-    messages_table.add_row(
-        source_label,
-        _format_int(snap["last_messages"]),
-        _format_int(int(last_minute_messages)) if last_minute_messages is not None else "n/a",
-        _format_int(snap["completed"]),
-        "input",
-        _format_ms_short(snap["last_latency_ms"]),
-        _format_int(snap["remaining"]),
-    )
-    messages_table.add_row(
-        sink_label,
-        _format_int(snap["last_messages"]),
-        _format_int(int(last_minute_messages)) if last_minute_messages is not None else "n/a",
-        _format_int(snap["total_messages"]),
-        "output",
-        _format_ms_short(snap["avg_latency_ms"]),
-        _format_int(snap["remaining"]),
-    )
-
-    lag_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    lag_table.add_column("LATENCY / LAG", style="bold", no_wrap=True)
-    lag_table.add_column("latency to wall clock [ms]", justify="right")
-    lag_table.add_column("lag to input [ms]", justify="right")
-    lag_table.add_column("avg [ms]", justify="right")
-    lag_table.add_column("min [ms]", justify="right")
-    lag_table.add_column("max [ms]", justify="right")
-    lag_table.add_column("p50 [ms]", justify="right")
-    lag_table.add_column("p95 [ms]", justify="right")
-    lag_table.add_column("p99 [ms]", justify="right")
-    lag_table.add_row(
-        source_label,
-        _format_ms_short(snap["last_latency_ms"]),
-        _format_int(snap["remaining"]),
-        _format_ms_short(snap["avg_latency_ms"]),
-        _format_ms_short(snap["min_latency_ms"]),
-        _format_ms_short(snap["max_latency_ms"]),
-        _format_ms_short(_percentile(sorted(progress.latencies), 50)),
-        _format_ms_short(snap["p95_latency_ms"]),
-        _format_ms_short(_percentile(sorted(progress.latencies), 99)),
-    )
-    lag_table.add_row(
-        sink_label,
-        _format_ms_short(snap["avg_latency_ms"]),
-        _format_int(snap["remaining"]),
-        _format_ms_short(snap["avg_latency_ms"]),
-        _format_ms_short(snap["min_latency_ms"]),
-        _format_ms_short(snap["max_latency_ms"]),
-        _format_ms_short(_percentile(sorted(progress.latencies), 50)),
-        _format_ms_short(snap["p95_latency_ms"]),
-        _format_ms_short(_percentile(sorted(progress.latencies), 99)),
-    )
-
-    logs = Table.grid(expand=True)
-    logs.add_column(style="dim", width=22, no_wrap=True)
-    logs.add_column(style="bold", width=8)
-    logs.add_column(ratio=1)
-    recent_logs = [record for record in logger.recent(10) if record["level"] == "info"]
-    for record in recent_logs:
-        fields = record["fields"]
-        detail_bits = []
-        for key in ("cursor", "entity", "stage", "payload", "error", "latency_ms", "ingestion_lag"):
-            value = fields.get(key)
-            if value is None:
-                continue
-            detail_bits.append(f"{key}={value}")
-        detail = " ".join(detail_bits)
-        logs.add_row(
-            time.strftime("[%m/%d/%y %H:%M:%S]", time.localtime(record["time"])),
-            record["level"].upper(),
-            _truncate(f"{record['message']} {detail}".strip(), 120),
-        )
-
-    if not recent_logs:
-        logs.add_row("-", "INFO", "waiting for benchmark activity...")
-    while len(recent_logs) < 10:
-        logs.add_row("", "", "")
-        recent_logs.append(None)  # keep table height stable
-
-    footer_lines = [
-        f"[dim]progress[/dim] {bar}  {snap['completed']}/{snap['total_cursors']} ({_format_percent(snap['progress'])})  "
-        f"[dim]elapsed[/dim] {_format_duration(snap['elapsed_sec'])}  "
-        f"[dim]eta[/dim] {_format_duration(snap['eta_sec'])}",
-    ]
-    if snap["completed"] >= snap["total_cursors"] > 0:
-        footer_lines.append("[bold green]benchmark complete[/bold green]  press ESC or Ctrl-C to exit")
-
-    return Panel(
-        Group(
-            messages_table,
-            "",
-            lag_table,
-            "",
-            logs,
-            "",
-            *footer_lines,
-        ),
-        title="RPCSTREAM PROGRESS DASHBOARD",
-        title_align="center",
-        border_style="cyan",
-    )
-
-
-def _write_benchmark_output_file(summary: BenchmarkSummary, output_file: str) -> Path:
-    output_path = Path(output_file).expanduser()
-    if not output_path.suffix:
-        output_path = output_path.with_suffix(".json")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(summary.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    return output_path
-
-
-def _wait_for_exit_keypress() -> None:
-    if not sys.stdin.isatty() or os.name != "posix":
-        return
-
-    fd = sys.stdin.fileno()
-    original = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        while True:
-            ready, _, _ = select.select([fd], [], [], 0.1)
-            if not ready:
-                continue
-            ch = sys.stdin.read(1)
-            if ch in ("\x1b", "\x03"):
-                return
-    except KeyboardInterrupt:
-        return
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, original)
 
 
 async def _wait_for_head(tracker, timeout_sec: float) -> int:
@@ -559,6 +101,124 @@ async def _discover_chainhead(
             await probe_client.close()
 
 
+class NoopWatermarkManager:
+    """Minimal watermark manager used by benchmark runs."""
+
+    def __init__(self, runtime, sink_topic: str = "benchmark.commit_watermark"):
+        self.identity = build_checkpoint_identity(runtime)
+        self.topic = sink_topic
+        self.state_topic = sink_topic.replace("commit_watermark", "cursor_state")
+        self.cursor = None
+
+    async def start(self):
+        return None
+
+    async def stop(self, status: str | None = None):
+        return None
+
+    async def mark_emitted(self, cursor: int):
+        return None
+
+    async def mark_completed(self, cursor: int):
+        self.cursor = cursor
+        return cursor
+
+    async def mark_failed(self, cursor: int, error: str | None = None):
+        return None
+
+    async def requires_cursor_state(self, cursor: int) -> bool:
+        return False
+
+    async def preview_completed(self, cursor: int):
+        return cursor
+
+    def update_commit_delay(self, delay):
+        return None
+
+
+class CountingSink:
+    """Sink wrapper that tracks how many rows and batches benchmark writes."""
+
+    def __init__(self, sink):
+        self.sink = sink
+        self.message_count = 0
+        self.batch_count = 0
+        self.transaction_count = 0
+        self.topic_counts: dict[str, int] = defaultdict(int)
+
+    async def start(self):
+        return await self.sink.start()
+
+    async def close(self):
+        return await self.sink.close()
+
+    async def send(self, topic, rows, wait_delivery=False):
+        self.batch_count += 1
+        self.message_count += len(rows)
+        self.topic_counts[topic] += len(rows)
+        return await self.sink.send(topic, rows, wait_delivery=wait_delivery)
+
+    async def send_transaction(self, topic_rows):
+        self.transaction_count += 1
+        for topic, rows in topic_rows:
+            self.message_count += len(rows)
+            self.topic_counts[topic] += len(rows)
+        return await self.sink.send_transaction(topic_rows)
+
+
+def _build_benchmark_sample(
+    *,
+    cursor: int,
+    cursor_started_at: float,
+    checkpoint_ms: float,
+    engine,
+    message_count: int,
+) -> BenchmarkSample:
+    phase_timings = dict(getattr(engine, "_cursor_phase_timings", {}).get(cursor, {}))
+    cursor_observation = dict(getattr(engine, "_cursor_observations", {}).get(cursor, {}))
+    delivery_summary = dict(getattr(engine, "_cursor_delivery_summaries", {}).get(cursor, {}))
+
+    event_timestamp_ms = (
+        delivery_summary.get("event_timestamp_ms")
+        if delivery_summary.get("event_timestamp_ms") is not None
+        else cursor_observation.get("event_timestamp_ms")
+    )
+    ingest_timestamp_ms = delivery_summary.get("ingest_timestamp_ms")
+    kafka_append_timestamp_ms = delivery_summary.get("kafka_append_timestamp_ms")
+    event_to_ingest_ms = delivery_summary.get("event_to_ingest_ms")
+    ingest_to_kafka_ms = delivery_summary.get("ingest_to_kafka_ms")
+    event_to_kafka_ms = delivery_summary.get("event_to_kafka_ms")
+    delivery_wait_ms = delivery_summary.get("delivery_wait_ms")
+    wall_clock_ms = (time.perf_counter() - cursor_started_at) * 1000
+    latency_ms = event_to_kafka_ms if event_to_kafka_ms is not None else wall_clock_ms
+
+    if event_timestamp_ms is not None:
+        cursor_observation["event_timestamp_ms"] = event_timestamp_ms
+    if ingest_timestamp_ms is not None:
+        cursor_observation["ingest_timestamp_ms"] = ingest_timestamp_ms
+    if kafka_append_timestamp_ms is not None:
+        cursor_observation["kafka_append_timestamp_ms"] = kafka_append_timestamp_ms
+    cursor_observation["checkpoint_ms"] = checkpoint_ms
+    cursor_observation["wall_clock_ms"] = wall_clock_ms
+
+    sample = BenchmarkSample(
+        cursor=cursor,
+        latency_ms=latency_ms,
+        message_count=max(message_count, 0),
+        completed_at=time.time() * 1000,
+        phase_timings=phase_timings,
+        event_timestamp_ms=event_timestamp_ms,
+        ingest_timestamp_ms=ingest_timestamp_ms,
+        kafka_append_timestamp_ms=kafka_append_timestamp_ms,
+        event_to_ingest_ms=event_to_ingest_ms,
+        ingest_to_kafka_ms=ingest_to_kafka_ms,
+        event_to_kafka_ms=event_to_kafka_ms,
+        delivery_wait_ms=delivery_wait_ms,
+        cursor_timings=cursor_observation,
+    )
+    return sample
+
+
 async def _build_sink(
     *,
     runtime,
@@ -601,6 +261,7 @@ async def _run_benchmark_async(
     *,
     config_path: str,
     mode: str,
+    pipeline_mode: str,
     sink: str,
     eos_enabled: bool | None,
     window: int,
@@ -625,15 +286,29 @@ async def _run_benchmark_async(
             logger=logger,
             head_timeout_sec=head_timeout_sec,
         )
-        start_cursor = head_cursor - window + 1
-        if start_cursor < 0:
-            raise ValueError(f"window={window} is larger than the current chainhead {head_cursor}")
+        normalized_pipeline_mode = pipeline_mode.strip().lower()
+        if normalized_pipeline_mode not in {"backfill", "realtime"}:
+            raise ValueError("--pipeline-mode must be either 'backfill' or 'realtime'")
+
+        if normalized_pipeline_mode == "backfill":
+            start_cursor = head_cursor - window + 1
+            if start_cursor < 0:
+                raise ValueError(
+                    f"window={window} is larger than the current chainhead {head_cursor}"
+                )
+            benchmark_from_value: str | int = start_cursor
+            benchmark_to_value: int | None = head_cursor
+            summary_start_cursor = start_cursor
+        else:
+            benchmark_from_value = "chainhead"
+            benchmark_to_value = None
+            summary_start_cursor = head_cursor
 
         benchmark_config = apply_runtime_overrides(
             raw_config,
-            mode="backfill",
-            from_value=start_cursor,
-            to_value=head_cursor,
+            mode=normalized_pipeline_mode,
+            from_value=benchmark_from_value,
+            to_value=benchmark_to_value,
             entities=_parse_entities(entity),
             eos_enabled=eos_enabled,
         )
@@ -654,6 +329,14 @@ async def _run_benchmark_async(
             eos_enabled=runtime.kafka.eos_enabled,
         )
         watermark_manager = NoopWatermarkManager(runtime)
+        tracker = None
+        if runtime.pipeline.mode == "realtime":
+            tracker = adapter.build_tracker(
+                client=run_client,
+                poll_interval=runtime.tracker.poll_interval,
+                logger=logger,
+            )
+            await tracker.start()
         engine = IngestionEngine(
             fetcher=adapter.build_fetcher(
                 scheduler=AdaptiveRpcScheduler(
@@ -667,7 +350,7 @@ async def _run_benchmark_async(
                 ),
                 entities=getattr(runtime, "internal_entities", runtime.entities),
                 logger=logger,
-                tracker=None,
+                tracker=tracker,
             ),
             processors=adapter.build_processors(entities=getattr(runtime, "internal_entities", runtime.entities)),
             enricher=adapter.build_enricher(),
@@ -685,7 +368,12 @@ async def _run_benchmark_async(
             eos_enabled=runtime.kafka.eos_enabled,
         )
 
-        cursor_source = BackfillCursorSource(start=start_cursor, end=head_cursor)
+        cursor_source = build_cursor_source(
+            runtime,
+            tracker,
+            observability=observability,
+            resume_cursor=None,
+        )
         samples: list[BenchmarkSample] = []
         progress = BenchmarkProgress(total_cursors=window)
         progress_lock = asyncio.Lock()
@@ -696,7 +384,7 @@ async def _run_benchmark_async(
         async def refresh_dashboard(live: Live):
             while not dashboard_stop.is_set():
                 live.update(
-                    _render_benchmark_dashboard(
+                    render_benchmark_dashboard(
                         mode=benchmark_mode,
                         sink=sink.lower().strip(),
                         eos_enabled=runtime.kafka.eos_enabled,
@@ -714,7 +402,7 @@ async def _run_benchmark_async(
 
         await sink_obj.start()
         with Live(
-            _render_benchmark_dashboard(
+            render_benchmark_dashboard(
                 mode=benchmark_mode,
                 sink=sink.lower().strip(),
                 eos_enabled=runtime.kafka.eos_enabled,
@@ -738,27 +426,37 @@ async def _run_benchmark_async(
 
                         cursor_started = time.perf_counter()
                         success, delivery_futures, expected_watermark = await engine._run_one(cursor)
+                        checkpoint_started = time.perf_counter()
                         await engine._finalize_checkpoint(
                             cursor,
                             success,
                             delivery_futures,
                             expected_watermark=expected_watermark,
                         )
+                        checkpoint_ms = (time.perf_counter() - checkpoint_started) * 1000
                         latency_ms = (time.perf_counter() - cursor_started) * 1000
+                        sample = _build_benchmark_sample(
+                            cursor=int(cursor),
+                            cursor_started_at=cursor_started,
+                            checkpoint_ms=checkpoint_ms,
+                            engine=engine,
+                            message_count=0,
+                        )
+                        phase_timings = dict(sample.phase_timings)
+                        phase_timings["checkpoint_ms"] = checkpoint_ms
+                        phase_timings["e2e_ms"] = sample.event_to_kafka_ms if sample.event_to_kafka_ms is not None else latency_ms
+                        progress_latency_ms = phase_timings["e2e_ms"]
                         async with progress_lock:
                             delta_messages = progress.record_completion(
                                 int(cursor),
-                                latency_ms=latency_ms,
+                                latency_ms=progress_latency_ms,
                                 total_messages=sink_obj.message_count,
+                                phase_timings=phase_timings,
                             )
-
-                        samples.append(
-                            BenchmarkSample(
-                                cursor=int(cursor),
-                                latency_ms=latency_ms,
-                                message_count=delta_messages,
-                            )
-                        )
+                        sample.message_count = delta_messages
+                        sample.phase_timings = phase_timings
+                        progress.recent_samples.append(sample)
+                        samples.append(sample)
                 elif benchmark_mode == "concurrent":
                     worker_count = 1 if runtime.kafka.eos_enabled else max(1, runtime.engine.concurrency)
                     queue_size = max(1, max(runtime.scheduler.max_inflight, runtime.engine.concurrency) * 2)
@@ -782,26 +480,38 @@ async def _run_benchmark_async(
                                 break
                             cursor, cursor_started = item
                             success, delivery_futures, expected_watermark = await engine._run_one(cursor)
+                            checkpoint_started = time.perf_counter()
                             await engine._finalize_checkpoint(
                                 cursor,
                                 success,
                                 delivery_futures,
                                 expected_watermark=expected_watermark,
                             )
+                            checkpoint_ms = (time.perf_counter() - checkpoint_started) * 1000
                             latency_ms = (time.perf_counter() - cursor_started) * 1000
+                            sample = _build_benchmark_sample(
+                                cursor=cursor,
+                                cursor_started_at=cursor_started,
+                                checkpoint_ms=checkpoint_ms,
+                                engine=engine,
+                                message_count=0,
+                            )
+                            phase_timings = dict(sample.phase_timings)
+                            phase_timings["checkpoint_ms"] = checkpoint_ms
+                            phase_timings["e2e_ms"] = sample.event_to_kafka_ms if sample.event_to_kafka_ms is not None else latency_ms
+                            progress_latency_ms = phase_timings["e2e_ms"]
                             async with progress_lock:
                                 delta_messages = progress.record_completion(
                                     cursor,
-                                    latency_ms=latency_ms,
+                                    latency_ms=progress_latency_ms,
                                     total_messages=sink_obj.message_count,
+                                    phase_timings=phase_timings,
                                 )
-                                samples.append(
-                                    BenchmarkSample(
-                                        cursor=cursor,
-                                        latency_ms=latency_ms,
-                                        message_count=delta_messages,
-                                    )
-                                )
+                            sample.message_count = delta_messages
+                            sample.phase_timings = phase_timings
+                            async with progress_lock:
+                                progress.recent_samples.append(sample)
+                                samples.append(sample)
 
                     workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
                     await producer()
@@ -812,7 +522,7 @@ async def _run_benchmark_async(
                 dashboard_stop.set()
                 await dashboard_task
                 live.update(
-                    _render_benchmark_dashboard(
+                    render_benchmark_dashboard(
                         mode=benchmark_mode,
                         sink=sink.lower().strip(),
                         eos_enabled=runtime.kafka.eos_enabled,
@@ -824,8 +534,11 @@ async def _run_benchmark_async(
                 )
                 live.refresh()
                 if dashboard_console.is_terminal:
-                    await asyncio.to_thread(_wait_for_exit_keypress)
+                    await asyncio.to_thread(wait_for_exit_keypress)
         await sink_obj.close()
+        if tracker is not None:
+            await tracker.stop()
+            tracker = None
         total_elapsed_sec = time.perf_counter() - total_started
         total_messages = sink_obj.message_count
         total_cursors = len(samples)
@@ -835,7 +548,7 @@ async def _run_benchmark_async(
             network=runtime.chain.network,
             sink=sink.lower().strip(),
             eos_enabled=runtime.kafka.eos_enabled,
-            start_cursor=start_cursor,
+            start_cursor=summary_start_cursor,
             end_cursor=head_cursor,
             total_cursors=total_cursors,
             total_messages=total_messages,
@@ -843,9 +556,12 @@ async def _run_benchmark_async(
             samples=samples,
         )
         if output_file:
-            _write_benchmark_output_file(summary, output_file)
+            write_benchmark_output_file(summary, output_file)
         return summary
     finally:
+        if "tracker" in locals() and tracker is not None:
+            with suppress(Exception):
+                await tracker.stop()
         if "run_client" in locals():
             await run_client.close()
         await observability.shutdown()
@@ -870,7 +586,7 @@ def benchmark(
     window: int = typer.Option(
         1000,
         "--window",
-        help="Number of cursors to include ending at chainhead. A window of 1000 runs from head-999 through head.",
+        help="Number of cursors to process. Backfill uses a bounded range ending at chainhead; realtime collects the next N live cursors.",
     ),
     entity: list[str] | None = typer.Option(
         None,
@@ -887,20 +603,26 @@ def benchmark(
         "--mode",
         help="Benchmark execution mode: serial or concurrent. Concurrent is best for no-EOS throughput tests.",
     ),
+    pipeline_mode: str = typer.Option(
+        "backfill",
+        "--pipeline-mode",
+        help="Pipeline mode for the benchmark: backfill for bounded replay or realtime for live chain ingestion.",
+    ),
     output_file: str | None = typer.Option(
         None,
         "--output-file",
         help="Optional JSON output file. If set without a suffix, .json is appended.",
     ),
 ) -> None:
-    """Benchmark ingestion from chainhead-window to chainhead and show a live dashboard."""
+    """Benchmark ingestion latency and throughput and show a live dashboard."""
     config_path = config_path or _default_config_path()
     try:
-        summary = asyncio.run(
+        asyncio.run(
             _run_benchmark_async(
                 config_path=config_path,
                 sink=sink,
                 mode=mode,
+                pipeline_mode=pipeline_mode,
                 eos_enabled=eos_enabled,
                 window=window,
                 entity=entity,
@@ -919,3 +641,16 @@ def benchmark(
         if not output_path.suffix:
             output_path = output_path.with_suffix(".json")
         typer.echo(f"wrote benchmark results to {output_path}")
+
+
+_write_benchmark_output_file = write_benchmark_output_file
+
+
+__all__ = [
+    "benchmark",
+    "_default_config_path",
+    "_run_benchmark_async",
+    "_write_benchmark_output_file",
+    "NoopWatermarkManager",
+    "CountingSink",
+]

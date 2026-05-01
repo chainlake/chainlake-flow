@@ -15,6 +15,7 @@ class _Future:
 class _AdminStub:
     def __init__(self):
         self.incremental_updates = []
+        self.deleted_topics = []
 
     def describe_configs(self, resources):
         return {
@@ -25,6 +26,10 @@ class _AdminStub:
     def incremental_alter_configs(self, resources):
         self.incremental_updates = resources
         return {resource: _Future(None) for resource in resources}
+
+    def delete_topics(self, topics):
+        self.deleted_topics = list(topics)
+        return {topic: _Future(None) for topic in topics}
 
 
 def test_config_entry_value_supports_objects_and_plain_values():
@@ -75,3 +80,13 @@ def test_ensure_compacted_topics_uses_compact_delete_policy():
     assert captured["topics"] == ["checkpoint-topic"]
     assert captured["compaction_topics"] == ["checkpoint-topic"]
     assert captured["config"]["cleanup.policy"] == "compact,delete"
+
+
+def test_delete_topics_uses_admin_delete_topics():
+    manager = KafkaTopicManager(producer_config={})
+    admin = _AdminStub()
+    manager._admin_client = lambda: admin
+
+    manager.delete_topics(["checkpoint-topic", "cursor-state-topic"])
+
+    assert admin.deleted_topics == ["checkpoint-topic", "cursor-state-topic"]

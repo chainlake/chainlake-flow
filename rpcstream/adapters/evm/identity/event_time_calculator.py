@@ -23,6 +23,23 @@ class EventTimeCalculator:
 
         return self._to_rfc3339(ts)
 
+    def calculate_event_timestamp_ms(self, item):
+        """
+        Extract blockchain event time in milliseconds.
+        """
+        if item is None or not isinstance(item, dict):
+            return None
+
+        if item.get("type") == "block":
+            ts = item.get("timestamp")
+        else:
+            ts = item.get("block_timestamp")
+
+        if ts is None:
+            return None
+
+        return int(ts) * 1000
+
 
     def calculate_ingest_timestamp(self):
         """

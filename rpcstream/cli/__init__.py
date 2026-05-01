@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import asyncio
-import os
-
 import typer
-import yaml
 
-from rpcstream.config.loader import load_pipeline_config
-from rpcstream.config.overrides import apply_runtime_overrides
 from rpcstream.cli.benchmark import benchmark as benchmark_command
-from rpcstream.dlq_replay import DEFAULT_REPLAY_GROUP, run_dlq_replay
-from rpcstream.dlq_retry import DEFAULT_RETRY_GROUP, run_dlq_retry
-from rpcstream.kafka_init import main as run_kafka_init
-from rpcstream.main import run_pipeline
+from rpcstream.cli.common import default_config_path, fail
+from rpcstream.cli.common import infer_ingest_mode as _infer_ingest_mode
+from rpcstream.cli.common import parse_entities as _parse_entities
+from rpcstream.cli.config import config_app
+from rpcstream.cli.dlq import dlq_app
+from rpcstream.cli.ingest import run_ingest
+from rpcstream.cli.init import kafka_init as kafka_init_command
 
 app = typer.Typer(
     help=(
@@ -34,124 +31,16 @@ app = typer.Typer(
         "rpcstream --from chainhead --entity block\n\n"
         "rpcstream --from 95000000 --entity block,transaction\n\n"
         "rpcstream --from 95000000 --to 95000100 --entity block,transaction\n\n"
-
         "rpcstream benchmark --mode concurrent --sink blackhole --output-file benchmark.json\n\n"
-
         "rpcstream dlq retry\n\n"
         "rpcstream config print"
     ),
     invoke_without_command=True,
 )
-dlq_app = typer.Typer(help="Run DLQ workflows.", no_args_is_help=True)
-config_app = typer.Typer(help="Validate and inspect effective config.", no_args_is_help=True)
 
 app.add_typer(dlq_app, name="dlq")
 app.add_typer(config_app, name="config")
 app.command("benchmark", help="Benchmark ingestion latency and throughput.")(benchmark_command)
-
-
-def _default_config_path() -> str:
-    return os.getenv("PIPELINE_CONFIG", "pipeline.yaml")
-
-
-def _load_effective_config(
-    *,
-    config_path: str,
-    mode: str | None = None,
-    from_value: str | int | None = None,
-    to_value: int | None = None,
-    entities: list[str] | None = None,
-    eos_enabled: bool | None = None,
-):
-    config = load_pipeline_config(config_path)
-    if (
-        mode is None
-        and from_value is None
-        and to_value is None
-        and entities is None
-        and eos_enabled is None
-    ):
-        return config
-    return apply_runtime_overrides(
-        config,
-        mode=mode,
-        from_value=from_value,
-        to_value=to_value,
-        entities=entities,
-        eos_enabled=eos_enabled,
-    )
-
-
-def _dump_config(config) -> str:
-    return yaml.safe_dump(
-        config.model_dump(by_alias=True),
-        sort_keys=False,
-        allow_unicode=False,
-    )
-
-
-def _parse_entities(values: list[str] | None) -> list[str] | None:
-    if not values:
-        return None
-
-    entities: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        for part in str(value).split(","):
-            entity = part.strip()
-            if not entity or entity in seen:
-                continue
-            seen.add(entity)
-            entities.append(entity)
-    return entities or None
-
-def _infer_ingest_mode(*, from_value: str | int | None, to_value: int | None) -> str:
-    if from_value is None and to_value is None:
-        return "realtime"
-    if from_value is not None and to_value is None:
-        return "realtime"
-    if from_value is not None and to_value is not None:
-        return "backfill"
-    raise ValueError("--to requires --from")
-
-
-def _run_inferred_ingest(
-    *,
-    config_path: str,
-    from_value: str | int | None,
-    to_value: int | None,
-    entity: list[str] | None,
-) -> None:
-    entities = _parse_entities(entity)
-    effective_from = "checkpoint" if from_value is None else from_value
-    effective_to = to_value
-    effective_eos_enabled = None
-
-    if _infer_ingest_mode(from_value=from_value, to_value=to_value) == "backfill":
-        normalized_from = str(effective_from).strip().lower()
-        if normalized_from in {"checkpoint", "latest", "chainhead"}:
-            raise ValueError("--from must be a numeric cursor when --to is provided")
-
-    config = _load_effective_config(
-        config_path=config_path,
-        from_value=effective_from,
-        to_value=effective_to,
-        entities=entities,
-        eos_enabled=effective_eos_enabled,
-    )
-    _run_async(run_pipeline(config_path=config_path, config=config))
-
-
-def _run_async(coro) -> None:
-    try:
-        asyncio.run(coro)
-    except KeyboardInterrupt:
-        raise typer.Exit(130) from None
-
-
-def _fail(exc: Exception) -> None:
-    typer.secho(str(exc), fg=typer.colors.RED, err=True)
-    raise typer.Exit(1) from exc
 
 
 @app.callback()
@@ -184,188 +73,29 @@ def main(
     if ctx.invoked_subcommand is not None:
         return
 
-    config_path = config_path or _default_config_path()
+    config_path = config_path or default_config_path()
     try:
-        _run_inferred_ingest(
+        run_ingest(
             config_path=config_path,
             from_value=from_value,
             to_value=to_value,
             entity=entity,
         )
     except Exception as exc:
-        _fail(exc)
+        fail(exc)
 
 
-@app.command("init", help="Provision Kafka topics and pre-register adapter schemas.")
-def kafka_init(
-    config_path: str = typer.Option(
-        None,
-        "--config",
-        help="Path to pipeline.yaml.",
-    ),
-) -> None:
-    config_path = config_path or _default_config_path()
-    previous = os.environ.get("PIPELINE_CONFIG")
-    os.environ["PIPELINE_CONFIG"] = config_path
-    try:
-        run_kafka_init()
-    except Exception as exc:
-        _fail(exc)
-    finally:
-        if previous is None:
-            os.environ.pop("PIPELINE_CONFIG", None)
-        else:
-            os.environ["PIPELINE_CONFIG"] = previous
-
-
-@dlq_app.command("retry")
-def dlq_retry(
-    config_path: str = typer.Option(
-        None,
-        "--config",
-        help="Path to pipeline.yaml.",
-    ),
-    group_id: str = typer.Option(
-        DEFAULT_RETRY_GROUP,
-        "--group-id",
-        help="Consumer group id used by the retry worker.",
-    ),
-) -> None:
-    config_path = config_path or _default_config_path()
-    try:
-        config = _load_effective_config(config_path=config_path)
-    except Exception as exc:
-        _fail(exc)
-    _run_async(run_dlq_retry(config_path=config_path, config=config, group_id=group_id))
-
-
-@dlq_app.command("replay")
-def dlq_replay(
-    config_path: str = typer.Option(
-        None,
-        "--config",
-        help="Path to pipeline.yaml.",
-    ),
-    group_id: str = typer.Option(
-        DEFAULT_REPLAY_GROUP,
-        "--group-id",
-        help="Consumer group id used by the replay worker.",
-    ),
-    entity: str | None = typer.Option(
-        None,
-        "--entity",
-        help="Optional entity filter.",
-    ),
-    status: str = typer.Option(
-        "failed",
-        "--status",
-        help="DLQ status filter.",
-    ),
-    stage: str | None = typer.Option(
-        None,
-        "--stage",
-        help="Optional DLQ stage filter.",
-    ),
-    max_records: int | None = typer.Option(
-        None,
-        "--max-records",
-        help="Maximum number of DLQ records to replay.",
-    ),
-) -> None:
-    config_path = config_path or _default_config_path()
-    try:
-        config = _load_effective_config(config_path=config_path)
-    except Exception as exc:
-        _fail(exc)
-    _run_async(
-        run_dlq_replay(
-            config_path=config_path,
-            config=config,
-            group_id=group_id,
-            entity=entity,
-            status=status,
-            stage=stage,
-            max_records=max_records,
-        )
-    )
-
-
-@config_app.command("validate")
-def config_validate(
-    config_path: str = typer.Option(
-        None,
-        "--config",
-        help="Path to pipeline.yaml.",
-    ),
-    from_value: str | None = typer.Option(
-        None,
-        "--from",
-        help="Optional from cursor override.",
-    ),
-    to_value: int | None = typer.Option(
-        None,
-        "--to",
-        help="Optional to cursor override.",
-    ),
-    entity: list[str] | None = typer.Option(
-        None,
-        "--entity",
-        help="Optional entity override using comma-separated values or repeated --entity flags.",
-    ),
-) -> None:
-    config_path = config_path or _default_config_path()
-    try:
-        entities = _parse_entities(entity)
-        config = _load_effective_config(
-            config_path=config_path,
-            from_value=from_value,
-            to_value=to_value,
-            entities=entities,
-        )
-    except Exception as exc:
-        _fail(exc)
-    typer.echo(
-        f"Config valid: pipeline={config.pipeline.name} mode={config.pipeline.mode} "
-        f"entities={','.join(config.entities)}"
-    )
-
-
-@config_app.command("print")
-def config_print(
-    config_path: str = typer.Option(
-        None,
-        "--config",
-        help="Path to pipeline.yaml.",
-    ),
-    from_value: str | None = typer.Option(
-        None,
-        "--from",
-        help="Optional from cursor override.",
-    ),
-    to_value: int | None = typer.Option(
-        None,
-        "--to",
-        help="Optional to cursor override.",
-    ),
-    entity: list[str] | None = typer.Option(
-        None,
-        "--entity",
-        help="Optional entity override using comma-separated values or repeated --entity flags.",
-    ),
-) -> None:
-    config_path = config_path or _default_config_path()
-    try:
-        entities = _parse_entities(entity)
-        config = _load_effective_config(
-            config_path=config_path,
-            from_value=from_value,
-            to_value=to_value,
-            entities=entities,
-        )
-    except Exception as exc:
-        _fail(exc)
-    typer.echo(_dump_config(config), nl=False)
+app.command("init", help="Provision Kafka topics and pre-register adapter schemas.")(kafka_init_command)
 
 
 def cli() -> None:
     app()
+
+__all__ = [
+    "_infer_ingest_mode",
+    "_parse_entities",
+    "app",
+    "cli",
+    "config_app",
+    "dlq_app",
+]

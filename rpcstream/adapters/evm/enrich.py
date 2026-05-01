@@ -29,6 +29,7 @@ class EvmEnricher:
         }
 
         self._enrich_transactions(enriched)
+        self._inject_block_context(enriched.get("receipt", []), block_by_number)
         self._inject_block_context(enriched.get("log", []), block_by_number)
         self._inject_block_context(enriched.get("trace", []), block_by_number)
         return enriched

@@ -184,7 +184,10 @@ def test_kafka_writer_wait_delivery_future_resolves_after_callback():
         result = await asyncio.wait_for(future, timeout=1)
         return future.done(), result
 
-    assert asyncio.run(run()) == (True, True)
+    done, result = asyncio.run(run())
+    assert done is True
+    assert result["message_count"] == 1
+    assert result["topic_counts"] == {"topic-a": 1}
 
 
 def test_kafka_writer_send_transaction_commits_business_and_checkpoint():
@@ -300,7 +303,9 @@ def test_kafka_writer_send_checkpoint_uses_common_message_envelope():
         await writer.close()
         return await asyncio.wait_for(future, timeout=1)
 
-    assert asyncio.run(run()) is True
+    result = asyncio.run(run())
+    assert result["message_count"] == 1
+    assert result["topic_counts"] == {"checkpoint-topic": 1}
     assert producer.events == [
         ("produce", "checkpoint-topic", "checkpoint-key", '{"id":"checkpoint-key","cursor":1,"ingest_timestamp":1}')
     ]

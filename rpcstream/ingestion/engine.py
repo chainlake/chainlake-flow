@@ -65,6 +65,12 @@ class IngestionEngine:
         self.checkpoint_reader = checkpoint_reader
         self.eos_enabled = eos_enabled
         self._checkpoint_tasks = set()
+        self._last_phase_timings = {}
+        self._last_cursor_observation = {}
+        self._last_delivery_summary = {}
+        self._cursor_phase_timings = {}
+        self._cursor_observations = {}
+        self._cursor_delivery_summaries = {}
 
     async def run_stream(self, cursor_source, shutdown_event: asyncio.Event | None = None):
         sink_started = False
@@ -174,12 +180,37 @@ class IngestionEngine:
     async def _run_one(self, cursor):
         cursor = int(cursor)
         start_total = time.time()
+        start_wall_ms = int(start_total * 1000)
+        phase_timings = {
+            "fetch_ms": 0.0,
+            "rpc_queue_total_ms": 0.0,
+            "rpc_ms_total_ms": 0.0,
+            "rpc_requests": 0,
+            "rpc_min_ms": None,
+            "rpc_max_ms": None,
+            "process_ms": 0.0,
+            "enrich_ms": 0.0,
+            "sink_enqueue_ms": 0.0,
+            "sink_delivery_ms": 0.0,
+        }
         current_entity = "unknown"
         success = True
         delivery_futures = []
         expected_watermark = None
         transactional_topic_rows = []
         parsed_bundle = {}
+        cursor_observation = {
+            "cursor": cursor,
+            "started_at_ms": start_wall_ms,
+            "event_timestamp_ms": None,
+            "ingest_timestamp_ms": None,
+            "kafka_append_timestamp_ms": None,
+            "event_to_ingest_ms": None,
+            "ingest_to_kafka_ms": None,
+            "event_to_kafka_ms": None,
+            "delivery_wait_ms": None,
+            "checkpoint_ms": None,
+        }
         try:
             with self._tracer.start_as_current_span("streaming.run") as root_span:
                 root_span.set_attribute("component", "engine")
@@ -189,7 +220,9 @@ class IngestionEngine:
                 self.metrics.INFLIGHT.add(1)
 
                 # 1. FETCH
+                fetch_started = time.perf_counter()
                 raw_data = await self.fetcher.fetch(cursor)
+                phase_timings["fetch_ms"] = (time.perf_counter() - fetch_started) * 1000
 
                 for entity, processor in self.processors.items():
                     current_entity = entity
@@ -230,7 +263,9 @@ class IngestionEngine:
 
                     try:
                         value, meta = raw_data[entity]
+                        process_started = time.perf_counter()
                         processed_data = processor.process(cursor, value)
+                        phase_timings["process_ms"] += (time.perf_counter() - process_started) * 1000
                         for processed_entity, rows in processed_data.items():
                             parsed_bundle.setdefault(processed_entity, []).extend(rows)
 
@@ -242,6 +277,19 @@ class IngestionEngine:
 
                         latency = meta.extra.get("latency_ms", 0)
                         queue_wait = meta.extra.get("queue_wait_ms", 0)
+                        phase_timings["rpc_requests"] += 1
+                        phase_timings["rpc_ms_total_ms"] += float(latency)
+                        phase_timings["rpc_queue_total_ms"] += float(queue_wait)
+                        phase_timings["rpc_min_ms"] = (
+                            float(latency)
+                            if phase_timings["rpc_min_ms"] is None
+                            else min(float(latency), phase_timings["rpc_min_ms"])
+                        )
+                        phase_timings["rpc_max_ms"] = (
+                            float(latency)
+                            if phase_timings["rpc_max_ms"] is None
+                            else max(float(latency), phase_timings["rpc_max_ms"])
+                        )
 
                         self.metrics.BLOCK_COUNTER.add(1, {"entity": entity})
                         self.metrics.BLOCK_LATENCY.record(latency, {"entity": entity})
@@ -273,12 +321,18 @@ class IngestionEngine:
                         success = False
 
                 if success:
+                    enrich_started = time.perf_counter()
                     final_bundle = self.enricher.enrich(parsed_bundle) if self.enricher else parsed_bundle
+                    phase_timings["enrich_ms"] += (time.perf_counter() - enrich_started) * 1000
+                    cursor_observation["event_timestamp_ms"] = self._extract_event_timestamp_ms(
+                        final_bundle
+                    )
                     for entity, topic in self.topics.items():
                         rows = final_bundle.get(entity, [])
                         self.metrics.ROW_COUNTER.add(len(rows), {"entity": entity})
                         if not rows:
                             continue
+                        sink_started = time.perf_counter()
                         if self.eos_enabled:
                             transactional_topic_rows.append((topic, rows))
                         else:
@@ -289,6 +343,7 @@ class IngestionEngine:
                             )
                             if delivery_future is not None:
                                 delivery_futures.append(delivery_future)
+                        phase_timings["sink_enqueue_ms"] += (time.perf_counter() - sink_started) * 1000
         except Exception as e:
             with self._tracer.start_as_current_span("engine.error") as error_span:
                 error_span.set_status(Status(StatusCode.ERROR))
@@ -320,6 +375,22 @@ class IngestionEngine:
             success = False
 
         finally:
+            rpc_requests = max(int(phase_timings.get("rpc_requests", 0)), 0)
+            if rpc_requests > 0:
+                phase_timings["rpc_ms"] = phase_timings["rpc_ms_total_ms"] / rpc_requests
+                phase_timings["rpc_queue_ms"] = phase_timings["rpc_queue_total_ms"] / rpc_requests
+            else:
+                phase_timings["rpc_ms"] = 0.0
+                phase_timings["rpc_queue_ms"] = 0.0
+                phase_timings["rpc_min_ms"] = 0.0
+                phase_timings["rpc_max_ms"] = 0.0
+            phase_timings["sink_ms"] = (
+                phase_timings["sink_enqueue_ms"] + phase_timings["sink_delivery_ms"]
+            )
+            self._last_phase_timings = dict(phase_timings)
+            self._cursor_phase_timings[cursor] = dict(phase_timings)
+            self._last_cursor_observation = dict(cursor_observation)
+            self._cursor_observations[cursor] = dict(cursor_observation)
             self.metrics.INFLIGHT.add(-1)
             total_ms = (time.time() - start_total) * 1000
             self.metrics.TOTAL_TIME.record(total_ms, {"entity": current_entity})
@@ -357,7 +428,9 @@ class IngestionEngine:
                         ],
                     )
                 )
-            await self.sink.send_transaction(transactional_topic_rows)
+            delivery_future = await self.sink.send_transaction(transactional_topic_rows)
+            if delivery_future is not None:
+                delivery_futures.append(delivery_future)
         return success, delivery_futures, expected_watermark
 
     async def _finalize_checkpoint(
@@ -372,15 +445,38 @@ class IngestionEngine:
             await self._record_failed_watermark_state(cursor)
             return
         try:
+            delivery_results = []
             if delivery_futures:
-                await asyncio.gather(*delivery_futures)
+                delivery_results = await asyncio.gather(*delivery_futures)
+                delivery_summary = self._aggregate_delivery_summaries(delivery_results)
+                if delivery_summary:
+                    self._last_delivery_summary = delivery_summary
+                    self._cursor_delivery_summaries[cursor] = delivery_summary
+                    self._last_cursor_observation.update(delivery_summary)
+                    self._cursor_observations.setdefault(cursor, {}).update(delivery_summary)
+                    cursor_phase_timings = self._cursor_phase_timings.setdefault(
+                        cursor,
+                        dict(self._last_phase_timings),
+                    )
+                    if delivery_summary.get("delivery_wait_ms") is not None:
+                        cursor_phase_timings["sink_delivery_ms"] = delivery_summary["delivery_wait_ms"]
+                        cursor_phase_timings["sink_ms"] = (
+                            cursor_phase_timings.get("sink_enqueue_ms", 0.0)
+                            + cursor_phase_timings.get("sink_delivery_ms", 0.0)
+                        )
+                        self._last_phase_timings["sink_delivery_ms"] = delivery_summary["delivery_wait_ms"]
+                        self._last_phase_timings["sink_ms"] = (
+                            self._last_phase_timings.get("sink_enqueue_ms", 0.0)
+                            + self._last_phase_timings.get("sink_delivery_ms", 0.0)
+                        )
+                    self._last_phase_timings = dict(cursor_phase_timings)
             should_persist_cursor_state = False
             if self.watermark_manager is not None:
                 should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
                     cursor
                 )
             if not self.eos_enabled and should_persist_cursor_state:
-                await self.sink.send(
+                checkpoint_future = await self.sink.send(
                     self.watermark_manager.state_topic,
                     [
                         build_watermark_state_row(
@@ -391,6 +487,17 @@ class IngestionEngine:
                     ],
                     wait_delivery=True,
                 )
+                if checkpoint_future is not None:
+                    checkpoint_result = await checkpoint_future
+                    if isinstance(checkpoint_result, dict):
+                        self._last_cursor_observation["checkpoint_delivery_summary"] = checkpoint_result
+                        self._last_cursor_observation["checkpoint_delivery_wait_ms"] = checkpoint_result.get(
+                            "delivery_wait_ms"
+                        )
+                        self._cursor_observations.setdefault(cursor, {})["checkpoint_delivery_summary"] = checkpoint_result
+                        self._cursor_observations.setdefault(cursor, {})["checkpoint_delivery_wait_ms"] = checkpoint_result.get(
+                            "delivery_wait_ms"
+                        )
             advanced_watermark = await self.watermark_manager.mark_completed(cursor)
             if (
                 self.eos_enabled
@@ -420,13 +527,17 @@ class IngestionEngine:
             error=error,
         )
         if self.eos_enabled:
-            await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
+            delivery_future = await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
+            if delivery_future is not None:
+                await delivery_future
             return
-            await self.sink.send(
+        checkpoint_future = await self.sink.send(
             self.watermark_manager.state_topic,
             [row],
             wait_delivery=True,
         )
+        if checkpoint_future is not None:
+            await checkpoint_future
 
 
 
@@ -480,9 +591,13 @@ class IngestionEngine:
             )
 
         if self.eos_enabled:
-            await self.sink.send_transaction([(topic, [record])])
+            delivery_future = await self.sink.send_transaction([(topic, [record])])
+            if delivery_future is not None:
+                await delivery_future
         else:
-            await self.sink.send(topic, [record])
+            delivery_future = await self.sink.send(topic, [record])
+            if delivery_future is not None:
+                await delivery_future
 
         if self.logger:
             self.logger.warn(
@@ -519,11 +634,68 @@ class IngestionEngine:
             return
         resolved_record = build_resolved_record(record)
         if self.eos_enabled:
-            await self.sink.send_transaction([(self.dlq_topic, [resolved_record])])
+            delivery_future = await self.sink.send_transaction([(self.dlq_topic, [resolved_record])])
+            if delivery_future is not None:
+                await delivery_future
             return
-        await self.sink.send(self.dlq_topic, [resolved_record])
-            
-            
+        delivery_future = await self.sink.send(self.dlq_topic, [resolved_record])
+        if delivery_future is not None:
+            await delivery_future
+
+    def _aggregate_delivery_summaries(self, results):
+        summaries = [result for result in results if isinstance(result, dict)]
+        if not summaries:
+            return {}
+
+        event_timestamps = [
+            item["event_timestamp_ms"]
+            for item in summaries
+            if item.get("event_timestamp_ms") is not None
+        ]
+        ingest_timestamps = [
+            item["ingest_timestamp_ms"]
+            for item in summaries
+            if item.get("ingest_timestamp_ms") is not None
+        ]
+        kafka_timestamps = [
+            item["kafka_append_timestamp_ms"]
+            for item in summaries
+            if item.get("kafka_append_timestamp_ms") is not None
+        ]
+        delivery_waits = [
+            item["delivery_wait_ms"]
+            for item in summaries
+            if item.get("delivery_wait_ms") is not None
+        ]
+
+        event_timestamp_ms = min(event_timestamps) if event_timestamps else None
+        ingest_timestamp_ms = min(ingest_timestamps) if ingest_timestamps else None
+        kafka_append_timestamp_ms = max(kafka_timestamps) if kafka_timestamps else None
+        delivery_wait_ms = max(delivery_waits) if delivery_waits else None
+
+        return {
+            "event_timestamp_ms": event_timestamp_ms,
+            "ingest_timestamp_ms": ingest_timestamp_ms,
+            "kafka_append_timestamp_ms": kafka_append_timestamp_ms,
+            "event_to_ingest_ms": (
+                round(ingest_timestamp_ms - event_timestamp_ms, 2)
+                if event_timestamp_ms is not None and ingest_timestamp_ms is not None
+                else None
+            ),
+            "ingest_to_kafka_ms": (
+                round(kafka_append_timestamp_ms - ingest_timestamp_ms, 2)
+                if kafka_append_timestamp_ms is not None and ingest_timestamp_ms is not None
+                else None
+            ),
+            "event_to_kafka_ms": (
+                round(kafka_append_timestamp_ms - event_timestamp_ms, 2)
+                if kafka_append_timestamp_ms is not None and event_timestamp_ms is not None
+                else None
+            ),
+            "delivery_wait_ms": delivery_wait_ms,
+            "delivery_message_count": sum(int(item.get("message_count", 0)) for item in summaries),
+        }
+
     async def _update_ingestion_lag(self, cursor, head_cursor):
         async with self._lag_lock:
             if cursor > self._latest_processed_block:
@@ -534,6 +706,28 @@ class IngestionEngine:
                 ingestion_lag = head_cursor - self._latest_processed_block
 
             return ingestion_lag
+
+    def _extract_event_timestamp_ms(self, bundle: dict) -> int | None:
+        timestamps: list[int] = []
+        for rows in bundle.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                ts = row.get("block_timestamp")
+                if ts is None and row.get("type") == "block":
+                    ts = row.get("timestamp")
+                if ts is None:
+                    continue
+                try:
+                    timestamps.append(int(ts) * 1000)
+                except Exception:
+                    continue
+
+        if not timestamps:
+            return None
+        return min(timestamps)
         
     
     async def _compute_lag(self, cursor):

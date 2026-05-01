@@ -46,6 +46,13 @@ class EvmRpcFetcher:
             )
 
         if "receipt" in self.entities or "log" in self.entities:
+            if "block" not in self.entities:
+                requests.append(
+                    (
+                        ("block",),
+                        build_get_block_by_number(cursor, False),
+                    )
+                )
             request_entities = ["receipt"]
             if "log" in self.entities:
                 request_entities.append("log")
