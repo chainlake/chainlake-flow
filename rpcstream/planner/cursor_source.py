@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 
 from rpcstream.runtime.observability.context import ObservabilityContext
@@ -76,6 +77,9 @@ class RealtimeCursorSource(CursorSource):
         self.tracker = tracker
         self.last_emitted_cursor = None
         self.start_cursor = start_cursor
+        self.last_head_observed_at_ms = None
+        self.last_cursor_emitted_at_ms = None
+        self.last_head_cursor = None
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
 
@@ -91,6 +95,9 @@ class RealtimeCursorSource(CursorSource):
 
             if self.last_emitted_cursor is None:
                 if self.start_cursor in {"latest", "chainhead"}:
+                    self.last_head_cursor = head_cursor
+                    self.last_head_observed_at_ms = getattr(self.tracker, "get_last_update_at_ms", lambda: None)()
+                    self.last_cursor_emitted_at_ms = int(time.time() * 1000)
                     self.last_emitted_cursor = head_cursor
                     return head_cursor
 
@@ -99,10 +106,16 @@ class RealtimeCursorSource(CursorSource):
                     await asyncio.sleep(0.05)
                     continue
 
+                self.last_head_cursor = head_cursor
+                self.last_head_observed_at_ms = getattr(self.tracker, "get_last_update_at_ms", lambda: None)()
+                self.last_cursor_emitted_at_ms = int(time.time() * 1000)
                 self.last_emitted_cursor = start_cursor
                 return start_cursor
 
             if head_cursor > self.last_emitted_cursor:
+                self.last_head_cursor = head_cursor
+                self.last_head_observed_at_ms = getattr(self.tracker, "get_last_update_at_ms", lambda: None)()
+                self.last_cursor_emitted_at_ms = int(time.time() * 1000)
                 self.last_emitted_cursor += 1
                 return self.last_emitted_cursor
 

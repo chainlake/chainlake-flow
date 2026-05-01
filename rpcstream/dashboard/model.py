@@ -22,6 +22,11 @@ class BenchmarkSample:
     ingest_to_kafka_ms: float | None = None
     event_to_kafka_ms: float | None = None
     delivery_wait_ms: float | None = None
+    head_observed_at_ms: int | None = None
+    cursor_emitted_at_ms: int | None = None
+    head_observed_to_emit_ms: float | None = None
+    head_observed_lag_ms: float | None = None
+    tracker_poll_latency_ms: float | None = None
     cursor_timings: dict[str, float | int | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -38,6 +43,11 @@ class BenchmarkSample:
             "ingest_to_kafka_ms": self.ingest_to_kafka_ms,
             "event_to_kafka_ms": self.event_to_kafka_ms,
             "delivery_wait_ms": self.delivery_wait_ms,
+            "head_observed_at_ms": self.head_observed_at_ms,
+            "cursor_emitted_at_ms": self.cursor_emitted_at_ms,
+            "head_observed_to_emit_ms": self.head_observed_to_emit_ms,
+            "head_observed_lag_ms": self.head_observed_lag_ms,
+            "tracker_poll_latency_ms": self.tracker_poll_latency_ms,
             "cursor_timings": dict(self.cursor_timings),
         }
 

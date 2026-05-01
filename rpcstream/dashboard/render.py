@@ -71,6 +71,15 @@ def _format_epoch_ms(value: int | None) -> str:
         return str(value)
 
 
+def _format_log_time(value: float | int | None) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return datetime.fromtimestamp(float(value)).strftime("%Y/%m/%d %H:%M:%S.%f")[:-3]
+    except Exception:
+        return str(value)
+
+
 def _render_progress_bar(progress: float, width: int = 36) -> str:
     progress = max(0.0, min(progress, 1.0))
     filled = int(width * progress)
@@ -87,140 +96,95 @@ def render_benchmark_dashboard(
     head_cursor: int,
     progress: BenchmarkProgress,
     logger: BenchmarkLogBuffer,
+    scheduler=None,
 ) -> Panel:
     snap = progress.snapshot()
     bar = _render_progress_bar(snap["progress"], width=48)
     last_minute_messages = snap["last_minute_messages"]
     latest_sample = progress.recent_samples[-1] if progress.recent_samples else None
-    phase_timings = latest_sample.phase_timings if latest_sample is not None else snap.get("last_phase_timings", {})
-    messages_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    messages_table.add_column("SOURCE", style="bold", no_wrap=True)
-    messages_table.add_column("no. messages in\nthe last batch", justify="right")
-    messages_table.add_column("messages in\nthe last minute", justify="right")
-    messages_table.add_column("no. batches\nsince start", justify="right")
-    messages_table.add_row(
-        "Values",
-        _format_int(snap["last_messages"]),
-        _format_int(last_minute_messages),
-        _format_int(snap["completed"]),
-    )
-
-    lag_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    lag_table.add_column("LATENCY / LAG", style="bold", no_wrap=True)
-    lag_table.add_column(Text("e2e latency [ms]", no_wrap=True), justify="right", no_wrap=True)
-    lag_table.add_column(
-        Text("ingestion lag [cursors]", no_wrap=True),
-        justify="right",
-        no_wrap=True,
-    )
-    lag_table.add_row(
-        "Values",
-        _format_ms_short(
-            latest_sample.event_to_kafka_ms
-            if latest_sample is not None and latest_sample.event_to_kafka_ms is not None
-            else snap["last_latency_ms"]
-        ),
-        _format_int(snap["remaining"]),
-    )
-
     cursor_detail_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    cursor_detail_table.add_column("CURSOR DRILLDOWN", style="bold", no_wrap=True)
+    cursor_detail_table.add_column("TIMESTAMPS", style="bold", no_wrap=True)
     cursor_detail_table.add_column(Text("value", no_wrap=True), justify="right", no_wrap=True)
+    cursor_detail_table.add_column(Text("meaning", no_wrap=True), justify="left", no_wrap=True)
     if latest_sample is not None:
-        cursor_detail_table.add_row("cursor", str(latest_sample.cursor))
-        cursor_detail_table.add_row("messages", _format_int(latest_sample.message_count))
-        cursor_detail_table.add_row("completed at", _format_epoch_ms(int(latest_sample.completed_at)) if latest_sample.completed_at is not None else "n/a")
-        cursor_detail_table.add_row("event ts", _format_epoch_ms(latest_sample.event_timestamp_ms))
-        cursor_detail_table.add_row("ingest ts", _format_epoch_ms(latest_sample.ingest_timestamp_ms))
-        cursor_detail_table.add_row("kafka append ts", _format_epoch_ms(latest_sample.kafka_append_timestamp_ms))
-        cursor_detail_table.add_row("event -> ingest", _format_ms_short(latest_sample.event_to_ingest_ms))
-        cursor_detail_table.add_row("ingest -> kafka", _format_ms_short(latest_sample.ingest_to_kafka_ms))
-        cursor_detail_table.add_row("e2e", _format_ms_short(latest_sample.event_to_kafka_ms))
-        cursor_detail_table.add_row("delivery wait", _format_ms_short(latest_sample.delivery_wait_ms))
-        cursor_detail_table.add_row(
-            "delivery messages",
-            _format_int(latest_sample.cursor_timings.get("delivery_message_count") if isinstance(latest_sample.cursor_timings, dict) else None),
-        )
-        cursor_detail_table.add_row("checkpoint ms", _format_ms_short(latest_sample.cursor_timings.get("checkpoint_ms") if isinstance(latest_sample.cursor_timings, dict) else None))
-        cursor_detail_table.add_row(
-            "checkpoint delivery wait",
-            _format_ms_short(latest_sample.cursor_timings.get("checkpoint_delivery_wait_ms") if isinstance(latest_sample.cursor_timings, dict) else None),
-        )
-        cursor_detail_table.add_row(
-            "wall clock",
+        cursor_detail_table.add_row("cursor", str(latest_sample.cursor), "current cursor being processed")
+        cursor_detail_table.add_row("messages", _format_int(latest_sample.message_count), "rows emitted for this cursor")
+        cursor_detail_table.add_row("chain event ts", _format_epoch_ms(latest_sample.event_timestamp_ms), "event timestamp from chain data")
+        cursor_detail_table.add_row("chainhead observed at", _format_epoch_ms(latest_sample.head_observed_at_ms), "tracker first saw the new head")
+        cursor_detail_table.add_row("cursor dispatched at", _format_epoch_ms(latest_sample.cursor_emitted_at_ms), "cursor handed to the engine")
+        cursor_detail_table.add_row("ingest ts", _format_epoch_ms(latest_sample.ingest_timestamp_ms), "message entered Kafka writer")
+        cursor_detail_table.add_row("kafka appends ts", _format_epoch_ms(latest_sample.kafka_append_timestamp_ms), "Kafka log append time")
+        cursor_detail_table.add_row("completed at", _format_epoch_ms(int(latest_sample.completed_at)) if latest_sample.completed_at is not None else "n/a", "this cursor finished processing")
+    else:
+        cursor_detail_table.add_row("Values", "n/a", "n/a")
+
+    latency_table = Table(box=box.SIMPLE_HEAVY, expand=True)
+    latency_table.add_column("LATENCIES", style="bold", no_wrap=True)
+    latency_table.add_column(Text("value", no_wrap=True), justify="right", no_wrap=True)
+    latency_table.add_column(Text("meaning", no_wrap=True), justify="left", no_wrap=True)
+    if latest_sample is not None:
+        latency_table.add_row("chainhead poll lag", _format_ms_short(latest_sample.head_observed_lag_ms), "chain event ts to head observation lag")
+        latency_table.add_row("chainhead -> dispatch", _format_ms_short(latest_sample.head_observed_to_emit_ms), "head observation to engine dispatch")
+        latency_table.add_row("chainhead poll latency", _format_ms_short(latest_sample.tracker_poll_latency_ms), "tracker poll round-trip latency")
+        latency_table.add_row("event -> ingest", _format_ms_short(latest_sample.event_to_ingest_ms), "chain event ts to ingest ts")
+        latency_table.add_row("ingest -> kafka", _format_ms_short(latest_sample.ingest_to_kafka_ms), "ingest ts to kafka append ts")
+        latency_table.add_row("e2e", _format_ms_short(latest_sample.event_to_kafka_ms), "chain event ts to kafka append ts")
+        latency_table.add_row(
+            "processing wall clock",
             _format_ms_short(latest_sample.cursor_timings.get("wall_clock_ms") if isinstance(latest_sample.cursor_timings, dict) else None),
+            "total wall clock for this cursor",
         )
     else:
-        cursor_detail_table.add_row("Values", "n/a")
+        latency_table.add_row("Values", "n/a", "n/a")
 
-    recent_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    recent_table.add_column("RECENT CURSORS", style="bold", no_wrap=True)
-    recent_table.add_column(Text("cursor", no_wrap=True), justify="right", no_wrap=True)
-    recent_table.add_column(Text("e2e", no_wrap=True), justify="right", no_wrap=True)
-    recent_table.add_column(Text("event->kafka", no_wrap=True), justify="right", no_wrap=True)
-    recent_table.add_column(Text("sink delivery", no_wrap=True), justify="right", no_wrap=True)
-    recent_table.add_column(Text("messages", no_wrap=True), justify="right", no_wrap=True)
-    recent_samples = list(progress.recent_samples)[-6:]
-    for sample in recent_samples:
-        recent_table.add_row(
-            "Values",
-            str(sample.cursor),
-            _format_ms_short(sample.event_to_kafka_ms if sample.event_to_kafka_ms is not None else sample.latency_ms),
-            _format_ms_short(sample.event_to_kafka_ms),
-            _format_ms_short(sample.delivery_wait_ms),
-            _format_int(sample.message_count),
-        )
-    if not recent_samples:
-        recent_table.add_row("Values", "n/a", "n/a", "n/a", "n/a", "n/a")
-
-    phase_table = Table(box=box.SIMPLE_HEAVY, expand=True)
-    phase_table.add_column("PHASE TIMINGS", style="bold", no_wrap=True)
-    phase_table.add_column(Text("ms", no_wrap=True), justify="right", no_wrap=True)
-    for label, key in (
-        ("fetch", "fetch_ms"),
-        ("rpc requests", "rpc_requests"),
-        ("rpc queue avg", "rpc_queue_ms"),
-        ("rpc avg", "rpc_ms"),
-        ("rpc min", "rpc_min_ms"),
-        ("rpc max", "rpc_max_ms"),
-        ("process", "process_ms"),
-        ("enrich", "enrich_ms"),
-        ("sink enqueue", "sink_enqueue_ms"),
-        ("sink delivery", "sink_delivery_ms"),
-        ("sink total", "sink_ms"),
-        ("checkpoint", "checkpoint_ms"),
-        ("e2e", "e2e_ms"),
-    ):
-        value = phase_timings.get(key)
-        if key == "rpc_requests":
-            phase_table.add_row(label, str(value if value is not None else "n/a"))
-        else:
-            phase_table.add_row(label, _format_ms_short(value))
-
-    logs = Table.grid(expand=True)
-    logs.add_column(style="dim", width=22, no_wrap=True)
-    logs.add_column(style="bold", width=8)
-    logs.add_column(ratio=1)
+    recent_samples = list(progress.recent_samples)[-10:]
+    recent_sample_by_cursor = {sample.cursor: sample for sample in recent_samples}
     recent_logs = [record for record in logger.recent(10) if record["level"] == "info"]
+    logs = Table(box=box.SIMPLE_HEAVY, expand=True, title="LOGS", title_justify="center")
+    logs.add_column(Text("time", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("level", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("cursor", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("entity", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("stage", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("rpc_latency", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("e2e", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("ingestion_lag [cursors]", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("message", no_wrap=True), justify="right", no_wrap=True)
     for record in recent_logs:
         fields = record["fields"]
-        detail_bits = []
-        for key in ("cursor", "entity", "stage", "payload", "error", "latency_ms", "ingestion_lag"):
-            value = fields.get(key)
-            if value is None:
-                continue
-            detail_bits.append(f"{key}={value}")
-        detail = " ".join(detail_bits)
+        cursor_value = fields.get("cursor")
+        cursor_display = "n/a"
+        if cursor_value is not None:
+            try:
+                cursor_display = str(int(cursor_value))
+            except (TypeError, ValueError):
+                cursor_display = str(cursor_value)
+        rpc_latency_value = fields.get("rpc_latency", fields.get("latency_ms"))
+        sample = None
+        if cursor_value is not None:
+            try:
+                sample = recent_sample_by_cursor.get(int(cursor_value))
+            except (TypeError, ValueError):
+                sample = None
+        e2e_value = sample.event_to_kafka_ms if sample is not None and mode.strip().lower() == "realtime" else None
+        ingestion_lag_value = fields.get("ingestion_lag")
+        message_value = fields.get("message", fields.get("payload"))
         logs.add_row(
-            time.strftime("[%m/%d/%y %H:%M:%S]", time.localtime(record["time"])),
+            _format_log_time(record["time"]),
             record["level"].upper(),
-            _truncate(f"{record['message']} {detail}".strip(), 120),
+            cursor_display,
+            str(fields.get("entity")) if fields.get("entity") is not None else "n/a",
+            str(fields.get("stage", record["message"])),
+            _format_ms_short(float(rpc_latency_value)) if isinstance(rpc_latency_value, (int, float)) else "n/a",
+            _format_ms_short(float(e2e_value)) if isinstance(e2e_value, (int, float)) else "n/a",
+            str(int(ingestion_lag_value)) if isinstance(ingestion_lag_value, (int, float)) else "n/a",
+            _format_int(int(message_value)) if isinstance(message_value, (int, float)) else "n/a",
         )
 
     if not recent_logs:
-        logs.add_row("-", "INFO", "waiting for benchmark activity...")
+        logs.add_row("-", "INFO", "n/a", "n/a", "waiting for benchmark activity...", "n/a", "n/a", "n/a", "n/a")
     while len(recent_logs) < 10:
-        logs.add_row("", "", "")
+        logs.add_row("", "", "", "", "", "", "", "", "")
         recent_logs.append(None)
 
     footer = Table.grid(expand=True)
@@ -230,21 +194,16 @@ def render_benchmark_dashboard(
         f"[dim]progress[/dim] {bar}  {snap['completed']}/{snap['total_cursors']} ({_format_percent(snap['progress'])})  "
         f"[dim]elapsed[/dim] {_format_duration(snap['elapsed_sec'])}  "
         f"[dim]eta[/dim] {_format_duration(snap['eta_sec'])}",
-        f"[dim]mode[/dim] {mode}  [dim]sink[/dim] {sink}  [dim]eos[/dim] {'on' if eos_enabled else 'off'}  [dim]window[/dim] {window}",
+        f"[dim]mode[/dim] {mode}  [dim]sink[/dim] {sink}  [dim]eos[/dim] {'on' if eos_enabled else 'off'}  [dim]window[/dim] {window}  "
+        f"[dim]cursors/s[/dim] {_format_rate(snap.get('rate_cursors'))}  "
+        f"[dim]msgs/s[/dim] {_format_rate(snap.get('rate_messages'))}",
     )
 
     return Panel(
         Group(
             "",
             Columns(
-                [messages_table, Group(lag_table, "", cursor_detail_table)],
-                expand=True,
-                equal=True,
-                padding=(0, 2),
-            ),
-            "",
-            Columns(
-                [phase_table, recent_table],
+                [cursor_detail_table, latency_table],
                 expand=True,
                 equal=True,
                 padding=(0, 2),

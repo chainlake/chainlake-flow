@@ -10,7 +10,7 @@ chain:
 entities:
   - "block"
   - "transaction"
-    #- "log"
+  - "log"
   #- "trace"
 
 erpc:

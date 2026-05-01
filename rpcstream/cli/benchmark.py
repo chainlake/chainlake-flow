@@ -33,7 +33,10 @@ from rpcstream.runtime.observability.provider import build_observability
 from rpcstream.scheduler.adaptive import AdaptiveRpcScheduler
 from rpcstream.sinks.blackhole import BlackholeSink
 from rpcstream.sinks.kafka.producer import KafkaWriter
-from rpcstream.state.checkpoint import build_checkpoint_identity
+from rpcstream.state.checkpoint import (
+    WatermarkManager,
+    build_checkpoint_identity,
+)
 
 
 def _default_config_path() -> str:
@@ -165,6 +168,9 @@ class CountingSink:
             self.topic_counts[topic] += len(rows)
         return await self.sink.send_transaction(topic_rows)
 
+    async def send_checkpoint(self, topic, row, wait_delivery=True):
+        return await self.sink.send_checkpoint(topic, row, wait_delivery=wait_delivery)
+
 
 def _build_benchmark_sample(
     *,
@@ -172,6 +178,10 @@ def _build_benchmark_sample(
     cursor_started_at: float,
     checkpoint_ms: float,
     engine,
+    head_observed_at_ms: int | None = None,
+    cursor_emitted_at_ms: int | None = None,
+    tracker_poll_latency_ms: float | None = None,
+    watermark_manager=None,
     message_count: int,
 ) -> BenchmarkSample:
     phase_timings = dict(getattr(engine, "_cursor_phase_timings", {}).get(cursor, {}))
@@ -189,6 +199,17 @@ def _build_benchmark_sample(
     ingest_to_kafka_ms = delivery_summary.get("ingest_to_kafka_ms")
     event_to_kafka_ms = delivery_summary.get("event_to_kafka_ms")
     delivery_wait_ms = delivery_summary.get("delivery_wait_ms")
+    checkpoint_delivery_wait_ms = cursor_observation.get("checkpoint_delivery_wait_ms")
+    if checkpoint_delivery_wait_ms is None and watermark_manager is not None:
+        checkpoint_delivery_wait_ms = getattr(watermark_manager, "last_delivery_wait_ms", None)
+    if checkpoint_delivery_wait_ms is None:
+        checkpoint_delivery_wait_ms = delivery_summary.get("delivery_wait_ms")
+    head_observed_to_emit_ms = None
+    if head_observed_at_ms is not None and cursor_emitted_at_ms is not None:
+        head_observed_to_emit_ms = round(float(cursor_emitted_at_ms - head_observed_at_ms), 2)
+    head_observed_lag_ms = None
+    if head_observed_at_ms is not None and event_timestamp_ms is not None:
+        head_observed_lag_ms = round(float(head_observed_at_ms - event_timestamp_ms), 2)
     wall_clock_ms = (time.perf_counter() - cursor_started_at) * 1000
     latency_ms = event_to_kafka_ms if event_to_kafka_ms is not None else wall_clock_ms
 
@@ -198,6 +219,8 @@ def _build_benchmark_sample(
         cursor_observation["ingest_timestamp_ms"] = ingest_timestamp_ms
     if kafka_append_timestamp_ms is not None:
         cursor_observation["kafka_append_timestamp_ms"] = kafka_append_timestamp_ms
+    if checkpoint_delivery_wait_ms is not None:
+        cursor_observation["checkpoint_delivery_wait_ms"] = checkpoint_delivery_wait_ms
     cursor_observation["checkpoint_ms"] = checkpoint_ms
     cursor_observation["wall_clock_ms"] = wall_clock_ms
 
@@ -214,6 +237,11 @@ def _build_benchmark_sample(
         ingest_to_kafka_ms=ingest_to_kafka_ms,
         event_to_kafka_ms=event_to_kafka_ms,
         delivery_wait_ms=delivery_wait_ms,
+        head_observed_at_ms=head_observed_at_ms,
+        cursor_emitted_at_ms=cursor_emitted_at_ms,
+        head_observed_to_emit_ms=head_observed_to_emit_ms,
+        head_observed_lag_ms=head_observed_lag_ms,
+        tracker_poll_latency_ms=tracker_poll_latency_ms,
         cursor_timings=cursor_observation,
     )
     return sample
@@ -261,9 +289,7 @@ async def _run_benchmark_async(
     *,
     config_path: str,
     mode: str,
-    pipeline_mode: str,
     sink: str,
-    eos_enabled: bool | None,
     window: int,
     entity: list[str] | None,
     head_timeout_sec: float,
@@ -286,11 +312,11 @@ async def _run_benchmark_async(
             logger=logger,
             head_timeout_sec=head_timeout_sec,
         )
-        normalized_pipeline_mode = pipeline_mode.strip().lower()
-        if normalized_pipeline_mode not in {"backfill", "realtime"}:
-            raise ValueError("--pipeline-mode must be either 'backfill' or 'realtime'")
+        benchmark_mode = mode.strip().lower()
+        if benchmark_mode not in {"backfill", "realtime"}:
+            raise ValueError("--mode must be either 'backfill' or 'realtime'")
 
-        if normalized_pipeline_mode == "backfill":
+        if benchmark_mode == "backfill":
             start_cursor = head_cursor - window + 1
             if start_cursor < 0:
                 raise ValueError(
@@ -306,11 +332,11 @@ async def _run_benchmark_async(
 
         benchmark_config = apply_runtime_overrides(
             raw_config,
-            mode=normalized_pipeline_mode,
+            mode=benchmark_mode,
             from_value=benchmark_from_value,
             to_value=benchmark_to_value,
             entities=_parse_entities(entity),
-            eos_enabled=eos_enabled,
+            eos_enabled=(benchmark_mode == "realtime"),
         )
         runtime = resolve(benchmark_config, adapter=adapter)
         run_client = JsonRpcClient(
@@ -329,6 +355,24 @@ async def _run_benchmark_async(
             eos_enabled=runtime.kafka.eos_enabled,
         )
         watermark_manager = NoopWatermarkManager(runtime)
+        if runtime.pipeline.mode == "realtime" and sink.lower().strip() == "kafka":
+            checkpoint_identity = build_checkpoint_identity(runtime)
+            state_reader = None
+            state_records = {}
+            watermark_manager = WatermarkManager(
+                sink=sink_obj,
+                topic=runtime.checkpoint.topic,
+                state_topic=runtime.checkpoint.watermark_state_topic,
+                identity=checkpoint_identity,
+                initial_cursor=None,
+                state_records=state_records,
+                state_reader=state_reader,
+                flush_interval_ms=runtime.checkpoint.flush_interval_ms,
+                commit_batch_size=runtime.checkpoint.commit_batch_size,
+                flush_on_advance=False,
+                logger=logger,
+                meter=observability.get_meter("rpcstream.watermark"),
+            )
         tracker = None
         if runtime.pipeline.mode == "realtime":
             tracker = adapter.build_tracker(
@@ -368,32 +412,28 @@ async def _run_benchmark_async(
             eos_enabled=runtime.kafka.eos_enabled,
         )
 
-        cursor_source = build_cursor_source(
-            runtime,
-            tracker,
-            observability=observability,
-            resume_cursor=None,
-        )
+        cursor_source = build_cursor_source(runtime, tracker, observability=observability, resume_cursor=None)
         samples: list[BenchmarkSample] = []
         progress = BenchmarkProgress(total_cursors=window)
         progress_lock = asyncio.Lock()
         dashboard_stop = asyncio.Event()
         dashboard_console = Console(file=sys.stderr, force_terminal=True, color_system="auto")
-        benchmark_mode = mode.strip().lower()
+        scheduler = engine.fetcher.scheduler
 
         async def refresh_dashboard(live: Live):
             while not dashboard_stop.is_set():
                 live.update(
-                    render_benchmark_dashboard(
-                        mode=benchmark_mode,
-                        sink=sink.lower().strip(),
-                        eos_enabled=runtime.kafka.eos_enabled,
-                        window=window,
-                        head_cursor=head_cursor,
-                        progress=progress,
-                        logger=logger,
+                        render_benchmark_dashboard(
+                            mode=benchmark_mode,
+                            sink=sink.lower().strip(),
+                            eos_enabled=runtime.kafka.eos_enabled,
+                            window=window,
+                            head_cursor=head_cursor,
+                            progress=progress,
+                            logger=logger,
+                            scheduler=scheduler,
+                        )
                     )
-                )
                 live.refresh()
                 progress.mark_refreshed()
                 await asyncio.sleep(1.0)
@@ -410,6 +450,7 @@ async def _run_benchmark_async(
                 head_cursor=head_cursor,
                 progress=progress,
                 logger=logger,
+                scheduler=scheduler,
             ),
             console=dashboard_console,
             screen=True,
@@ -418,13 +459,47 @@ async def _run_benchmark_async(
         ) as live:
             dashboard_task = asyncio.create_task(refresh_dashboard(live))
             try:
-                if benchmark_mode == "serial":
-                    while True:
-                        cursor = await cursor_source.next_cursor()
-                        if cursor is None:
-                            break
+                worker_count = 1 if runtime.kafka.eos_enabled else max(1, runtime.engine.concurrency)
+                queue_size = max(1, max(runtime.scheduler.max_inflight, runtime.engine.concurrency) * 2)
+                queue: asyncio.Queue[tuple[int, float, int | None, int | None, float | None] | None] = asyncio.Queue(maxsize=queue_size)
 
-                        cursor_started = time.perf_counter()
+                async def producer():
+                    try:
+                        emitted = 0
+                        while emitted < window:
+                            cursor = await cursor_source.next_cursor()
+                            if cursor is None:
+                                break
+                            head_observed_at_ms = getattr(cursor_source, "last_head_observed_at_ms", None)
+                            cursor_emitted_at_ms = getattr(cursor_source, "last_cursor_emitted_at_ms", None)
+                            tracker_poll_latency_ms = None
+                            if tracker is not None:
+                                poll_started = getattr(tracker, "get_last_poll_started_at_ms", lambda: None)()
+                                poll_completed = getattr(tracker, "get_last_poll_completed_at_ms", lambda: None)()
+                                if poll_started is not None and poll_completed is not None:
+                                    tracker_poll_latency_ms = round(float(poll_completed - poll_started), 2)
+                            await queue.put(
+                                (
+                                    int(cursor),
+                                    time.perf_counter(),
+                                    head_observed_at_ms,
+                                    cursor_emitted_at_ms,
+                                    tracker_poll_latency_ms,
+                                )
+                            )
+                            emitted += 1
+                    finally:
+                        for _ in range(worker_count):
+                            await queue.put(None)
+
+                async def worker():
+                    while True:
+                        item = await queue.get()
+                        if item is None:
+                            break
+                        cursor, cursor_started, head_observed_at_ms, cursor_emitted_at_ms, tracker_poll_latency_ms = item
+                        if isinstance(watermark_manager, WatermarkManager):
+                            await watermark_manager.mark_emitted(cursor)
                         success, delivery_futures, expected_watermark = await engine._run_one(cursor)
                         checkpoint_started = time.perf_counter()
                         await engine._finalize_checkpoint(
@@ -433,13 +508,19 @@ async def _run_benchmark_async(
                             delivery_futures,
                             expected_watermark=expected_watermark,
                         )
+                        if isinstance(watermark_manager, WatermarkManager) and not runtime.kafka.eos_enabled:
+                            await watermark_manager.flush(force=True)
                         checkpoint_ms = (time.perf_counter() - checkpoint_started) * 1000
                         latency_ms = (time.perf_counter() - cursor_started) * 1000
                         sample = _build_benchmark_sample(
-                            cursor=int(cursor),
+                            cursor=cursor,
                             cursor_started_at=cursor_started,
                             checkpoint_ms=checkpoint_ms,
                             engine=engine,
+                            head_observed_at_ms=head_observed_at_ms,
+                            cursor_emitted_at_ms=cursor_emitted_at_ms,
+                            tracker_poll_latency_ms=tracker_poll_latency_ms,
+                            watermark_manager=watermark_manager,
                             message_count=0,
                         )
                         phase_timings = dict(sample.phase_timings)
@@ -448,76 +529,20 @@ async def _run_benchmark_async(
                         progress_latency_ms = phase_timings["e2e_ms"]
                         async with progress_lock:
                             delta_messages = progress.record_completion(
-                                int(cursor),
+                                cursor,
                                 latency_ms=progress_latency_ms,
                                 total_messages=sink_obj.message_count,
                                 phase_timings=phase_timings,
                             )
                         sample.message_count = delta_messages
                         sample.phase_timings = phase_timings
-                        progress.recent_samples.append(sample)
-                        samples.append(sample)
-                elif benchmark_mode == "concurrent":
-                    worker_count = 1 if runtime.kafka.eos_enabled else max(1, runtime.engine.concurrency)
-                    queue_size = max(1, max(runtime.scheduler.max_inflight, runtime.engine.concurrency) * 2)
-                    queue: asyncio.Queue[tuple[int, float] | None] = asyncio.Queue(maxsize=queue_size)
+                        async with progress_lock:
+                            progress.recent_samples.append(sample)
+                            samples.append(sample)
 
-                    async def producer():
-                        try:
-                            while True:
-                                cursor = await cursor_source.next_cursor()
-                                if cursor is None:
-                                    break
-                                await queue.put((int(cursor), time.perf_counter()))
-                        finally:
-                            for _ in range(worker_count):
-                                await queue.put(None)
-
-                    async def worker():
-                        while True:
-                            item = await queue.get()
-                            if item is None:
-                                break
-                            cursor, cursor_started = item
-                            success, delivery_futures, expected_watermark = await engine._run_one(cursor)
-                            checkpoint_started = time.perf_counter()
-                            await engine._finalize_checkpoint(
-                                cursor,
-                                success,
-                                delivery_futures,
-                                expected_watermark=expected_watermark,
-                            )
-                            checkpoint_ms = (time.perf_counter() - checkpoint_started) * 1000
-                            latency_ms = (time.perf_counter() - cursor_started) * 1000
-                            sample = _build_benchmark_sample(
-                                cursor=cursor,
-                                cursor_started_at=cursor_started,
-                                checkpoint_ms=checkpoint_ms,
-                                engine=engine,
-                                message_count=0,
-                            )
-                            phase_timings = dict(sample.phase_timings)
-                            phase_timings["checkpoint_ms"] = checkpoint_ms
-                            phase_timings["e2e_ms"] = sample.event_to_kafka_ms if sample.event_to_kafka_ms is not None else latency_ms
-                            progress_latency_ms = phase_timings["e2e_ms"]
-                            async with progress_lock:
-                                delta_messages = progress.record_completion(
-                                    cursor,
-                                    latency_ms=progress_latency_ms,
-                                    total_messages=sink_obj.message_count,
-                                    phase_timings=phase_timings,
-                                )
-                            sample.message_count = delta_messages
-                            sample.phase_timings = phase_timings
-                            async with progress_lock:
-                                progress.recent_samples.append(sample)
-                                samples.append(sample)
-
-                    workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
-                    await producer()
-                    await asyncio.gather(*workers)
-                else:
-                    raise ValueError("--mode must be either 'serial' or 'concurrent'")
+                workers = [asyncio.create_task(worker()) for _ in range(worker_count)]
+                await producer()
+                await asyncio.gather(*workers)
             finally:
                 dashboard_stop.set()
                 await dashboard_task
@@ -542,6 +567,7 @@ async def _run_benchmark_async(
         total_elapsed_sec = time.perf_counter() - total_started
         total_messages = sink_obj.message_count
         total_cursors = len(samples)
+        summary_end_cursor = samples[-1].cursor if samples else head_cursor
         summary = BenchmarkSummary(
             mode=benchmark_mode,
             chain_name=runtime.chain.name,
@@ -549,7 +575,7 @@ async def _run_benchmark_async(
             sink=sink.lower().strip(),
             eos_enabled=runtime.kafka.eos_enabled,
             start_cursor=summary_start_cursor,
-            end_cursor=head_cursor,
+            end_cursor=summary_end_cursor,
             total_cursors=total_cursors,
             total_messages=total_messages,
             total_elapsed_sec=total_elapsed_sec,
@@ -578,11 +604,6 @@ def benchmark(
         "--sink",
         help="Benchmark sink. Use blackhole for RPC-only measurement or kafka for producer ack timing.",
     ),
-    eos_enabled: bool = typer.Option(
-        False,
-        "--eos-enabled/--no-eos-enabled",
-        help="Toggle Kafka EOS for the benchmark run.",
-    ),
     window: int = typer.Option(
         1000,
         "--window",
@@ -599,14 +620,9 @@ def benchmark(
         help="Timeout while waiting for the current chainhead before the benchmark window is computed.",
     ),
     mode: str = typer.Option(
-        "concurrent",
-        "--mode",
-        help="Benchmark execution mode: serial or concurrent. Concurrent is best for no-EOS throughput tests.",
-    ),
-    pipeline_mode: str = typer.Option(
         "backfill",
-        "--pipeline-mode",
-        help="Pipeline mode for the benchmark: backfill for bounded replay or realtime for live chain ingestion.",
+        "--mode",
+        help="Benchmark mode: backfill for bounded replay or realtime for live chain ingestion.",
     ),
     output_file: str | None = typer.Option(
         None,
@@ -622,8 +638,6 @@ def benchmark(
                 config_path=config_path,
                 sink=sink,
                 mode=mode,
-                pipeline_mode=pipeline_mode,
-                eos_enabled=eos_enabled,
                 window=window,
                 entity=entity,
                 head_timeout_sec=head_timeout_sec,

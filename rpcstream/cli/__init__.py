@@ -31,7 +31,8 @@ app = typer.Typer(
         "rpcstream --from chainhead --entity block\n\n"
         "rpcstream --from 95000000 --entity block,transaction\n\n"
         "rpcstream --from 95000000 --to 95000100 --entity block,transaction\n\n"
-        "rpcstream benchmark --mode concurrent --sink blackhole --output-file benchmark.json\n\n"
+        "rpcstream benchmark --mode backfill --sink blackhole --output-file benchmark.json\n\n"
+        "rpcstream benchmark --mode realtime --sink kafka\n\n"
         "rpcstream dlq retry\n\n"
         "rpcstream config print"
     ),

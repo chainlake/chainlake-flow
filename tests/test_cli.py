@@ -256,7 +256,6 @@ def test_benchmark_command_invokes_runner(monkeypatch):
             "blackhole",
             "--window",
             "100",
-            "--eos-enabled",
             "--entity",
             "block,transaction",
             "--output-file",
@@ -267,8 +266,7 @@ def test_benchmark_command_invokes_runner(monkeypatch):
     assert result.exit_code == 0
     assert captured["config_path"] == "pipeline.yaml"
     assert captured["sink"] == "blackhole"
-    assert captured["mode"] == "concurrent"
-    assert captured["eos_enabled"] is True
+    assert captured["mode"] == "backfill"
     assert captured["window"] == 100
     assert captured["entity"] == ["block,transaction"]
     assert captured["output_file"] == "benchmark.json"

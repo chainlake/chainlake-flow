@@ -75,6 +75,7 @@ class AdaptiveRpcScheduler(BaseScheduler):
             )
 
             meta.extra["queue_wait_ms"] = round(wait_ms, 2)
+            meta.extra["inflight"] = self.inflight
 
             span.set_attribute("scheduler.queue_wait_ms", round(wait_ms, 2))
             span.set_attribute("scheduler.window", self.current_limit)

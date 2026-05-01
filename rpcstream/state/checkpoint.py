@@ -556,6 +556,7 @@ class WatermarkManager:
         self._lock = asyncio.Lock()
         self._flush_event = asyncio.Event()
         self._state_versions: dict[int, tuple[int, str]] = {}
+        self.last_delivery_wait_ms: float | None = None
         self.metrics = WatermarkMetrics(
             meter,
             attributes={
@@ -739,6 +740,7 @@ class WatermarkManager:
             cursor = self.cursor
             self._dirty = False
 
+        started_at = time.perf_counter()
         delivery_future = await self.sink.send_checkpoint(
             self.topic,
             build_checkpoint_row(self.identity, cursor, status=status),
@@ -746,6 +748,7 @@ class WatermarkManager:
         )
         if delivery_future is not None:
             await delivery_future
+        self.last_delivery_wait_ms = round((time.perf_counter() - started_at) * 1000, 2)
 
     async def _flush_loop(self) -> None:
         while self._running:

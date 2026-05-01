@@ -38,4 +38,6 @@ class BlackholeSink:
         future = asyncio.get_running_loop().create_future()
         future.set_result(True)
         return future
-        return None
+
+    async def send_checkpoint(self, topic: str, row: dict[str, Any], wait_delivery: bool = True):
+        return await self.send(topic, [row], wait_delivery=wait_delivery)

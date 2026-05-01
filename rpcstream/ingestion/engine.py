@@ -186,6 +186,7 @@ class IngestionEngine:
             "rpc_queue_total_ms": 0.0,
             "rpc_ms_total_ms": 0.0,
             "rpc_requests": 0,
+            "rpc_inflight_current": 0,
             "rpc_min_ms": None,
             "rpc_max_ms": None,
             "process_ms": 0.0,
@@ -277,9 +278,11 @@ class IngestionEngine:
 
                         latency = meta.extra.get("latency_ms", 0)
                         queue_wait = meta.extra.get("queue_wait_ms", 0)
+                        inflight = meta.extra.get("inflight", 0)
                         phase_timings["rpc_requests"] += 1
                         phase_timings["rpc_ms_total_ms"] += float(latency)
                         phase_timings["rpc_queue_total_ms"] += float(queue_wait)
+                        phase_timings["rpc_inflight_current"] = int(inflight)
                         phase_timings["rpc_min_ms"] = (
                             float(latency)
                             if phase_timings["rpc_min_ms"] is None

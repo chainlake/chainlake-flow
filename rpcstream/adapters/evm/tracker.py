@@ -21,6 +21,8 @@ class EvmChainHeadTracker:
         self._running = False
         self._task = None
 
+        self._last_poll_started_at_ms = None
+        self._last_poll_completed_at_ms = None
         self._last_update_ts = 0
 
     def get_head_cursor(self):
@@ -28,6 +30,15 @@ class EvmChainHeadTracker:
 
     def get_latest(self):
         return self.get_head_cursor()
+
+    def get_last_update_at_ms(self):
+        return self._last_update_ts * 1000 if self._last_update_ts else None
+
+    def get_last_poll_started_at_ms(self):
+        return self._last_poll_started_at_ms
+
+    def get_last_poll_completed_at_ms(self):
+        return self._last_poll_completed_at_ms
 
     def get_lag(self, current_cursor):
         if self._head_cursor is None:
@@ -48,11 +59,13 @@ class EvmChainHeadTracker:
         while self._running:
             try:
                 start = time.time()
+                self._last_poll_started_at_ms = int(start * 1000)
 
                 request = build_eth_blockNumber()
                 result = await self.client.execute(request, trace_request=False)
 
                 latency = (time.time() - start) * 1000
+                self._last_poll_completed_at_ms = int(time.time() * 1000)
 
                 self.logger.debug("block_tracker.latency", latency_ms=latency)
 
