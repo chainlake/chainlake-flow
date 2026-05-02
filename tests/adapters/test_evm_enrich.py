@@ -49,6 +49,12 @@ def test_evm_enricher_injects_block_context_into_logs_and_traces():
                 "block_number": 11,
             }
         ],
+        "token_transfer": [
+            {
+                "type": "token_transfer",
+                "block_number": 11,
+            }
+        ],
         "trace": [
             {
                 "type": "trace",
@@ -61,5 +67,7 @@ def test_evm_enricher_injects_block_context_into_logs_and_traces():
 
     assert enriched["log"][0]["block_hash"] == "0xblock"
     assert enriched["log"][0]["block_timestamp"] == 12345
+    assert enriched["token_transfer"][0]["block_hash"] == "0xblock"
+    assert enriched["token_transfer"][0]["block_timestamp"] == 12345
     assert enriched["trace"][0]["block_hash"] == "0xblock"
     assert enriched["trace"][0]["block_timestamp"] == 12345

@@ -99,6 +99,22 @@ def test_build_topic_maps_uses_enriched_topic_for_transactions():
     assert topic_maps.main["transaction"] == "evm.bsc.mainnet.enriched_transaction"
 
 
+def test_build_topic_maps_supports_token_transfer_topic():
+    cfg = SimpleNamespace(
+        kafka=SimpleNamespace(
+            common=SimpleNamespace(
+                topic_template="{type}.{chain}.{network}.{kind}_{entity}"
+            )
+        ),
+        chain=SimpleNamespace(type="evm", name="bsc", network="mainnet"),
+        entities=["token_transfer"],
+    )
+
+    topic_maps = build_topic_maps(cfg)
+
+    assert topic_maps.main["token_transfer"] == "evm.bsc.mainnet.token_transfer"
+
+
 def test_build_topic_maps_supports_custom_checkpoint_topic():
     cfg = SimpleNamespace(
         pipeline=SimpleNamespace(checkpoint=SimpleNamespace(topic="custom.checkpoints")),

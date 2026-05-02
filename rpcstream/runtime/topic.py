@@ -40,9 +40,14 @@ def build_topics(cfg, entity: str, adapter=None) -> TopicSet:
         if adapter is not None
         else (lambda _entity: "raw")
     )
+    kind = topic_kind_for_entity(entity)
+    if entity == "token_transfer" or not kind:
+        return TopicSet(
+            main=f"{cfg.chain.type}.{cfg.chain.name}.{cfg.chain.network}.{entity}",
+        )
 
     return TopicSet(
-        main=render(topic_kind_for_entity(entity)),
+        main=render(kind),
     )
 
 

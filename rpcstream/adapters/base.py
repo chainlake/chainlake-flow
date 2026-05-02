@@ -41,6 +41,9 @@ class ChainAdapter(ABC):
     def build_enricher(self):
         raise NotImplementedError
 
+    def build_decoder(self, *, client=None):
+        return None
+
     @abstractmethod
     def build_event_id_calculator(self):
         raise NotImplementedError

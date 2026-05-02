@@ -407,6 +407,7 @@ async def _run_benchmark_async(
                 tracker=tracker,
             ),
             processors=adapter.build_processors(entities=getattr(runtime, "internal_entities", runtime.entities)),
+            decoder=adapter.build_decoder(client=run_client),
             enricher=adapter.build_enricher(),
             sink=sink_obj,
             topics=runtime.topic_map.main,

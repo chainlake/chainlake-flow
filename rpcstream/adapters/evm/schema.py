@@ -105,6 +105,32 @@ LOG_SCHEMA = EntitySchema(
 )
 
 
+TOKEN_TRANSFER_SCHEMA = EntitySchema(
+    entity="token_transfer",
+    message_name="EvmTokenTransfer",
+    package="rpcstream.evm",
+    fields=(
+        FieldSchema("type", "string"),
+        FieldSchema("transfer_type", "string"),
+        FieldSchema("source_log_id", "string"),
+        FieldSchema("token_address", "string"),
+        FieldSchema("from_address", "string"),
+        FieldSchema("to_address", "string"),
+        FieldSchema("token_id", "string"),
+        FieldSchema("amount", "string"),
+        FieldSchema("transaction_hash", "string"),
+        FieldSchema("transaction_index", "int64"),
+        FieldSchema("block_hash", "string"),
+        FieldSchema("block_number", "int64"),
+        FieldSchema("block_timestamp", "int64"),
+        FieldSchema("log_index", "int64"),
+        FieldSchema("transfer_index", "int64"),
+        FieldSchema("id", "string"),
+        FieldSchema("ingest_timestamp", "int64"),
+    ),
+)
+
+
 TRACE_SCHEMA = EntitySchema(
     entity="trace",
     message_name="EvmTrace",
@@ -145,5 +171,6 @@ EVM_ENTITY_SCHEMAS = {
     "block": BLOCK_SCHEMA,
     "transaction": TRANSACTION_SCHEMA,
     "log": LOG_SCHEMA,
+    "token_transfer": TOKEN_TRANSFER_SCHEMA,
     "trace": TRACE_SCHEMA,
 }

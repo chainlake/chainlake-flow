@@ -173,6 +173,7 @@ def build_runtime_stack(
     engine = IngestionEngine(
         fetcher=fetcher,
         processors=processors,
+        decoder=adapter.build_decoder(client=client),
         enricher=adapter.build_enricher(),
         sink=kafka_writer,
         topics=runtime.topic_map.main,

@@ -9,8 +9,9 @@ chain:
 
 entities:
   - "block"
-  - "transaction"
-  - "log"
+    #- "transaction"
+    #- "log"
+    #- "token_transfer"
   #- "trace"
 
 erpc:

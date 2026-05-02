@@ -257,6 +257,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         engine = IngestionEngine(
             fetcher=fetcher,
             processors=processors,
+            decoder=adapter.build_decoder(client=client),
             enricher=adapter.build_enricher(),
             sink=kafka_write,
             topics=main_topics,

@@ -33,6 +33,7 @@ class IngestionEngine:
         concurrency=10, 
         logger=None,
         observability: ObservabilityContext | None = None,
+        decoder=None,
         watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=False,
@@ -61,6 +62,7 @@ class IngestionEngine:
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
         self.metrics = EngineMetrics(self.observability.get_meter("rpcstream.engine"))
+        self.decoder = decoder
         self.watermark_manager = watermark_manager
         self.checkpoint_reader = checkpoint_reader
         self.eos_enabled = eos_enabled
@@ -190,6 +192,7 @@ class IngestionEngine:
             "rpc_min_ms": None,
             "rpc_max_ms": None,
             "process_ms": 0.0,
+            "decode_ms": 0.0,
             "enrich_ms": 0.0,
             "sink_enqueue_ms": 0.0,
             "sink_delivery_ms": 0.0,
@@ -325,8 +328,18 @@ class IngestionEngine:
                         success = False
 
                 if success:
+                    decode_started = time.perf_counter()
+                    if self.decoder is not None:
+                        decoded_bundle = await self.decoder.decode(parsed_bundle)
+                    else:
+                        decoded_bundle = parsed_bundle
+                    phase_timings["decode_ms"] += (time.perf_counter() - decode_started) * 1000
+
                     enrich_started = time.perf_counter()
-                    final_bundle = self.enricher.enrich(parsed_bundle) if self.enricher else parsed_bundle
+                    if self.enricher is not None:
+                        final_bundle = self.enricher.enrich(decoded_bundle)
+                    else:
+                        final_bundle = decoded_bundle
                     phase_timings["enrich_ms"] += (time.perf_counter() - enrich_started) * 1000
                     cursor_observation["event_timestamp_ms"] = self._extract_event_timestamp_ms(
                         final_bundle
@@ -350,7 +363,11 @@ class IngestionEngine:
                             if delivery_future is not None:
                                 delivery_futures.append(delivery_future)
                         phase_timings["sink_enqueue_ms"] += (time.perf_counter() - sink_started) * 1000
-                    receipt_rows = len(final_bundle.get("receipt", [])) if "receipt" not in self.topics else 0
+                    receipt_rows = (
+                        len(final_bundle.get("receipt", []))
+                        if "receipt" not in self.topics
+                        else 0
+                    )
                     cursor_observation["message_count"] = emitted_rows + receipt_rows
         except Exception as e:
             with self._tracer.start_as_current_span("engine.error") as error_span:

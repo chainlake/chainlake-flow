@@ -46,6 +46,19 @@ class EventIdCalculator:
                 return concat("log", tx_hash, log_index)
 
         # ------------------------
+        # TOKEN TRANSFER
+        # ------------------------
+        elif item_type == "token_transfer":
+            tx_hash = item.get("transaction_hash")
+            log_index = item.get("log_index")
+            transfer_index = item.get("transfer_index")
+            if tx_hash is not None and log_index is not None:
+                parts = ["token_transfer", tx_hash, log_index]
+                if transfer_index is not None:
+                    parts.append(transfer_index)
+                return concat(*parts)
+
+        # ------------------------
         # TRACE
         # ------------------------
         elif item_type == "trace":

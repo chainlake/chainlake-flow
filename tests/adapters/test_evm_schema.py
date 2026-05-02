@@ -16,6 +16,7 @@ def test_evm_entity_schemas_cover_all_entities():
         "block",
         "transaction",
         "log",
+        "token_transfer",
         "trace",
     }
 

@@ -142,7 +142,6 @@ async def send_one_trace_dlq(runtime, logger, marker: str, block_number: int) ->
         concurrency=1,
         logger=logger,
         observability=ObservabilityContext.disabled(),
-        checkpoint_manager=None,
         checkpoint_reader=None,
         eos_enabled=runtime.kafka.eos_enabled,
     )

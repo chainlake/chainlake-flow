@@ -4,6 +4,7 @@ from rpcstream.adapters.base import ChainAdapter
 from rpcstream.adapters.evm.dag import resolve_internal_entities
 from rpcstream.adapters.evm.dag import resolve_sink_entities
 from rpcstream.adapters.evm.dag import topic_kind_for_entity
+from rpcstream.adapters.evm.decoder import EvmDecoder
 from rpcstream.adapters.evm.enrich import EvmEnricher
 from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
 from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
@@ -39,6 +40,9 @@ class EvmChainAdapter(ChainAdapter):
 
     def build_enricher(self):
         return EvmEnricher()
+
+    def build_decoder(self, *, client=None):
+        return EvmDecoder(client=client)
 
     def build_entity_schemas(self):
         return EVM_ENTITY_SCHEMAS
