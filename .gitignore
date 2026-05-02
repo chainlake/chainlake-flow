@@ -209,3 +209,5 @@ __marimo__/
 # rpcstream docker file
 rpcstream.tar
 
+.codex
+

@@ -9,14 +9,16 @@ The current runnable system is centered on:
 - Kafka sink with optional EOS
 - `commit_watermark` and `cursor_state` based recovery
 - DLQ retry and replay
+- benchmark dashboard output
 
 ## Start Here
 
 If you are new to the project, read these first:
 
-1. [../README.md](chainlake-flow/README.md)
-2. [ingestion_flow.md](chainlake-flow/docs/ingestion_flow.md)
-3. [kafka_eos.md](chainlake-flow/docs/kafka_eos.md)
+1. [../README.md](../README.md)
+2. [ingestion_flow.md](ingestion_flow.md)
+3. [kafka_eos.md](kafka_eos.md)
+4. [rpcstream_progress_dashboard.png](rpcstream_progress_dashboard.png)
 
 ## CLI
 
@@ -28,6 +30,8 @@ rpcstream --from chainhead
 rpcstream --from 95000000
 rpcstream --from 95000000 --to 95000100
 rpcstream init
+rpcstream benchmark --mode backfill --sink blackhole --output-file benchmark.json
+rpcstream benchmark --mode realtime --sink kafka
 rpcstream dlq retry
 rpcstream dlq replay --entity trace --status pending --stage processor --max-records 5
 rpcstream config validate
@@ -48,42 +52,38 @@ Semantics:
   optional environment preparation only; it creates topics and pre-registers
   protobuf schemas, but it is not required before starting ingestion because
   schemas are auto-registered on first write
+- `rpcstream benchmark`
+  benchmark runtime with a live progress dashboard, cursor timing details, and
+  recent info-level logs
 
 ## Core Runtime Docs
 
-- [ingestion_flow.md](chainlake-flow/docs/ingestion_flow.md)
+- [ingestion_flow.md](ingestion_flow.md)
   End-to-end ingestion path and runtime stages
-- [block_source.md](chainlake-flow/docs/block_source.md)
-  Realtime and backfill cursor/block source behavior
-- [async_rpc_scheduler.md](chainlake-flow/docs/async_rpc_scheduler.md)
+- [async_rpc_scheduler.md](async_rpc_scheduler.md)
   Adaptive RPC concurrency and scheduler design
-- [pipeline_and_entites.md](chainlake-flow/docs/pipeline_and_entites.md)
+- [pipeline.md](pipeline.md)
   Pipeline config and EVM entity model
 
 ## Kafka and Recovery
 
-- [kafka_eos.md](chainlake-flow/docs/kafka_eos.md)
+- [kafka_eos.md](kafka_eos.md)
   `commit_watermark`, `cursor_state`, EOS, and recovery semantics
-- [dlq.md](chainlake-flow/docs/dlq.md)
+- [dlq.md](dlq.md)
   DLQ schema, retry, replay, and operational flow
 
 ## Operations and Debugging
 
-- [debug_and_trace_block.md](chainlake-flow/docs/debug_and_trace_block.md)
+- [debug_and_trace_block.md](debug_and_trace_block.md)
   Debugging a specific block and tracing ingestion behavior
-- [observability.md](chainlake-flow/docs/observability.md)
+- [observability.md](observability.md)
   Tracing, metrics, and logs
-- [progress_dashbaord.md](chainlake-flow/docs/progress_dashbaord.md)
-  Progress and operational dashboard ideas
-- [e2e_lantency.md](chainlake-flow/docs/e2e_lantency.md)
+- [rpcstream_progress_dashboard.png](rpcstream_progress_dashboard.png)
+  Benchmark progress dashboard screenshot
+- [e2e_lantency.md](e2e_lantency.md)
   End-to-end latency notes
 
 ## Environment and Deployment
 
-- [docker.md](chainlake-flow/docs/docker.md)
+- [docker.md](docker.md)
   Container-oriented usage notes
-
-## Chain-Specific Notes
-
-- [evm_method.md](chainlake-flow/docs/evm_method.md)
-  EVM RPC methods and related notes

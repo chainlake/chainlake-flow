@@ -1,4 +1,6 @@
 
+# Observability
+
 ```text
 [ Ingestion Pipeline ]
     ↓
@@ -14,7 +16,7 @@
              Grafana
 ```
 
-## network boundary observability
+## Network boundary observability
 
 | Event             | Level   | Why                    |
 | ----------------- | ------- | ---------------------- |

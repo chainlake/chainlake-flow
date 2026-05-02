@@ -1,17 +1,16 @@
 
+# Pipeline notes
 
+## Pipeline vs entity
 
-## pipeline vs entity
-> pipeline : fetch + process
-> entity: produce
+- pipeline: fetch + process
+- entity: produce
 
+### Design principle
 
-Key design principle
-```bash
-❌ Pipeline should NOT depend on entity list
-✅ Processor decides what entities are available
-✅ Config decides what to KEEP
-```
+- the pipeline should not depend on the entity list
+- the processor decides which entities are available
+- the config decides what to keep
 
 ```yaml
 pipeline:
@@ -27,12 +26,13 @@ schema:
 ENTITY_REGISTRY = {
     "evm": ["block", "transaction", "receipt", "log", "trace"],
     "sui": ["checkpoint", "transaction", "event"],
-    "sol": ["slot", "transaction", "instruction"]
+    "sol": ["slot", "transaction", "instruction"],
 }
 ```
 
-## Pipeline vs Entity vs Adapter (final model)
-```
+## Pipeline vs entity vs adapter
+
+```text
 Adapter (EVM / SUI / SOL)
         ↓
 Pipeline (block / log / trace)
@@ -54,43 +54,33 @@ ENTITY_META = {
 }
 ```
 
+## Multi-pipeline orchestration
 
-## multi-pipeline orchestration (block + log + trace running together without duplication)
+The block, log, and trace paths share the same block fetch when they run
+together:
 
-high-level flow
 ```text
-           BlockSource
-                ↓
-        (block_number stream)
-                ↓
-            Fetcher (ONE)
-                ↓
-        Raw Block Data (shared)
-                ↓
-        ┌────────┬────────┬────────┐
-        ↓        ↓        ↓        ↓
-   BlockProc  TxProc   LogProc  TraceProc
-        ↓        ↓        ↓        ↓
-     Kafka    Kafka    Kafka    Kafka
+BlockSource
+    ↓
+(block_number stream)
+    ↓
+Fetcher (one)
+    ↓
+Raw block data (shared)
+    ↓
+┌────────┬────────┬────────┐
+↓        ↓        ↓        ↓
+Block    Tx       Log      Trace
+proc     proc     proc     proc
+    ↓        ↓        ↓        ↓
+  Kafka    Kafka    Kafka    Kafka
 ```
 
-from
-```
-block pipeline → fetch block
-tx pipeline → fetch block AGAIN ❌
-```
-
-to
-```
-fetch block → reuse everywhere ✅
-```
-
-
-### Pipeline = configuration, not code
+That avoids fetching the same block more than once for the same cursor.
 
 ```yaml
 pipeline:
-  type: "evm_full"   # logical grouping
+  type: "evm_full"
 
 schema:
   entities: ["block", "transaction", "receipt", "log", "trace"]

@@ -7,7 +7,7 @@ It supports:
 - bounded historical backfill
 - Kafka delivery with optional EOS
 - DLQ retry and replay
-- EVM entity parsing and enrich
+- EVM entity parsing and enrichment
 
 The current primary target is low-latency blockchain ingestion over RPC, without requiring self-hosted archive nodes.
 
@@ -47,7 +47,7 @@ rpcstream
 
 The single default runtime config lives at:
 
-[pipeline.yaml](chainlake-flow/pipeline.yaml)
+[pipeline.yaml](pipeline.yaml)
 
 By default, `rpcstream` looks for `pipeline.yaml` in the current working directory.
 
@@ -61,7 +61,7 @@ rpcstream
 If you run from another directory, pass the config explicitly:
 
 ```bash
-rpcstream --config chainlake-flow/pipeline.yaml
+rpcstream --config pipeline.yaml
 ```
 
 Environment variables are loaded from the nearest `.env` discovered from the config path upward. For local environment switching, prefer one `pipeline.yaml` plus explicit env files loaded in the shell.
@@ -117,6 +117,24 @@ It creates the Kafka topics and pre-registers protobuf schemas from
 `pipeline.yaml`, but ingestion does not depend on it.
 `rpcstream` can still start without it because protobuf schemas are
 auto-registered on first use.
+
+### Benchmark dashboard
+
+`rpcstream benchmark` runs the benchmark path and renders a live dashboard.
+It shows:
+
+- completion progress, ETA, and throughput
+- cursor timestamps and chainhead observation details
+- latency breakdown for fetch, process, enrich, decode, and end-to-end
+- recent info-level logs from the run
+
+![RPCStream progress dashboard](docs/rpcstream_progress_dashboard.png)
+
+```bash
+rpcstream benchmark --mode backfill --sink blackhole --output-file benchmark.json
+rpcstream benchmark --mode realtime --sink kafka
+```
+
 
 ### DLQ workflows
 
@@ -187,7 +205,7 @@ High-level meaning:
 
 Detailed behavior is documented in:
 
-[docs/kafka_eos.md](chainlake-flow/docs/kafka_eos.md)
+[docs/kafka_eos.md](docs/kafka_eos.md)
 
 ## EOS and recovery
 
@@ -222,7 +240,7 @@ Notable behaviors:
 
 More detail:
 
-[docs/pipeline_and_entites.md](chainlake-flow/docs/pipeline_and_entites.md)
+[docs/pipeline.md](docs/pipeline.md)
 
 ## Repository layout
 
@@ -246,12 +264,12 @@ chainlake-flow/
 
 ## Useful docs
 
-- [docs/README.md](chainlake-flow/docs/README.md)
-- [docs/ingestion_flow.md](chainlake-flow/docs/ingestion_flow.md)
-- [docs/kafka_eos.md](chainlake-flow/docs/kafka_eos.md)
-- [docs/dlq.md](chainlake-flow/docs/dlq.md)
-- [docs/async_rpc_scheduler.md](chainlake-flow/docs/async_rpc_scheduler.md)
-- [docs/observability.md](chainlake-flow/docs/observability.md)
+- [docs/README.md](docs/README.md)
+- [docs/ingestion_flow.md](docs/ingestion_flow.md)
+- [docs/kafka_eos.md](docs/kafka_eos.md)
+- [docs/dlq.md](docs/dlq.md)
+- [docs/async_rpc_scheduler.md](docs/async_rpc_scheduler.md)
+- [docs/observability.md](docs/observability.md)
 
 ## Current focus
 
