@@ -78,6 +78,7 @@ class RealtimeCursorSource(CursorSource):
         self.last_emitted_cursor = None
         self.start_cursor = start_cursor
         self.last_head_observed_at_ms = None
+        self.last_head_source = None
         self.last_cursor_emitted_at_ms = None
         self.last_head_cursor = None
         self.observability = observability or ObservabilityContext.disabled()
@@ -97,6 +98,7 @@ class RealtimeCursorSource(CursorSource):
                 if self.start_cursor in {"latest", "chainhead"}:
                     self.last_head_cursor = head_cursor
                     self.last_head_observed_at_ms = getattr(self.tracker, "get_last_update_at_ms", lambda: None)()
+                    self.last_head_source = getattr(self.tracker, "get_last_head_source", lambda: None)()
                     self.last_cursor_emitted_at_ms = int(time.time() * 1000)
                     self.last_emitted_cursor = head_cursor
                     return head_cursor
@@ -108,6 +110,7 @@ class RealtimeCursorSource(CursorSource):
 
                 self.last_head_cursor = head_cursor
                 self.last_head_observed_at_ms = getattr(self.tracker, "get_last_update_at_ms", lambda: None)()
+                self.last_head_source = getattr(self.tracker, "get_last_head_source", lambda: None)()
                 self.last_cursor_emitted_at_ms = int(time.time() * 1000)
                 self.last_emitted_cursor = start_cursor
                 return start_cursor
@@ -115,6 +118,7 @@ class RealtimeCursorSource(CursorSource):
             if head_cursor > self.last_emitted_cursor:
                 self.last_head_cursor = head_cursor
                 self.last_head_observed_at_ms = getattr(self.tracker, "get_last_update_at_ms", lambda: None)()
+                self.last_head_source = getattr(self.tracker, "get_last_head_source", lambda: None)()
                 self.last_cursor_emitted_at_ms = int(time.time() * 1000)
                 self.last_emitted_cursor += 1
                 return self.last_emitted_cursor

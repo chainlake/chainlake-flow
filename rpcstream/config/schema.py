@@ -147,11 +147,20 @@ class PipelineConfigModel(BaseModel):
 
 class TrackerConfig(BaseModel):
     poll_interval: float = 0.5
+    websocket_url: str | None = None
 
     @model_validator(mode="after")
     def validate_poll_interval(self):
         if self.poll_interval <= 0:
             raise ValueError("tracker.poll_interval must be > 0")
+        if self.websocket_url is not None:
+            websocket_url = str(self.websocket_url).strip()
+            if not websocket_url:
+                self.websocket_url = None
+            elif not websocket_url.startswith(("ws://", "wss://")):
+                raise ValueError("tracker.websocket_url must start with ws:// or wss://")
+            else:
+                self.websocket_url = websocket_url
         return self
 
 

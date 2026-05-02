@@ -26,7 +26,7 @@ class ChainAdapter(ABC):
         )
 
     @abstractmethod
-    def build_tracker(self, *, client, poll_interval: float, logger=None):
+    def build_tracker(self, *, client, poll_interval: float, websocket_url: str | None = None, logger=None):
         raise NotImplementedError
 
     @abstractmethod

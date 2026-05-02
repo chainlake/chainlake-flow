@@ -52,6 +52,7 @@ class EngineRuntime:
 @dataclass
 class TrackerRuntime:
     poll_interval: float
+    websocket_url: str | None = None
 
 @dataclass
 class PipelineRuntime:
@@ -148,7 +149,8 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
     topic_map = build_topic_maps(cfg, adapter=adapter)
     checkpoint_cfg = _resolve_checkpoint_config(cfg)
     tracker = TrackerRuntime(
-        poll_interval=chain_profile.interval_seconds * cfg.tracker.poll_interval
+        poll_interval=chain_profile.interval_seconds * cfg.tracker.poll_interval,
+        websocket_url=cfg.tracker.websocket_url,
     )
 
     checkpoint = CheckpointRuntime(

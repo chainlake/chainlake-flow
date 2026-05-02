@@ -111,6 +111,7 @@ def render_benchmark_dashboard(
         cursor_detail_table.add_row("messages", _format_int(latest_sample.message_count), "rows emitted for this cursor")
         cursor_detail_table.add_row("chain event ts", _format_epoch_ms(latest_sample.event_timestamp_ms), "event timestamp from chain data")
         cursor_detail_table.add_row("chainhead observed at", _format_epoch_ms(latest_sample.head_observed_at_ms), "tracker first saw the new head")
+        cursor_detail_table.add_row("head source", str(latest_sample.head_source or "n/a"), "websocket or poll source for the head")
         cursor_detail_table.add_row("cursor dispatched at", _format_epoch_ms(latest_sample.cursor_emitted_at_ms), "cursor handed to the engine")
         cursor_detail_table.add_row("ingest ts", _format_epoch_ms(latest_sample.ingest_timestamp_ms), "message entered Kafka writer")
         cursor_detail_table.add_row("kafka appends ts", _format_epoch_ms(latest_sample.kafka_append_timestamp_ms), "Kafka log append time")
@@ -123,11 +124,20 @@ def render_benchmark_dashboard(
     latency_table.add_column(Text("value", no_wrap=True), justify="right", no_wrap=True)
     latency_table.add_column(Text("meaning", no_wrap=True), justify="left", no_wrap=True)
     if latest_sample is not None:
+        phase_timings = latest_sample.phase_timings if isinstance(latest_sample.phase_timings, dict) else {}
+        fetch_ms = phase_timings.get("fetch_ms")
+        process_ms = phase_timings.get("process_ms")
+        enrich_ms = phase_timings.get("enrich_ms")
+        process_enrich_ms = None
+        if isinstance(process_ms, (int, float)) and isinstance(enrich_ms, (int, float)):
+            process_enrich_ms = float(process_ms) + float(enrich_ms)
         latency_table.add_row("chainhead poll lag", _format_ms_short(latest_sample.head_observed_lag_ms), "chain event ts to head observation lag")
         latency_table.add_row("chainhead -> dispatch", _format_ms_short(latest_sample.head_observed_to_emit_ms), "head observation to engine dispatch")
         latency_table.add_row("chainhead poll latency", _format_ms_short(latest_sample.tracker_poll_latency_ms), "tracker poll round-trip latency")
         latency_table.add_row("event -> ingest", _format_ms_short(latest_sample.event_to_ingest_ms), "chain event ts to ingest ts")
         latency_table.add_row("ingest -> kafka", _format_ms_short(latest_sample.ingest_to_kafka_ms), "ingest ts to kafka append ts")
+        latency_table.add_row("fetch", _format_ms_short(float(fetch_ms)) if isinstance(fetch_ms, (int, float)) else "n/a", "fetch RPC and payload processing")
+        latency_table.add_row("process + enrich", _format_ms_short(process_enrich_ms), "business processing plus enrichment")
         latency_table.add_row("e2e", _format_ms_short(latest_sample.event_to_kafka_ms), "chain event ts to kafka append ts")
         latency_table.add_row(
             "processing wall clock",
@@ -148,7 +158,7 @@ def render_benchmark_dashboard(
     logs.add_column(Text("stage", no_wrap=True), justify="right", no_wrap=True)
     logs.add_column(Text("rpc_latency", no_wrap=True), justify="right", no_wrap=True)
     logs.add_column(Text("e2e", no_wrap=True), justify="right", no_wrap=True)
-    logs.add_column(Text("ingestion_lag [cursors]", no_wrap=True), justify="right", no_wrap=True)
+    logs.add_column(Text("processing wall clock", no_wrap=True), justify="right", no_wrap=True)
     logs.add_column(Text("message", no_wrap=True), justify="right", no_wrap=True)
     for record in recent_logs:
         fields = record["fields"]
@@ -167,7 +177,9 @@ def render_benchmark_dashboard(
             except (TypeError, ValueError):
                 sample = None
         e2e_value = sample.event_to_kafka_ms if sample is not None and mode.strip().lower() == "realtime" else None
-        ingestion_lag_value = fields.get("ingestion_lag")
+        processing_wall_clock_value = None
+        if sample is not None and isinstance(sample.cursor_timings, dict):
+            processing_wall_clock_value = sample.cursor_timings.get("wall_clock_ms")
         message_value = fields.get("message", fields.get("payload"))
         logs.add_row(
             _format_log_time(record["time"]),
@@ -177,7 +189,7 @@ def render_benchmark_dashboard(
             str(fields.get("stage", record["message"])),
             _format_ms_short(float(rpc_latency_value)) if isinstance(rpc_latency_value, (int, float)) else "n/a",
             _format_ms_short(float(e2e_value)) if isinstance(e2e_value, (int, float)) else "n/a",
-            str(int(ingestion_lag_value)) if isinstance(ingestion_lag_value, (int, float)) else "n/a",
+            _format_ms_short(float(processing_wall_clock_value)) if isinstance(processing_wall_clock_value, (int, float)) else "n/a",
             _format_int(int(message_value)) if isinstance(message_value, (int, float)) else "n/a",
         )
 

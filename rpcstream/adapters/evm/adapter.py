@@ -23,10 +23,11 @@ class EvmChainAdapter(ChainAdapter):
     def topic_kind_for_entity(self, entity: str) -> str:
         return topic_kind_for_entity(entity)
 
-    def build_tracker(self, *, client, poll_interval: float, logger=None):
+    def build_tracker(self, *, client, poll_interval: float, websocket_url: str | None = None, logger=None):
         return EvmChainHeadTracker(
             client=client,
             poll_interval=poll_interval,
+            websocket_url=websocket_url,
             logger=logger,
         )
 

@@ -75,6 +75,7 @@ def build_runtime_stack(
         tracker = adapter.build_tracker(
             client=client,
             poll_interval=runtime.tracker.poll_interval,
+            websocket_url=runtime.tracker.websocket_url,
             logger=logger,
         )
 

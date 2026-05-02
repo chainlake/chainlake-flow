@@ -139,3 +139,45 @@ UV_CACHE_DIR=/tmp/uvcache uv run python scripts/verify_trace_dlq.py \
 
 On success the script prints one JSON object containing `verified: true`, the
 DLQ topic name, the synthetic block number, and the matching error fields.
+
+## Measure WSS Chainhead Lag
+
+`measure_wss_chainhead_lag.py` measures websocket-based chainhead discovery
+against a concurrent HTTP `eth_blockNumber` poller using the same pipeline
+config.
+
+It reports:
+
+- `ws_minus_poll_ms`: how much earlier WSS observed a head than the poller
+- `ws_after_block_ts_ms`: approximate age of the head when WSS observed it
+- `poll_after_block_ts_ms`: approximate age of the head when polling observed it
+
+Run it against the default `pipeline.yaml`:
+
+```bash
+UV_CACHE_DIR=/tmp/uvcache /home/ubuntu/repos/chainlake-flow/.venv/bin/python \
+  scripts/measure_wss_chainhead_lag.py --samples 20
+```
+
+Print JSON:
+
+```bash
+UV_CACHE_DIR=/tmp/uvcache /home/ubuntu/repos/chainlake-flow/.venv/bin/python \
+  scripts/measure_wss_chainhead_lag.py --samples 20 --json
+```
+
+Override the websocket endpoint if needed:
+
+```bash
+UV_CACHE_DIR=/tmp/uvcache /home/ubuntu/repos/chainlake-flow/.venv/bin/python \
+  scripts/measure_wss_chainhead_lag.py \
+  --websocket-url wss://bsc-rpc.publicnode.com
+```
+
+Notes:
+
+- `ws_minus_poll_ms` is the most direct comparison for your current question.
+- `ws_after_block_ts_ms` is only an approximation because block timestamps are
+  assigned by the chain, not by your local host.
+- If `ws_minus_poll_ms` stays close to zero, the WSS endpoint is likely not
+  delivering heads materially earlier than your poll cadence.

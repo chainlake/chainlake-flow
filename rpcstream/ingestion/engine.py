@@ -211,6 +211,7 @@ class IngestionEngine:
             "event_to_kafka_ms": None,
             "delivery_wait_ms": None,
             "checkpoint_ms": None,
+            "message_count": 0,
         }
         try:
             with self._tracer.start_as_current_span("streaming.run") as root_span:
@@ -330,11 +331,13 @@ class IngestionEngine:
                     cursor_observation["event_timestamp_ms"] = self._extract_event_timestamp_ms(
                         final_bundle
                     )
+                    emitted_rows = 0
                     for entity, topic in self.topics.items():
                         rows = final_bundle.get(entity, [])
                         self.metrics.ROW_COUNTER.add(len(rows), {"entity": entity})
                         if not rows:
                             continue
+                        emitted_rows += len(rows)
                         sink_started = time.perf_counter()
                         if self.eos_enabled:
                             transactional_topic_rows.append((topic, rows))
@@ -347,6 +350,8 @@ class IngestionEngine:
                             if delivery_future is not None:
                                 delivery_futures.append(delivery_future)
                         phase_timings["sink_enqueue_ms"] += (time.perf_counter() - sink_started) * 1000
+                    receipt_rows = len(final_bundle.get("receipt", [])) if "receipt" not in self.topics else 0
+                    cursor_observation["message_count"] = emitted_rows + receipt_rows
         except Exception as e:
             with self._tracer.start_as_current_span("engine.error") as error_span:
                 error_span.set_status(Status(StatusCode.ERROR))

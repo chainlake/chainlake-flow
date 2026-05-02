@@ -13,7 +13,7 @@ class SuiChainAdapter(ChainAdapter):
     def build_event_time_calculator(self):
         raise NotImplementedError("Sui chain adapter event time calculator is not implemented yet")
 
-    def build_tracker(self, *, client, poll_interval: float, logger=None):
+    def build_tracker(self, *, client, poll_interval: float, websocket_url: str | None = None, logger=None):
         raise NotImplementedError("Sui chain adapter tracker is not implemented yet")
 
     def build_fetcher(self, *, scheduler, entities, logger=None, tracker=None):

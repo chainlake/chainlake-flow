@@ -90,6 +90,7 @@ async def _discover_chainhead(
     tracker = adapter.build_tracker(
         client=probe_client,
         poll_interval=poll_interval,
+        websocket_url=None,
         logger=logger,
     )
     tracker_started = False
@@ -178,7 +179,9 @@ def _build_benchmark_sample(
     cursor_started_at: float,
     checkpoint_ms: float,
     engine,
+    include_delivery_latencies: bool,
     head_observed_at_ms: int | None = None,
+    head_source: str | None = None,
     cursor_emitted_at_ms: int | None = None,
     tracker_poll_latency_ms: float | None = None,
     watermark_manager=None,
@@ -199,6 +202,11 @@ def _build_benchmark_sample(
     ingest_to_kafka_ms = delivery_summary.get("ingest_to_kafka_ms")
     event_to_kafka_ms = delivery_summary.get("event_to_kafka_ms")
     delivery_wait_ms = delivery_summary.get("delivery_wait_ms")
+    if not include_delivery_latencies:
+        event_to_ingest_ms = None
+        ingest_to_kafka_ms = None
+        event_to_kafka_ms = None
+        delivery_wait_ms = None
     checkpoint_delivery_wait_ms = cursor_observation.get("checkpoint_delivery_wait_ms")
     if checkpoint_delivery_wait_ms is None and watermark_manager is not None:
         checkpoint_delivery_wait_ms = getattr(watermark_manager, "last_delivery_wait_ms", None)
@@ -238,6 +246,7 @@ def _build_benchmark_sample(
         event_to_kafka_ms=event_to_kafka_ms,
         delivery_wait_ms=delivery_wait_ms,
         head_observed_at_ms=head_observed_at_ms,
+        head_source=head_source,
         cursor_emitted_at_ms=cursor_emitted_at_ms,
         head_observed_to_emit_ms=head_observed_to_emit_ms,
         head_observed_lag_ms=head_observed_lag_ms,
@@ -378,6 +387,7 @@ async def _run_benchmark_async(
             tracker = adapter.build_tracker(
                 client=run_client,
                 poll_interval=runtime.tracker.poll_interval,
+                websocket_url=runtime.tracker.websocket_url,
                 logger=logger,
             )
             await tracker.start()
@@ -419,6 +429,7 @@ async def _run_benchmark_async(
         dashboard_stop = asyncio.Event()
         dashboard_console = Console(file=sys.stderr, force_terminal=True, color_system="auto")
         scheduler = engine.fetcher.scheduler
+        logical_total_messages = 0
 
         async def refresh_dashboard(live: Live):
             while not dashboard_stop.is_set():
@@ -461,7 +472,7 @@ async def _run_benchmark_async(
             try:
                 worker_count = 1 if runtime.kafka.eos_enabled else max(1, runtime.engine.concurrency)
                 queue_size = max(1, max(runtime.scheduler.max_inflight, runtime.engine.concurrency) * 2)
-                queue: asyncio.Queue[tuple[int, float, int | None, int | None, float | None] | None] = asyncio.Queue(maxsize=queue_size)
+                queue: asyncio.Queue[tuple[int, int | None, str | None, int | None, float | None] | None] = asyncio.Queue(maxsize=queue_size)
 
                 async def producer():
                     try:
@@ -471,18 +482,27 @@ async def _run_benchmark_async(
                             if cursor is None:
                                 break
                             head_observed_at_ms = getattr(cursor_source, "last_head_observed_at_ms", None)
+                            head_source = getattr(cursor_source, "last_head_source", None)
                             cursor_emitted_at_ms = getattr(cursor_source, "last_cursor_emitted_at_ms", None)
                             tracker_poll_latency_ms = None
                             if tracker is not None:
-                                poll_started = getattr(tracker, "get_last_poll_started_at_ms", lambda: None)()
-                                poll_completed = getattr(tracker, "get_last_poll_completed_at_ms", lambda: None)()
-                                if poll_started is not None and poll_completed is not None:
-                                    tracker_poll_latency_ms = round(float(poll_completed - poll_started), 2)
+                                observation_latency = getattr(
+                                    tracker,
+                                    "get_last_observation_latency_ms",
+                                    lambda: None,
+                                )()
+                                if observation_latency is not None:
+                                    tracker_poll_latency_ms = round(float(observation_latency), 2)
+                                else:
+                                    poll_started = getattr(tracker, "get_last_poll_started_at_ms", lambda: None)()
+                                    poll_completed = getattr(tracker, "get_last_poll_completed_at_ms", lambda: None)()
+                                    if poll_started is not None and poll_completed is not None:
+                                        tracker_poll_latency_ms = round(float(poll_completed - poll_started), 2)
                             await queue.put(
                                 (
                                     int(cursor),
-                                    time.perf_counter(),
                                     head_observed_at_ms,
+                                    head_source,
                                     cursor_emitted_at_ms,
                                     tracker_poll_latency_ms,
                                 )
@@ -493,11 +513,13 @@ async def _run_benchmark_async(
                             await queue.put(None)
 
                 async def worker():
+                    nonlocal logical_total_messages
                     while True:
                         item = await queue.get()
                         if item is None:
                             break
-                        cursor, cursor_started, head_observed_at_ms, cursor_emitted_at_ms, tracker_poll_latency_ms = item
+                        cursor, head_observed_at_ms, head_source, cursor_emitted_at_ms, tracker_poll_latency_ms = item
+                        cursor_started = time.perf_counter()
                         if isinstance(watermark_manager, WatermarkManager):
                             await watermark_manager.mark_emitted(cursor)
                         success, delivery_futures, expected_watermark = await engine._run_one(cursor)
@@ -518,20 +540,25 @@ async def _run_benchmark_async(
                             checkpoint_ms=checkpoint_ms,
                             engine=engine,
                             head_observed_at_ms=head_observed_at_ms,
+                            head_source=head_source,
                             cursor_emitted_at_ms=cursor_emitted_at_ms,
                             tracker_poll_latency_ms=tracker_poll_latency_ms,
                             watermark_manager=watermark_manager,
+                            include_delivery_latencies=(benchmark_mode == "realtime"),
                             message_count=0,
                         )
+                        cursor_observation = dict(getattr(engine, "_cursor_observations", {}).get(cursor, {}))
+                        logical_message_count = int(cursor_observation.get("message_count") or 0)
                         phase_timings = dict(sample.phase_timings)
                         phase_timings["checkpoint_ms"] = checkpoint_ms
                         phase_timings["e2e_ms"] = sample.event_to_kafka_ms if sample.event_to_kafka_ms is not None else latency_ms
                         progress_latency_ms = phase_timings["e2e_ms"]
                         async with progress_lock:
+                            logical_total_messages += logical_message_count
                             delta_messages = progress.record_completion(
                                 cursor,
                                 latency_ms=progress_latency_ms,
-                                total_messages=sink_obj.message_count,
+                                total_messages=logical_total_messages,
                                 phase_timings=phase_timings,
                             )
                         sample.message_count = delta_messages
@@ -565,7 +592,7 @@ async def _run_benchmark_async(
             await tracker.stop()
             tracker = None
         total_elapsed_sec = time.perf_counter() - total_started
-        total_messages = sink_obj.message_count
+        total_messages = logical_total_messages
         total_cursors = len(samples)
         summary_end_cursor = samples[-1].cursor if samples else head_cursor
         summary = BenchmarkSummary(

@@ -23,6 +23,7 @@ class BenchmarkSample:
     event_to_kafka_ms: float | None = None
     delivery_wait_ms: float | None = None
     head_observed_at_ms: int | None = None
+    head_source: str | None = None
     cursor_emitted_at_ms: int | None = None
     head_observed_to_emit_ms: float | None = None
     head_observed_lag_ms: float | None = None
@@ -44,6 +45,7 @@ class BenchmarkSample:
             "event_to_kafka_ms": self.event_to_kafka_ms,
             "delivery_wait_ms": self.delivery_wait_ms,
             "head_observed_at_ms": self.head_observed_at_ms,
+            "head_source": self.head_source,
             "cursor_emitted_at_ms": self.cursor_emitted_at_ms,
             "head_observed_to_emit_ms": self.head_observed_to_emit_ms,
             "head_observed_lag_ms": self.head_observed_lag_ms,
