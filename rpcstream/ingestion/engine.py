@@ -145,13 +145,13 @@ class IngestionEngine:
             if workers:
                 await asyncio.gather(*workers, return_exceptions=True)
         finally:
-            if sink_started:
-                await self.sink.close()
             if self._checkpoint_tasks:
                 await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
             if self.watermark_manager is not None and checkpoint_started:
                 status = "eos" if getattr(self.pipeline, "mode", None) == "backfill" else "running"
                 await self.watermark_manager.stop(status=status)
+            if sink_started:
+                await self.sink.close()
 
     def _is_shutdown_requested(self, shutdown_event: asyncio.Event | None) -> bool:
         return shutdown_event is not None and shutdown_event.is_set()

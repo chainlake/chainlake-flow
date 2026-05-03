@@ -29,6 +29,43 @@ Semantic difference:
   It does not record every successful cursor. It only records state that is
   needed to explain or recover a gap.
 
+```mermaid
+sequenceDiagram
+    participant Main as Main Ingestion
+    participant CW as commit_watermark topic
+    participant CS as cursor_state topic
+    participant Retry as Retry/Replay Worker
+    participant WM as WatermarkManager
+
+    Note over Main,CW: Startup / resume path
+
+    Main->>CW: load last committed cursor
+    CW-->>Main: commit_watermark = 99
+    Main->>WM: initialize(initial_cursor=99)
+
+    Note over Main,WM: Main ingestion is running
+
+    Main->>WM: process cursor 100
+    WM->>WM: mark_failed(100)
+    WM->>CS: write 100 -> failed
+
+    Main->>WM: process cursor 101
+    WM->>WM: mark_completed(101)
+    WM->>WM: cannot advance commit_watermark because 100 is missing
+
+    Note over Retry,CS: External worker repairs the gap
+
+    Retry->>CS: write 100 -> completed
+
+    Note over Main,WM: Periodic refresh loop wakes up
+    WM->>CS: load current cursor_state
+    CS-->>WM: 100 -> completed, 101 -> completed
+    WM->>WM: merge_external_state_records()
+    WM->>CW: write commit_watermark = 101
+
+    WM-->>Main: watermark.state_loaded
+```
+
 Difference between EOS and non-EOS:
 
 - `EOS=true`

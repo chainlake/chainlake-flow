@@ -52,6 +52,19 @@ class RecordingSink:
         self.sent_transactions.append(topic_rows)
 
 
+class ShutdownTrackingSink(RecordingSink):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+        self.close_started = asyncio.Event()
+        self.finalize_done = asyncio.Event()
+
+    async def close(self):
+        self.close_started.set()
+        await self.finalize_done.wait()
+        self.closed = True
+
+
 def build_engine(*, sink, eos_enabled=False):
     return IngestionEngine(
         fetcher=DummyFetcher(value=[]),
@@ -341,3 +354,39 @@ def test_engine_eos_sequential_success_does_not_write_cursor_state():
     checkpoint_topic, checkpoint_rows = sink.sent_transactions[0][1]
     assert checkpoint_topic == "evm.bsc.mainnet.commit_watermark"
     assert checkpoint_rows[0]["cursor"] == 100
+
+
+def test_engine_shutdown_waits_for_checkpoint_tasks_before_closing_sink():
+    sink = ShutdownTrackingSink()
+    engine = build_success_engine(sink=sink, eos_enabled=False)
+    engine.watermark_manager = SimpleNamespace(
+        start=lambda: asyncio.sleep(0),
+        mark_emitted=lambda cursor: asyncio.sleep(0, result=cursor),
+        requires_cursor_state=lambda cursor: asyncio.sleep(0, result=True),
+        mark_completed=lambda cursor: asyncio.sleep(0, result=cursor),
+        stop=lambda status="running": asyncio.sleep(0),
+    )
+
+    async def finalize_checkpoint(*_args, **_kwargs):
+        await asyncio.sleep(0.05)
+        sink.finalize_done.set()
+
+    engine._finalize_checkpoint = finalize_checkpoint
+
+    class OneShotCursorSource:
+        def __init__(self):
+            self.emitted = False
+
+        async def next_cursor(self):
+            if self.emitted:
+                return None
+            self.emitted = True
+            return 100
+
+    async def run():
+        await engine.run_stream(OneShotCursorSource())
+
+    asyncio.run(asyncio.wait_for(run(), timeout=1.0))
+
+    assert sink.closed is True
+    assert sink.close_started.is_set() is True

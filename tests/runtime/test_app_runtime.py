@@ -85,6 +85,9 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
         def build_enricher(self):
             return object()
 
+        def build_decoder(self, **_kwargs):
+            return object()
+
         def build_event_id_calculator(self):
             return object()
 

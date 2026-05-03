@@ -11,7 +11,7 @@ entities:
   - "block"
   - "transaction"
   - "log"
-  - "token_transfer"
+    #- "token_transfer"
   #- "trace"
 
 erpc:
@@ -20,8 +20,7 @@ erpc:
   timeout_sec: 10
   max_retries: 1
   inflight:
-    min_inflight: 10
-    max_inflight: 10
+    max_inflight: 20
     latency_target_ms: 100
 
 tracker:
@@ -84,7 +83,7 @@ kafka:
     enabled: true
     schema_registry_url: "http://localhost:30081"
   eos:
-    enabled: true
+    enabled: false
     transactional_id_template: "{pipeline}.{entities}"
     init_timeout_sec: 30
     transaction_timeout_ms: 60000
