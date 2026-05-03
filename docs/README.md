@@ -17,7 +17,7 @@ If you are new to the project, read these first:
 
 1. [../README.md](../README.md)
 2. [ingestion_flow.md](ingestion_flow.md)
-3. [kafka_eos.md](kafka_eos.md)
+3. [watermark_recovery.md](watermark_recovery.md)
 4. [rpcstream_progress_dashboard.png](rpcstream_progress_dashboard.png)
 
 ## CLI
@@ -67,7 +67,7 @@ Semantics:
 
 ## Kafka and Recovery
 
-- [kafka_eos.md](kafka_eos.md)
+- [watermark_recovery.md](watermark_recovery.md)
   `commit_watermark`, `cursor_state`, EOS, and recovery semantics
 - [dlq.md](dlq.md)
   DLQ schema, retry, replay, and operational flow

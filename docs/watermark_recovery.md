@@ -29,6 +29,14 @@ Semantic difference:
   It does not record every successful cursor. It only records state that is
   needed to explain or recover a gap.
 
+In EOS mode, this means:
+
+- normal contiguous successful cursors are advanced through `commit_watermark`
+- `cursor_state` only persists failed cursors and completed cursors that are
+  needed to describe or resolve a gap
+- once there is no gap, successful cursors do not need to be written to
+  `cursor_state`
+
 ```mermaid
 sequenceDiagram
     participant Main as Main Ingestion

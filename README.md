@@ -205,7 +205,7 @@ High-level meaning:
 
 Detailed behavior is documented in:
 
-[docs/kafka_eos.md](docs/kafka_eos.md)
+[docs/watermark_recovery.md](docs/watermark_recovery.md)
 
 ## EOS and recovery
 
@@ -266,7 +266,7 @@ chainlake-flow/
 
 - [docs/README.md](docs/README.md)
 - [docs/ingestion_flow.md](docs/ingestion_flow.md)
-- [docs/kafka_eos.md](docs/kafka_eos.md)
+- [docs/watermark_recovery.md](docs/watermark_recovery.md)
 - [docs/dlq.md](docs/dlq.md)
 - [docs/async_rpc_scheduler.md](docs/async_rpc_scheduler.md)
 - [docs/observability.md](docs/observability.md)
