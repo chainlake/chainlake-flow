@@ -30,8 +30,9 @@ rpcstream --from chainhead
 rpcstream --from 95000000
 rpcstream --from 95000000 --to 95000100
 rpcstream init
-rpcstream benchmark --mode backfill --sink blackhole --output-file benchmark.json
-rpcstream benchmark --mode realtime --sink kafka
+rpcstream benchmark --mode backfill --sink blackhole --eos-enabled false --output-file benchmark.json
+rpcstream benchmark --mode realtime --sink kafka --eos-enabled true
+rpcstream benchmark --mode backfill --sink kafka --eos-enabled true
 rpcstream dlq retry
 rpcstream dlq replay --entity trace --status pending --stage processor --max-records 5
 rpcstream config validate
@@ -53,8 +54,9 @@ Semantics:
   protobuf schemas, but it is not required before starting ingestion because
   schemas are auto-registered on first write
 - `rpcstream benchmark`
-  benchmark runtime with a live progress dashboard, cursor timing details, and
-  recent info-level logs
+  benchmark runtime with a live progress dashboard, cursor timing details,
+  recent info-level logs, and explicit EOS control via `--eos-enabled true|false`
+  with a default of `false`
 
 ## Core Runtime Docs
 

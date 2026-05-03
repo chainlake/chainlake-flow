@@ -59,6 +59,18 @@ def _parse_entities(values: list[str] | None) -> list[str] | None:
     return entities or None
 
 
+def _parse_bool_option(value: bool | str) -> bool:
+    if isinstance(value, bool):
+        return value
+
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}; expected true or false")
+
+
 async def _wait_for_head(tracker, timeout_sec: float) -> int:
     deadline = time.monotonic() + timeout_sec
     while time.monotonic() < deadline:
@@ -299,6 +311,7 @@ async def _run_benchmark_async(
     config_path: str,
     mode: str,
     sink: str,
+    eos_enabled: bool,
     window: int,
     entity: list[str] | None,
     head_timeout_sec: float,
@@ -345,7 +358,7 @@ async def _run_benchmark_async(
             from_value=benchmark_from_value,
             to_value=benchmark_to_value,
             entities=_parse_entities(entity),
-            eos_enabled=(benchmark_mode == "realtime"),
+            eos_enabled=eos_enabled,
         )
         runtime = resolve(benchmark_config, adapter=adapter)
         run_client = JsonRpcClient(
@@ -363,7 +376,7 @@ async def _run_benchmark_async(
             sink_kind=sink,
             eos_enabled=runtime.kafka.eos_enabled,
         )
-        watermark_manager = NoopWatermarkManager(runtime)
+        watermark_manager = None
         if runtime.pipeline.mode == "realtime" and sink.lower().strip() == "kafka":
             checkpoint_identity = build_checkpoint_identity(runtime)
             state_reader = None
@@ -451,8 +464,6 @@ async def _run_benchmark_async(
                 await asyncio.sleep(1.0)
 
         total_started = time.perf_counter()
-
-        await sink_obj.start()
         with Live(
             render_benchmark_dashboard(
                 mode=benchmark_mode,
@@ -471,6 +482,7 @@ async def _run_benchmark_async(
         ) as live:
             dashboard_task = asyncio.create_task(refresh_dashboard(live))
             try:
+                await sink_obj.start()
                 worker_count = 1 if runtime.kafka.eos_enabled else max(1, runtime.engine.concurrency)
                 queue_size = max(1, max(runtime.scheduler.max_inflight, runtime.engine.concurrency) * 2)
                 queue: asyncio.Queue[tuple[int, int | None, str | None, int | None, float | None] | None] = asyncio.Queue(maxsize=queue_size)
@@ -652,6 +664,12 @@ def benchmark(
         "--mode",
         help="Benchmark mode: backfill for bounded replay or realtime for live chain ingestion.",
     ),
+    eos_enabled: str = typer.Option(
+        "false",
+        "--eos-enabled",
+        help="Enable Kafka EOS for benchmark runs (default: false). Accepts true/false and applies to both backfill and realtime modes.",
+        show_default=True,
+    ),
     output_file: str | None = typer.Option(
         None,
         "--output-file",
@@ -666,6 +684,7 @@ def benchmark(
                 config_path=config_path,
                 sink=sink,
                 mode=mode,
+                eos_enabled=_parse_bool_option(eos_enabled),
                 window=window,
                 entity=entity,
                 head_timeout_sec=head_timeout_sec,

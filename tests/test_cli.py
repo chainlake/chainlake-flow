@@ -267,9 +267,39 @@ def test_benchmark_command_invokes_runner(monkeypatch):
     assert captured["config_path"] == "pipeline.yaml"
     assert captured["sink"] == "blackhole"
     assert captured["mode"] == "backfill"
+    assert captured["eos_enabled"] is False
     assert captured["window"] == 100
     assert captured["entity"] == ["block,transaction"]
     assert captured["output_file"] == "benchmark.json"
+
+
+def test_benchmark_command_accepts_explicit_eos_enabled(monkeypatch):
+    captured = {}
+
+    async def fake_run_benchmark_async(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("rpcstream.cli.benchmark._run_benchmark_async", fake_run_benchmark_async)
+
+    result = runner.invoke(
+        app,
+        [
+            "benchmark",
+            "--config",
+            "pipeline.yaml",
+            "--mode",
+            "realtime",
+            "--sink",
+            "kafka",
+            "--eos-enabled",
+            "true",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["mode"] == "realtime"
+    assert captured["eos_enabled"] is True
 
 
 def test_benchmark_output_file_helper_writes_json(tmp_path):

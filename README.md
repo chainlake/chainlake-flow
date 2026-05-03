@@ -121,6 +121,7 @@ auto-registered on first use.
 ### Benchmark dashboard
 
 `rpcstream benchmark` runs the benchmark path and renders a live dashboard.
+ EOS is disabled by default unless you pass `--eos-enabled true`.
 It shows:
 
 - completion progress, ETA, and throughput
@@ -131,8 +132,9 @@ It shows:
 ![RPCStream progress dashboard](docs/rpcstream_progress_dashboard.png)
 
 ```bash
-rpcstream benchmark --mode backfill --sink blackhole --output-file benchmark.json
-rpcstream benchmark --mode realtime --sink kafka
+rpcstream benchmark --mode backfill --sink blackhole --eos-enabled false --output-file benchmark.json
+rpcstream benchmark --mode realtime --sink kafka --eos-enabled true
+rpcstream benchmark --mode backfill --sink kafka --eos-enabled true
 ```
 
 
@@ -190,6 +192,7 @@ For EVM, the runtime can produce topics such as:
 - `evm.bsc.mainnet.enriched_transaction`
 - `evm.bsc.mainnet.raw_log`
 - `evm.bsc.mainnet.raw_trace`
+- `evm.bsc.mainnet.token_transfer`
 
 Progress and recovery use:
 

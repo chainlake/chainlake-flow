@@ -11,7 +11,7 @@ entities:
   - "block"
   - "transaction"
   - "log"
-    #- "token_transfer"
+  - "token_transfer"
   #- "trace"
 
 erpc:
@@ -20,7 +20,7 @@ erpc:
   timeout_sec: 10
   max_retries: 1
   inflight:
-    max_inflight: 20
+    max_inflight: 10
     latency_target_ms: 100
 
 tracker:
