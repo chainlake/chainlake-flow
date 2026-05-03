@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from rpcstream.adapters.evm.parser.parse_blocks import parse_blocks
 from rpcstream.adapters.evm.parser.parse_receipts_logs import parse_receipts
 from rpcstream.adapters.evm.parser.parse_transactions import parse_transactions
 from rpcstream.adapters.evm.parser.parse_traces import parse_traces_auto
@@ -8,15 +7,16 @@ from rpcstream.adapters.evm.parser.parse_traces import parse_traces_auto
 
 class BlockProcessor:
     def process(self, cursor, value):
+        from rpcstream.adapters.evm.parser.parse_blocks import parse_blocks
+
         block = parse_blocks(value)
         return {"block": [block]}
 
 
 class TransactionProcessor:
     def process(self, cursor, value):
-        block = parse_blocks(value)
         txs = parse_transactions(value)
-        return {"block": [block], "transaction": txs}
+        return {"transaction": txs}
 
 
 class ReceiptLogProcessor:

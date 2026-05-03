@@ -6,7 +6,7 @@ INTERNAL_ENTITY_ORDER = ("block", "transaction", "receipt", "log", "trace")
 
 ENTITY_DEPENDENCIES = {
     "block": {"block"},
-    "transaction": {"transaction", "receipt"},
+    "transaction": {"block", "transaction", "receipt"},
     "log": {"block", "receipt", "log"},
     "token_transfer": {"log"},
     "trace": {"block", "trace"},
