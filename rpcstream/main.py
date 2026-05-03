@@ -282,7 +282,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             observability=observability,
             resume_cursor=resume_cursor,
         )
-        
         await engine.run_stream(cursor_source, shutdown_event=shutdown_event)
         
     finally:
