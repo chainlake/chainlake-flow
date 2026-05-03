@@ -71,6 +71,14 @@ def main(
         "--entity",
         help="Override entities using comma-separated values or repeated --entity flags.",
     ),
+    engine_concurrency: int | None = typer.Option(
+        None,
+        "--engine-concurrency",
+        help=(
+            "Override engine worker concurrency for non-EOS ingestion. "
+            "Defaults to erpc.max_inflight when omitted and is ignored by EOS mode."
+        ),
+    ),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -82,6 +90,7 @@ def main(
             from_value=from_value,
             to_value=to_value,
             entity=entity,
+            engine_concurrency=engine_concurrency,
         )
     except Exception as exc:
         fail(exc)

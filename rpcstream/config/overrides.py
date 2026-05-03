@@ -14,6 +14,7 @@ def apply_runtime_overrides(
     to_value: int | None = None,
     entities: Sequence[str] | None = None,
     eos_enabled: bool | None = None,
+    engine_concurrency: int | None = None,
 ) -> PipelineConfig:
     raw = cfg.model_dump(by_alias=True)
     pipeline = dict(raw.get("pipeline") or {})
@@ -47,6 +48,12 @@ def apply_runtime_overrides(
         eos["enabled"] = eos_enabled
         kafka["eos"] = eos
         raw["kafka"] = kafka
+        changed = True
+
+    if engine_concurrency is not None:
+        raw_engine = dict(raw.get("engine") or {})
+        raw_engine["concurrency"] = engine_concurrency
+        raw["engine"] = raw_engine
         changed = True
 
     if changed:

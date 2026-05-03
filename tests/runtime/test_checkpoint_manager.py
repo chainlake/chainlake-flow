@@ -7,6 +7,8 @@ from rpcstream.state.checkpoint import (
     KafkaWatermarkStateReader,
     WatermarkManager,
     build_checkpoint_identity,
+    build_watermark_state_key,
+    build_watermark_state_row,
 )
 
 
@@ -59,7 +61,7 @@ def test_watermark_manager_advances_only_contiguous_completed_cursors():
         await manager.mark_completed(101)
         assert manager.cursor == 102
 
-        await manager.stop(status="eos")
+        await manager.stop(status="completed")
         return sink.writes
 
     writes = asyncio.run(run())
@@ -68,7 +70,7 @@ def test_watermark_manager_advances_only_contiguous_completed_cursors():
     assert topic == "checkpoint-topic"
     assert wait_delivery is True
     assert row["cursor"] == 102
-    assert row["status"] == "eos"
+    assert row["status"] == "completed"
     assert row["id"].startswith("pipeline=pipe|")
 
 
@@ -151,8 +153,54 @@ def test_build_checkpoint_identity_uses_multichain_key_fields():
 
     assert identity.primary_unit == "checkpoint"
     assert "pipeline=pipe" in identity.key
-    assert "chain=sui:mainnet" in identity.key
     assert "entities=checkpoint,transaction" in identity.key
+
+
+def test_watermark_state_key_is_shortened():
+    identity = CheckpointIdentity(
+        pipeline="bsc_mainnet_backfill_96098686_96098785",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="backfill",
+        primary_unit="block",
+        entities=("block", "log", "token_transfer", "transaction"),
+    )
+
+    key = build_watermark_state_key(identity, 96098738)
+    row = build_watermark_state_row(identity, 96098738, status="completed")
+
+    assert key == (
+        "pipeline=bsc_mainnet_backfill_96098686_96098785|"
+        "entities=block,log,token_transfer,transaction|cursor=96098738"
+    )
+    assert row["id"] == key
+    assert row["kafka_partition_key"] == key
+    assert "chain=evm:56" not in key
+    assert "network=mainnet" not in key
+    assert "mode=backfill" not in key
+    assert "unit=block" not in key
+
+
+def test_checkpoint_identity_key_is_shortened():
+    identity = CheckpointIdentity(
+        pipeline="bsc_mainnet_backfill_96098686_96098785",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="backfill",
+        primary_unit="block",
+        entities=("block", "log", "token_transfer", "transaction"),
+    )
+
+    assert identity.key == (
+        "pipeline=bsc_mainnet_backfill_96098686_96098785|"
+        "entities=block,log,token_transfer,transaction"
+    )
+    assert "chain=evm:56" not in identity.key
+    assert "network=mainnet" not in identity.key
+    assert "mode=backfill" not in identity.key
+    assert "unit=block" not in identity.key
 
 
 def test_watermark_manager_merges_external_state_records():
@@ -268,7 +316,7 @@ def test_kafka_checkpoint_reader_returns_none_when_schema_is_missing(monkeypatch
             return 0
 
         def key(self):
-            return b"pipeline=pipe|chain=evm:56|network=mainnet|mode=realtime|unit=block|entities=block"
+            return b"pipeline=pipe|entities=block"
 
         def value(self):
             return b"payload"
@@ -346,7 +394,7 @@ def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monke
             return 0
 
         def key(self):
-            return b"pipeline=pipe|chain=evm:56|network=mainnet|mode=realtime|unit=block|entities=block|cursor=1"
+            return b"pipeline=pipe|entities=block|cursor=1"
 
         def value(self):
             return b"payload"

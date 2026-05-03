@@ -25,6 +25,8 @@ Semantic difference:
 
 - `commit_watermark` is the final recovery point.
   It only means "there are no gaps before this cursor".
+- Its final run-status field uses `completed` to mean the backfill finished
+  successfully. It does not refer to Kafka EOS.
 - `cursor_state` is the gap-only status log.
   It does not record every successful cursor. It only records state that is
   needed to explain or recover a gap.
@@ -71,7 +73,7 @@ sequenceDiagram
     WM->>WM: merge_external_state_records()
     WM->>CW: write commit_watermark = 101
 
-    WM-->>Main: watermark.state_loaded
+    WM-->>Main: watermark.external_state_loaded
 ```
 
 Difference between EOS and non-EOS:

@@ -32,10 +32,11 @@ class CheckpointIdentity:
     @property
     def key(self) -> str:
         entity_key = ",".join(sorted(self.entities))
-        return (
-            f"pipeline={self.pipeline}|chain={self.chain_uid}|network={self.network}|"
-            f"mode={self.mode}|unit={self.primary_unit}|entities={entity_key}"
-        )
+        return f"pipeline={self.pipeline}|entities={entity_key}"
+
+    @property
+    def cursor_state_key_prefix(self) -> str:
+        return self.key
 
 
 @dataclass
@@ -115,7 +116,7 @@ def build_checkpoint_row(
 
 
 def build_watermark_state_key(identity: "CheckpointIdentity", cursor: int) -> str:
-    return f"{identity.key}|cursor={cursor}"
+    return f"{identity.cursor_state_key_prefix}|cursor={cursor}"
 
 
 def build_watermark_state_row(
@@ -392,7 +393,7 @@ class KafkaWatermarkStateReader:
                 return {}
 
             consumer.assign(partitions)
-            prefix = f"{self.identity.key}|cursor="
+            prefix = f"{self.identity.cursor_state_key_prefix}|cursor="
 
             while len(seen_eof) < len(partitions):
                 message = consumer.poll(1.0)
@@ -443,13 +444,13 @@ class KafkaWatermarkStateReader:
 
         records = {record.cursor: record for record in records_by_key.values()}
         if records and self.logger:
-            self.logger.info(
-                "watermark.state_loaded",
-                component="checkpoint",
-                topic=self.topic,
-                key=self.identity.key,
-                cursor_count=len(records),
-            )
+                self.logger.info(
+                    "watermark.external_state_loaded",
+                    component="checkpoint",
+                    topic=self.topic,
+                    key=self.identity.key,
+                    cursor_count=len(records),
+                )
         return records
 
     def _decode_record(self, payload: bytes) -> dict[str, Any]:
@@ -728,8 +729,11 @@ class WatermarkManager:
             oldest_gap=oldest_gap,
         )
 
+    async def mark_completed_run(self) -> None:
+        await self.flush(status="completed", force=True)
+
     async def mark_eos(self) -> None:
-        await self.flush(status="eos", force=True)
+        await self.mark_completed_run()
 
     async def flush(self, status: str = "running", force: bool = False) -> None:
         async with self._lock:

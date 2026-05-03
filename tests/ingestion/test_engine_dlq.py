@@ -126,6 +126,19 @@ def build_backfill_engine(*, sink):
     )
 
 
+class BackfillCursorSource:
+    def __init__(self, start=1, end=100):
+        self.current = start
+        self.end = end
+
+    async def next_cursor(self):
+        if self.current > self.end:
+            return None
+        cursor = self.current
+        self.current += 1
+        return cursor
+
+
 def test_engine_sends_trace_dlq_record_when_processor_fails():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=False)
@@ -217,6 +230,34 @@ def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
     assert len(topic_rows) == 1
     assert topic_rows[0][0] == "dlq.ingestion"
     assert topic_rows[0][1][0]["status"] == "resolved"
+
+
+def test_engine_backfill_shutdown_stops_before_draining_entire_range():
+    sink = RecordingSink()
+    engine = build_backfill_engine(sink=sink)
+    shutdown_event = asyncio.Event()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    processed = []
+
+    async def run_one(cursor):
+        processed.append(cursor)
+        started.set()
+        await release.wait()
+        return True, [], None
+
+    engine._run_one = run_one
+
+    async def run():
+        task = asyncio.create_task(engine.run_stream(BackfillCursorSource(1, 20), shutdown_event=shutdown_event))
+        await started.wait()
+        shutdown_event.set()
+        release.set()
+        await task
+
+    asyncio.run(run())
+
+    assert processed == [1]
 
 
 def test_backfill_compute_lag_uses_end_block_as_remaining_work():

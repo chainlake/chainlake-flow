@@ -112,6 +112,34 @@ def test_ingest_backfill_invokes_existing_runner_with_effective_config(monkeypat
     assert captured["config"].entities == ["transaction", "trace", "block"]
 
 
+def test_ingest_can_override_engine_concurrency(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr("rpcstream.cli.common.load_pipeline_config", lambda _path: make_config())
+
+    async def fake_run_pipeline(*, config_path=None, config=None):
+        captured["config"] = config
+
+    monkeypatch.setattr("rpcstream.cli.ingest.run_pipeline", fake_run_pipeline)
+
+    result = runner.invoke(
+        app,
+        [
+            "--config",
+            "pipeline.yaml",
+            "--from",
+            "100",
+            "--entity",
+            "block",
+            "--engine-concurrency",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["config"].engine.concurrency == 1
+
+
 def test_dlq_replay_invokes_existing_runner(monkeypatch):
     captured = {}
 

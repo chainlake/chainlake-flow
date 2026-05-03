@@ -85,3 +85,14 @@ def test_apply_runtime_overrides_can_disable_eos():
     )
 
     assert effective.kafka.eos.enabled is False
+
+
+def test_apply_runtime_overrides_can_override_engine_concurrency():
+    config = make_config()
+
+    effective = apply_runtime_overrides(
+        config,
+        engine_concurrency=3,
+    )
+
+    assert effective.engine.concurrency == 3

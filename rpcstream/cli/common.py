@@ -21,6 +21,7 @@ def load_effective_config(
     to_value: int | None = None,
     entities: list[str] | None = None,
     eos_enabled: bool | None = None,
+    engine_concurrency: int | None = None,
 ):
     config = load_pipeline_config(config_path)
     if (
@@ -29,6 +30,7 @@ def load_effective_config(
         and to_value is None
         and entities is None
         and eos_enabled is None
+        and engine_concurrency is None
     ):
         return config
     return apply_runtime_overrides(
@@ -38,6 +40,7 @@ def load_effective_config(
         to_value=to_value,
         entities=entities,
         eos_enabled=eos_enabled,
+        engine_concurrency=engine_concurrency,
     )
 
 

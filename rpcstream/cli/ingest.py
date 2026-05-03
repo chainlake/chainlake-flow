@@ -16,6 +16,7 @@ def run_ingest(
     from_value: str | int | None,
     to_value: int | None,
     entity: list[str] | None,
+    engine_concurrency: int | None = None,
 ) -> None:
     entities = parse_entities(entity)
     effective_from = "checkpoint" if from_value is None else from_value
@@ -31,6 +32,7 @@ def run_ingest(
         from_value=effective_from,
         to_value=effective_to,
         entities=entities,
+        engine_concurrency=engine_concurrency,
     )
     run_async(run_pipeline(config_path=config_path, config=config))
 

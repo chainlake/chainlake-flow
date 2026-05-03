@@ -93,17 +93,24 @@ class IngestionEngine:
                     cursor = await self._next_cursor_or_shutdown(cursor_source, shutdown_event)
                     if cursor is None:
                         break
+                    if self._is_shutdown_requested(shutdown_event):
+                        break
                     if self.watermark_manager is not None:
                         await self.watermark_manager.mark_emitted(cursor)
-                    await queue.put(cursor)
+                    queued = await self._queue_put_or_shutdown(queue, cursor, shutdown_event)
+                    if not queued:
+                        break
             finally:
-                # Signal workers to drain and stop after queued blocks are processed.
-                for _ in range(worker_count):
-                    await queue.put(None)
+                # If shutdown was requested, workers will exit through the
+                # shutdown-aware queue getter. Otherwise use sentinels to stop
+                # workers after the bounded source is exhausted.
+                if not self._is_shutdown_requested(shutdown_event):
+                    for _ in range(worker_count):
+                        await queue.put(None)
 
         async def worker():
             while True:
-                cursor = await queue.get()
+                cursor = await self._queue_get_or_shutdown(queue, shutdown_event)
                 if cursor is None:
                     break
                 success, delivery_futures, expected_watermark = await self._run_one(cursor)
@@ -148,7 +155,7 @@ class IngestionEngine:
             if self._checkpoint_tasks:
                 await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
             if self.watermark_manager is not None and checkpoint_started:
-                status = "eos" if getattr(self.pipeline, "mode", None) == "backfill" else "running"
+                status = "completed" if getattr(self.pipeline, "mode", None) == "backfill" else "running"
                 await self.watermark_manager.stop(status=status)
             if sink_started:
                 await self.sink.close()
@@ -177,6 +184,52 @@ class IngestionEngine:
         with suppress(asyncio.CancelledError):
             await shutdown_task
         return await next_cursor_task
+
+    async def _queue_put_or_shutdown(self, queue: asyncio.Queue, item, shutdown_event: asyncio.Event | None) -> bool:
+        if shutdown_event is None:
+            await queue.put(item)
+            return True
+
+        put_task = asyncio.create_task(queue.put(item))
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        done, pending = await asyncio.wait(
+            {put_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if shutdown_task in done:
+            put_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await put_task
+            return False
+
+        shutdown_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await shutdown_task
+        await put_task
+        return True
+
+    async def _queue_get_or_shutdown(self, queue: asyncio.Queue, shutdown_event: asyncio.Event | None):
+        if shutdown_event is None:
+            return await queue.get()
+
+        get_task = asyncio.create_task(queue.get())
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        done, pending = await asyncio.wait(
+            {get_task, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if shutdown_task in done:
+            get_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await get_task
+            return None
+
+        shutdown_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await shutdown_task
+        return await get_task
 
 
     async def _run_one(self, cursor):
