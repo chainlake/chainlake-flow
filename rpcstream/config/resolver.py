@@ -18,6 +18,7 @@ from rpcstream.runtime.topic import TopicMaps
 class KafkaRuntime:
     config: Dict[str, Any]
     streaming: any
+    table_topic_enabled: bool
     protobuf_enabled: bool
     schema_registry_url: str | None
     eos_enabled: bool
@@ -99,6 +100,7 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
     kafka = KafkaRuntime(
         config=kafka_config,
         streaming=cfg.kafka.streaming,
+        table_topic_enabled=cfg.kafka.table_topic.enabled,
         protobuf_enabled=cfg.kafka.protobuf.enabled,
         schema_registry_url=build_schema_registry_url(cfg),
         eos_enabled=cfg.kafka.eos.enabled,

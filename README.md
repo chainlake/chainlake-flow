@@ -188,16 +188,16 @@ entities:
 
 For EVM, the runtime can produce topics such as:
 
-- `evm.bsc.mainnet.raw_block`
-- `evm.bsc.mainnet.enriched_transaction`
-- `evm.bsc.mainnet.raw_log`
-- `evm.bsc.mainnet.raw_trace`
-- `evm.bsc.mainnet.token_transfer`
+- `evm_bsc_mainnet.raw_block`
+- `evm_bsc_mainnet.enriched_transaction`
+- `evm_bsc_mainnet.raw_log`
+- `evm_bsc_mainnet.raw_trace`
+- `evm_bsc_mainnet.token_transfer`
 
 Progress and recovery use:
 
-- `evm.bsc.mainnet.commit_watermark`
-- `evm.bsc.mainnet.cursor_state`
+- `evm_bsc_mainnet.commit_watermark`
+- `evm_bsc_mainnet.cursor_state`
 - `dlq.ingestion`
 
 High-level meaning:

@@ -44,7 +44,9 @@ data:
       connection:
         bootstrap_servers: "localhost:30092"
       common:
-        topic_template: "{type}.{chain}.{network}.{kind}_{entity}"
+        topic_template: "{type}_{chain}_{network}.{kind}_{entity}"
+      table_topic:
+        enabled: false
       producer:
         linger_ms: 50
         batch_size: 65536

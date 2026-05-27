@@ -65,64 +65,48 @@ def test_build_schema_registry_url_falls_back_to_pipeline_config():
 
 def test_build_topic_maps_only_includes_main_and_dlq_topics():
     cfg = SimpleNamespace(
-        kafka=SimpleNamespace(
-            common=SimpleNamespace(
-                topic_template="{type}.{chain}.{network}.{kind}_{entity}"
-            )
-        ),
+        kafka=SimpleNamespace(common=SimpleNamespace(topic_template=None)),
         chain=SimpleNamespace(type="evm", name="bsc", network="mainnet"),
         entities=["block", "trace"],
     )
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["block"] == "evm.bsc.mainnet.raw_block"
-    assert topic_maps.main["trace"] == "evm.bsc.mainnet.raw_trace"
+    assert topic_maps.main["block"] == "evm_bsc_mainnet.raw_block"
+    assert topic_maps.main["trace"] == "evm_bsc_mainnet.raw_trace"
     assert topic_maps.dlq == "dlq.ingestion"
-    assert topic_maps.checkpoint == "evm.bsc.mainnet.commit_watermark"
-    assert topic_maps.watermark_state == "evm.bsc.mainnet.cursor_state"
+    assert topic_maps.checkpoint == "evm_bsc_mainnet.commit_watermark"
+    assert topic_maps.watermark_state == "evm_bsc_mainnet.cursor_state"
 
 
 def test_build_topic_maps_uses_enriched_topic_for_transactions():
     cfg = SimpleNamespace(
-        kafka=SimpleNamespace(
-            common=SimpleNamespace(
-                topic_template="{type}.{chain}.{network}.{kind}_{entity}"
-            )
-        ),
+        kafka=SimpleNamespace(common=SimpleNamespace(topic_template=None)),
         chain=SimpleNamespace(type="evm", name="bsc", network="mainnet"),
         entities=["transaction"],
     )
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["transaction"] == "evm.bsc.mainnet.enriched_transaction"
+    assert topic_maps.main["transaction"] == "evm_bsc_mainnet.enriched_transaction"
 
 
 def test_build_topic_maps_supports_token_transfer_topic():
     cfg = SimpleNamespace(
-        kafka=SimpleNamespace(
-            common=SimpleNamespace(
-                topic_template="{type}.{chain}.{network}.{kind}_{entity}"
-            )
-        ),
+        kafka=SimpleNamespace(common=SimpleNamespace(topic_template=None)),
         chain=SimpleNamespace(type="evm", name="bsc", network="mainnet"),
         entities=["token_transfer"],
     )
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["token_transfer"] == "evm.bsc.mainnet.token_transfer"
+    assert topic_maps.main["token_transfer"] == "evm_bsc_mainnet.token_transfer"
 
 
 def test_build_topic_maps_supports_custom_checkpoint_topic():
     cfg = SimpleNamespace(
         pipeline=SimpleNamespace(checkpoint=SimpleNamespace(topic="custom.checkpoints")),
-        kafka=SimpleNamespace(
-            common=SimpleNamespace(
-                topic_template="{type}.{chain}.{network}.{kind}_{entity}"
-            )
-        ),
+        kafka=SimpleNamespace(common=SimpleNamespace(topic_template=None)),
         chain=SimpleNamespace(type="sui", name="sui", network="mainnet"),
         entities=["checkpoint"],
     )

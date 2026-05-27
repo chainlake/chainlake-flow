@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import time
 
 TOPIC_TIMESTAMP_CONFIG = "message.timestamp.type"
 TOPIC_TIMESTAMP_VALUE = "LogAppendTime"
 TOPIC_CLEANUP_POLICY_CONFIG = "cleanup.policy"
 TOPIC_COMPACT_POLICY_VALUE = "compact"
 TOPIC_COMPACT_DELETE_POLICY_VALUE = "compact,delete"
+TABLE_TOPIC_ENABLE_CONFIG = "automq.table.topic.enable"
+TABLE_TOPIC_NAMESPACE_CONFIG = "automq.table.topic.namespace"
+TABLE_TOPIC_SCHEMA_TYPE_CONFIG = "automq.table.topic.schema.type"
+TABLE_TOPIC_SCHEMA_TYPE_SCHEMA = "schema"
 
 
 class KafkaTopicManager:
@@ -19,6 +24,7 @@ class KafkaTopicManager:
             topics,
             config={TOPIC_TIMESTAMP_CONFIG: TOPIC_TIMESTAMP_VALUE},
         )
+        self._wait_for_topics(topics)
 
     def ensure_compacted_topics(self, topics: Iterable[str]) -> None:
         self._ensure_topics(
@@ -28,7 +34,20 @@ class KafkaTopicManager:
                 TOPIC_CLEANUP_POLICY_CONFIG: TOPIC_COMPACT_DELETE_POLICY_VALUE,
             },
         )
+        self._wait_for_topics(topics)
         self._ensure_compaction(topics)
+
+    def ensure_table_topics(self, topics: Iterable[str], *, namespace: str) -> None:
+        self._ensure_topics(
+            topics,
+            config={
+                TOPIC_TIMESTAMP_CONFIG: TOPIC_TIMESTAMP_VALUE,
+                TABLE_TOPIC_ENABLE_CONFIG: "true",
+                TABLE_TOPIC_NAMESPACE_CONFIG: namespace,
+                TABLE_TOPIC_SCHEMA_TYPE_CONFIG: TABLE_TOPIC_SCHEMA_TYPE_SCHEMA,
+            },
+        )
+        self._wait_for_topics(topics)
 
     def delete_topics(self, topics: Iterable[str]) -> None:
         from confluent_kafka.admin import AdminClient
@@ -181,6 +200,67 @@ class KafkaTopicManager:
                     topic=resource.name,
                     message_timestamp_type=TOPIC_TIMESTAMP_VALUE,
                 )
+
+    def _wait_for_topics(
+        self,
+        topics: Iterable[str],
+        *,
+        timeout_seconds: float = 30.0,
+        poll_interval_seconds: float = 1.0,
+    ) -> None:
+        unique_topics = sorted({topic for topic in topics if topic})
+        if not unique_topics:
+            return
+
+        admin = self._admin_client()
+        deadline = time.monotonic() + timeout_seconds
+        last_error = None
+
+        while time.monotonic() < deadline:
+            try:
+                metadata = admin.list_topics(timeout=min(5.0, timeout_seconds))
+                missing = [
+                    topic
+                    for topic in unique_topics
+                    if not self._topic_is_visible(metadata, topic)
+                ]
+                if not missing:
+                    return
+                last_error = RuntimeError(
+                    f"topics not visible yet: {', '.join(missing)}"
+                )
+            except Exception as exc:
+                last_error = exc
+                if "UNKNOWN_TOPIC_OR_PARTITION" not in str(exc) and "UNKNOWN_TOPIC" not in str(exc):
+                    # Any other failure is likely a transient cluster startup issue; keep polling
+                    # until the timeout so a fresh cluster can settle after cleanup.
+                    pass
+
+            time.sleep(poll_interval_seconds)
+
+        message = f"timed out waiting for topics to become visible: {', '.join(unique_topics)}"
+        if self.logger:
+            self.logger.warning(
+                "kafka.topic_visibility_timeout",
+                component="sink",
+                topics=unique_topics,
+                timeout_seconds=timeout_seconds,
+            )
+        raise TimeoutError(message) from last_error
+
+    def _topic_is_visible(self, metadata, topic: str) -> bool:
+        topic_meta = getattr(metadata, "topics", {}).get(topic)
+        if topic_meta is None:
+            return False
+
+        error = getattr(topic_meta, "error", None)
+        if error is None:
+            return True
+
+        code = getattr(error, "code", None)
+        if callable(code):
+            code = code()
+        return code in (None, 0)
 
     def _config_entry_value(self, entry):
         if entry is None:

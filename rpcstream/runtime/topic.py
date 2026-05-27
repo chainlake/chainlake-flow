@@ -20,10 +20,14 @@ def normalize_entity(entity: str) -> str:
     return entity.strip().lower()
 
 
+def build_default_topic_namespace(cfg) -> str:
+    return f"{cfg.chain.type}_{cfg.chain.name}_{cfg.chain.network}"
+
+
 def build_topics(cfg, entity: str, adapter=None) -> TopicSet:
     template = (
         cfg.kafka.common.topic_template
-        or "{type}.{chain}.{network}.{kind}_{entity}"
+        or "{type}_{chain}_{network}.{kind}_{entity}"
     )
 
     def render(kind):
@@ -43,7 +47,7 @@ def build_topics(cfg, entity: str, adapter=None) -> TopicSet:
     kind = topic_kind_for_entity(entity)
     if entity == "token_transfer" or not kind:
         return TopicSet(
-            main=f"{cfg.chain.type}.{cfg.chain.name}.{cfg.chain.network}.{entity}",
+            main=f"{build_default_topic_namespace(cfg)}.{entity}",
         )
 
     return TopicSet(
@@ -67,7 +71,7 @@ def build_checkpoint_topic(cfg) -> str:
     if configured:
         return configured
 
-    return f"{cfg.chain.type}.{cfg.chain.name}.{cfg.chain.network}.commit_watermark"
+    return f"{build_default_topic_namespace(cfg)}.commit_watermark"
 
 
 def build_watermark_state_topic(cfg) -> str:

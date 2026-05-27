@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from collections import defaultdict
+
 from rpcstream.adapters import build_chain_adapter
 from rpcstream.sinks.kafka.admin import KafkaTopicManager
 from rpcstream.sinks.kafka.protobuf import ProtobufSerializerRegistry
+
+SCHEMA_REGISTRY_INTERNAL_TOPIC = "_schemas"
 
 
 def all_topics(topic_maps) -> list[str]:
@@ -15,13 +19,45 @@ def all_topics(topic_maps) -> list[str]:
     return topics
 
 
+def business_topics(topic_maps) -> list[str]:
+    return list(topic_maps.main.values())
+
+
+def system_topics(topic_maps) -> list[str]:
+    topics = []
+    if topic_maps.dlq:
+        topics.append(topic_maps.dlq)
+    if getattr(topic_maps, "watermark_state", None):
+        topics.append(topic_maps.watermark_state)
+    return topics
+
+
+def table_topic_namespace(topic: str) -> str:
+    namespace, _, _ = topic.partition(".")
+    return namespace or topic
+
+
+def grouped_table_topics(topics: list[str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for topic in topics:
+        grouped[table_topic_namespace(topic)].append(topic)
+    return dict(grouped)
+
+
 def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
     adapter = adapter or build_chain_adapter(runtime.chain.type)
     topic_manager = KafkaTopicManager(
         producer_config=runtime.kafka.config,
         logger=logger,
     )
-    topic_manager.ensure_topics(all_topics(runtime.topic_map))
+
+    if runtime.kafka.table_topic_enabled:
+        for namespace, topics in grouped_table_topics(business_topics(runtime.topic_map)).items():
+            topic_manager.ensure_table_topics(topics, namespace=namespace)
+    else:
+        topic_manager.ensure_topics(business_topics(runtime.topic_map))
+
+    topic_manager.ensure_topics(system_topics(runtime.topic_map))
     topic_manager.ensure_compacted_topics(
         [runtime.checkpoint.topic, runtime.checkpoint.watermark_state_topic]
     )
@@ -41,6 +77,8 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
         raise ValueError(
             "protobuf is enabled but schema registry url is missing; set KAFAK_SCHEMA_REGISTRY"
         )
+
+    topic_manager.ensure_compacted_topics([SCHEMA_REGISTRY_INTERNAL_TOPIC])
 
     protobuf_registry = ProtobufSerializerRegistry(
         schema_registry_url=runtime.kafka.schema_registry_url,

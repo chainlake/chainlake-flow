@@ -16,6 +16,7 @@ class _AdminStub:
     def __init__(self):
         self.incremental_updates = []
         self.deleted_topics = []
+        self.list_topics_results = []
 
     def describe_configs(self, resources):
         return {
@@ -30,6 +31,11 @@ class _AdminStub:
     def delete_topics(self, topics):
         self.deleted_topics = list(topics)
         return {topic: _Future(None) for topic in topics}
+
+    def list_topics(self, timeout=None):
+        if self.list_topics_results:
+            return self.list_topics_results.pop(0)
+        return SimpleNamespace(topics={})
 
 
 def test_config_entry_value_supports_objects_and_plain_values():
@@ -71,6 +77,9 @@ def test_ensure_compacted_topics_uses_compact_delete_policy():
     manager._ensure_topics = lambda topics, config: captured.update(
         {"topics": list(topics), "config": config}
     )
+    manager._wait_for_topics = lambda topics, **kwargs: captured.update(
+        {"wait_topics": list(topics), "wait_kwargs": kwargs}
+    )
     manager._ensure_compaction = lambda topics: captured.update(
         {"compaction_topics": list(topics)}
     )
@@ -78,8 +87,47 @@ def test_ensure_compacted_topics_uses_compact_delete_policy():
     manager.ensure_compacted_topics(["checkpoint-topic"])
 
     assert captured["topics"] == ["checkpoint-topic"]
+    assert captured["wait_topics"] == ["checkpoint-topic"]
     assert captured["compaction_topics"] == ["checkpoint-topic"]
     assert captured["config"]["cleanup.policy"] == "compact,delete"
+
+
+def test_ensure_table_topics_uses_automq_table_topic_config():
+    manager = KafkaTopicManager(producer_config={})
+    captured = {}
+
+    manager._ensure_topics = lambda topics, config: captured.update(
+        {"topics": list(topics), "config": config}
+    )
+    manager._wait_for_topics = lambda topics, **kwargs: captured.update(
+        {"wait_topics": list(topics), "wait_kwargs": kwargs}
+    )
+
+    manager.ensure_table_topics(["raw_block", "raw_trace"], namespace="evm_bsc_mainnet")
+
+    assert captured["topics"] == ["raw_block", "raw_trace"]
+    assert captured["wait_topics"] == ["raw_block", "raw_trace"]
+    assert captured["config"]["message.timestamp.type"] == "LogAppendTime"
+    assert captured["config"]["automq.table.topic.enable"] == "true"
+    assert captured["config"]["automq.table.topic.namespace"] == "evm_bsc_mainnet"
+    assert captured["config"]["automq.table.topic.schema.type"] == "schema"
+
+
+def test_wait_for_topics_retries_until_visible(monkeypatch):
+    manager = KafkaTopicManager(producer_config={})
+    admin = _AdminStub()
+    admin.list_topics_results = [
+        SimpleNamespace(topics={"raw_block": SimpleNamespace(error=SimpleNamespace(code=lambda: 3))}),
+        SimpleNamespace(topics={"raw_block": SimpleNamespace(error=None)}),
+    ]
+    manager._admin_client = lambda: admin
+
+    sleeps = []
+    monkeypatch.setattr("rpcstream.sinks.kafka.admin.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    manager._wait_for_topics(["raw_block"], timeout_seconds=2.0, poll_interval_seconds=0.1)
+
+    assert sleeps
 
 
 def test_delete_topics_uses_admin_delete_topics():
