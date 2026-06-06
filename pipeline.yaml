@@ -11,7 +11,7 @@ entities:
   - "block"
   - "transaction"
   - "log"
-  - "token_transfer"
+  #- "token_transfer"
   #- "trace"
 
 erpc:

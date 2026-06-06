@@ -109,7 +109,8 @@ class BaseClient(ABC):
                             span.set_status(Status(StatusCode.ERROR))
 
                         if self.logger:
-                            self.logger.warn(
+                            log_method = self.logger.debug if is_expected_rpc_warning(exc) else self.logger.warn
+                            log_method(
                                 "rpc.transport_error",
                                 component="client",
                                 method=method,
@@ -132,7 +133,10 @@ class BaseClient(ABC):
                     span.set_attribute("rpc.exception", error_msg)
                 
                 if self.logger:
-                    log_method = self.logger.warn if is_expected_rpc_warning(exc) else self.logger.error
+                    if is_expected_rpc_warning(exc):
+                        log_method = self.logger.debug
+                    else:
+                        log_method = self.logger.error
                     log_method(
                         "rpc.failed",
                         component="client",

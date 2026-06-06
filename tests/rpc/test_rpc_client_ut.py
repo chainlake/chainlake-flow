@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import patch, AsyncMock
 from aiohttp import ClientConnectionError
 from rpcstream.client.jsonrpc import JsonRpcClient
+from rpcstream.client.models import RpcResponseError
+from rpcstream.protocol.request import BaseRpcRequest
 
 
 # -------------------------
@@ -109,6 +111,20 @@ class MockPost:
 def mock_post(*args, **kwargs):
     return MockPost(ClientConnectionError("Connection failed"))
 
+
+class CaptureLogger:
+    def __init__(self):
+        self.records = []
+
+    def debug(self, message, **kwargs):
+        self.records.append(("debug", message, kwargs))
+
+    def warn(self, message, **kwargs):
+        self.records.append(("warn", message, kwargs))
+
+    def error(self, message, **kwargs):
+        self.records.append(("error", message, kwargs))
+
 # -------------------------
 # Test: RPC transport error
 # -------------------------
@@ -146,5 +162,30 @@ async def test_max_retries_exhausted():
         assert client.metrics.request_total == 1 
 
         assert "Connection failed" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_block_not_ready_logs_only_debug():
+    logger = CaptureLogger()
+    client = JsonRpcClient(base_url="http://fakeurl", logger=logger)
+    request = BaseRpcRequest(
+        method="eth_getBlockReceipts",
+        params=["latest"],
+        meta={"cursor": 94349617},
+    )
+
+    mock_resp = make_mock_response(
+        b'{"jsonrpc":"2.0","error":{"code":-32603,"message":"upstream does not have the requested block yet","data":{"code":"ErrUpstreamsExhausted","details":{"networkId":"evm:56","projectId":"main","upstreams":30,"durationMs":1318,"retries":0,"attempts":1,"hedges":0},"cause":[{"code":"ErrUpstreamBlockUnavailable","message":"upstream does not have the requested block yet","details":{"latestBlock":100924465,"finalizedBlock":100924464}},{"code":"ErrUpstreamBlockUnavailable","message":"upstream does not have the requested block yet","details":{"latestBlock":102218345,"finalizedBlock":102218306}}]}},"id":"1"}'
+    )
+
+    with patch.object(client.session, "post", return_value=mock_resp):
+        with pytest.raises(RpcResponseError):
+            await client.execute(request)
+
+    assert all(level == "debug" for level, _, _ in logger.records)
+    messages = [message for _, message, _ in logger.records]
+    assert "client.rpc_response_error" in messages
+    assert "rpc.transport_error" in messages
+    assert "rpc.failed" in messages
 
         

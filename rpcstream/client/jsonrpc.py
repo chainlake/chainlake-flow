@@ -82,13 +82,20 @@ class JsonRpcClient(BaseClient):
                 span.set_attribute("rpc.error", str(exc))
             
             if self.logger:
-                log_method = self.logger.warn if exc.is_expected_warning() else self.logger.error
-                log_method(
-                    "client.rpc_response_error",
-                    component="client",
-                    method=request.method,
-                    **exc.log_fields(),
-                )
+                if exc.is_expected_warning():
+                    self.logger.debug(
+                        "client.rpc_response_error",
+                        component="client",
+                        method=request.method,
+                        **exc.log_fields(),
+                    )
+                else:
+                    self.logger.error(
+                        "client.rpc_response_error",
+                        component="client",
+                        method=request.method,
+                        **exc.log_fields(),
+                    )
             
             raise exc
 
