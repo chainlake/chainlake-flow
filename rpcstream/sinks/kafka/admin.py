@@ -10,8 +10,10 @@ TOPIC_COMPACT_POLICY_VALUE = "compact"
 TOPIC_COMPACT_DELETE_POLICY_VALUE = "compact,delete"
 TABLE_TOPIC_ENABLE_CONFIG = "automq.table.topic.enable"
 TABLE_TOPIC_NAMESPACE_CONFIG = "automq.table.topic.namespace"
-TABLE_TOPIC_SCHEMA_TYPE_CONFIG = "automq.table.topic.schema.type"
-TABLE_TOPIC_SCHEMA_TYPE_SCHEMA = "schema"
+TABLE_TOPIC_CONVERT_VALUE_TYPE_CONFIG = "automq.table.topic.convert.value.type"
+TABLE_TOPIC_CONVERT_VALUE_TYPE_BY_SCHEMA_ID = "by_schema_id"
+TABLE_TOPIC_TRANSFORM_VALUE_TYPE_CONFIG = "automq.table.topic.transform.value.type"
+TABLE_TOPIC_TRANSFORM_VALUE_TYPE_FLATTEN = "flatten"
 
 
 class KafkaTopicManager:
@@ -44,7 +46,8 @@ class KafkaTopicManager:
                 TOPIC_TIMESTAMP_CONFIG: TOPIC_TIMESTAMP_VALUE,
                 TABLE_TOPIC_ENABLE_CONFIG: "true",
                 TABLE_TOPIC_NAMESPACE_CONFIG: namespace,
-                TABLE_TOPIC_SCHEMA_TYPE_CONFIG: TABLE_TOPIC_SCHEMA_TYPE_SCHEMA,
+                TABLE_TOPIC_CONVERT_VALUE_TYPE_CONFIG: TABLE_TOPIC_CONVERT_VALUE_TYPE_BY_SCHEMA_ID,
+                TABLE_TOPIC_TRANSFORM_VALUE_TYPE_CONFIG: TABLE_TOPIC_TRANSFORM_VALUE_TYPE_FLATTEN,
             },
         )
         self._wait_for_topics(topics)
