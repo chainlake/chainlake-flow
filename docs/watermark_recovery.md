@@ -17,8 +17,8 @@
 Default topic names:
 
 ```text
-evm_bsc_mainnet.commit_watermark
-evm_bsc_mainnet.cursor_state
+bsc_commit_watermark
+bsc_cursor_state
 ```
 
 Semantic difference:

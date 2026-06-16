@@ -188,23 +188,23 @@ entities:
 
 For EVM, the runtime can produce topics such as:
 
-- `evm_bsc_mainnet.raw_block`
-- `evm_bsc_mainnet.enriched_transaction`
-- `evm_bsc_mainnet.raw_log`
-- `evm_bsc_mainnet.raw_trace`
-- `evm_bsc_mainnet.token_transfer`
+- `bsc_raw_blocks`
+- `bsc_enriched_transactions`
+- `bsc_raw_logs`
+- `bsc_raw_traces`
+- `bsc_token_transfers`
 
 Progress and recovery use:
 
-- `evm_bsc_mainnet.commit_watermark`
-- `evm_bsc_mainnet.cursor_state`
-- `dlq.ingestion`
+- `bsc_commit_watermark`
+- `bsc_cursor_state`
+- `dlq_ingestion`
 
 High-level meaning:
 
 - `commit_watermark`: the last contiguous successfully committed cursor
 - `cursor_state`: gap-only state used to explain and recover holes
-- `dlq.ingestion`: failure records used for retry and replay
+- `dlq_ingestion`: failure records used for retry and replay
 
 Detailed behavior is documented in:
 

@@ -92,27 +92,6 @@ def test_ensure_compacted_topics_uses_compact_delete_policy():
     assert captured["config"]["cleanup.policy"] == "compact,delete"
 
 
-def test_ensure_table_topics_uses_automq_table_topic_config():
-    manager = KafkaTopicManager(producer_config={})
-    captured = {}
-
-    manager._ensure_topics = lambda topics, config: captured.update(
-        {"topics": list(topics), "config": config}
-    )
-    manager._wait_for_topics = lambda topics, **kwargs: captured.update(
-        {"wait_topics": list(topics), "wait_kwargs": kwargs}
-    )
-
-    manager.ensure_table_topics(["raw_block", "raw_trace"], namespace="evm_bsc_mainnet")
-
-    assert captured["topics"] == ["raw_block", "raw_trace"]
-    assert captured["wait_topics"] == ["raw_block", "raw_trace"]
-    assert captured["config"]["message.timestamp.type"] == "LogAppendTime"
-    assert captured["config"]["automq.table.topic.enable"] == "true"
-    assert captured["config"]["automq.table.topic.namespace"] == "evm_bsc_mainnet"
-    assert captured["config"]["automq.table.topic.schema.type"] == "schema"
-
-
 def test_wait_for_topics_retries_until_visible(monkeypatch):
     manager = KafkaTopicManager(producer_config={})
     admin = _AdminStub()

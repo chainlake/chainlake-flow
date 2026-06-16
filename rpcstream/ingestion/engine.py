@@ -10,6 +10,7 @@ from rpcstream.ingestion.dlq import (
     build_unified_dlq_record,
     compute_next_retry_at,
 )
+from rpcstream.config.profiles.store import get_chain_profile
 
 from opentelemetry.trace import Status, StatusCode
 
@@ -37,6 +38,7 @@ class IngestionEngine:
         watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=False,
+        upstream_not_ready_max_attempts: int = 3,
     ):
         self.fetcher = fetcher
         self.processors = processors
@@ -66,6 +68,7 @@ class IngestionEngine:
         self.watermark_manager = watermark_manager
         self.checkpoint_reader = checkpoint_reader
         self.eos_enabled = eos_enabled
+        self.upstream_not_ready_max_attempts = max(1, int(upstream_not_ready_max_attempts))
         self._checkpoint_tasks = set()
         self._last_phase_timings = {}
         self._last_cursor_observation = {}
@@ -269,6 +272,7 @@ class IngestionEngine:
             "checkpoint_ms": None,
             "message_count": 0,
         }
+        attempt = 1
         try:
             with self._tracer.start_as_current_span("streaming.run") as root_span:
                 root_span.set_attribute("component", "engine")
@@ -277,181 +281,295 @@ class IngestionEngine:
 
                 self.metrics.INFLIGHT.add(1)
 
-                # 1. FETCH
-                fetch_started = time.perf_counter()
-                raw_data = await self.fetcher.fetch(cursor)
-                phase_timings["fetch_ms"] = (time.perf_counter() - fetch_started) * 1000
-
-                for entity, processor in self.processors.items():
-                    current_entity = entity
-                    if isinstance(raw_data[entity], RpcErrorResult):
-                        error_msg = raw_data[entity].error
-                        error_details = raw_data[entity].details.copy()
-                        self.metrics.ERROR_COUNTER.add(1, {"stage": "rpc"})
-
-                        if self.logger:
-                            self.logger.warn(
-                                "engine.rpc_failed",
-                                component="engine",
-                                entity=entity,
-                                cursor=cursor,
-                                error=error_msg,
-                                expected=raw_data[entity].expected,
-                                **{
-                                    key: value
-                                    for key, value in error_details.items()
-                                    if key != "block"
-                                },
-                            )
-                        await self._send_dlq(
-                            entity=entity,
-                            cursor=cursor,
-                            stage="rpc",
-                            error_type="RpcError",
-                            error_message=error_msg,
-                            payload=None,
-                            context={
-                                "request": raw_data[entity].meta.extra,
-                                "rpc_error": error_details,
-                                "expected": raw_data[entity].expected,
-                            },
-                        )
-                        success = False
-                        return False, delivery_futures
+                while True:
+                    success = True
+                    parsed_bundle = {}
+                    delivery_futures = []
+                    expected_watermark = None
+                    transactional_topic_rows = []
+                    retry_requested = False
+                    retry_error = None
+                    retry_entity = None
+                    retry_meta = None
+                    current_entity = "unknown"
 
                     try:
-                        value, meta = raw_data[entity]
-                        process_started = time.perf_counter()
-                        processed_data = processor.process(cursor, value)
-                        phase_timings["process_ms"] += (time.perf_counter() - process_started) * 1000
-                        for processed_entity, rows in processed_data.items():
-                            parsed_bundle.setdefault(processed_entity, []).extend(rows)
+                        # 1. FETCH
+                        fetch_started = time.perf_counter()
+                        raw_data = await self.fetcher.fetch(cursor)
+                        phase_timings["fetch_ms"] = (time.perf_counter() - fetch_started) * 1000
 
-                        head_cursor, head_lag, ingestion_lag = await self._compute_lag(cursor)
-                        if head_lag is not None:
-                            self.metrics.CHAIN_LAG.record(head_lag)
-                        if ingestion_lag is not None:
-                            self.metrics.INGESTION_LAG.record(ingestion_lag)
+                        for entity, processor in self.processors.items():
+                            current_entity = entity
+                            rpc_result = raw_data[entity]
+                            if isinstance(rpc_result, RpcErrorResult):
+                                error_msg = rpc_result.error
+                                error_details = rpc_result.details.copy()
+                                self.metrics.ERROR_COUNTER.add(1, {"stage": "rpc"})
 
-                        latency = meta.extra.get("latency_ms", 0)
-                        queue_wait = meta.extra.get("queue_wait_ms", 0)
-                        inflight = meta.extra.get("inflight", 0)
-                        phase_timings["rpc_requests"] += 1
-                        phase_timings["rpc_ms_total_ms"] += float(latency)
-                        phase_timings["rpc_queue_total_ms"] += float(queue_wait)
-                        phase_timings["rpc_inflight_current"] = int(inflight)
-                        phase_timings["rpc_min_ms"] = (
-                            float(latency)
-                            if phase_timings["rpc_min_ms"] is None
-                            else min(float(latency), phase_timings["rpc_min_ms"])
-                        )
-                        phase_timings["rpc_max_ms"] = (
-                            float(latency)
-                            if phase_timings["rpc_max_ms"] is None
-                            else max(float(latency), phase_timings["rpc_max_ms"])
-                        )
+                                if self.logger:
+                                    self.logger.warn(
+                                        "engine.rpc_failed",
+                                        component="engine",
+                                        entity=entity,
+                                        cursor=cursor,
+                                        error=error_msg,
+                                        expected=rpc_result.expected,
+                                        **{
+                                            key: value
+                                            for key, value in error_details.items()
+                                            if key != "block"
+                                        },
+                                    )
 
-                        self.metrics.BLOCK_COUNTER.add(1, {"entity": entity})
-                        self.metrics.BLOCK_LATENCY.record(latency, {"entity": entity})
-                        self.metrics.QUEUE_WAIT.record(queue_wait, {"entity": entity})
-                        emitted_rows = sum(len(rows) for rows in processed_data.values())
-                        if self.logger:
-                            self.logger.info(
-                                "engine.processed",
-                                component="engine",
-                                cursor=cursor,
-                                entity=entity,
-                                latency_ms=latency,
-                                payload=emitted_rows,
-                                ingestion_lag=ingestion_lag,
+                                if rpc_result.expected and self._should_retry_upstream_not_ready(
+                                    attempt=attempt,
+                                ):
+                                    retry_requested = True
+                                    retry_error = rpc_result
+                                    retry_entity = entity
+                                    retry_meta = rpc_result.meta.extra
+                                    break
+
+                                await self._send_dlq(
+                                    entity=entity,
+                                    cursor=cursor,
+                                    stage="rpc",
+                                    error_type="RpcError",
+                                    error_message=error_msg,
+                                    payload=None,
+                                    context={
+                                        "request": rpc_result.meta.extra,
+                                        "rpc_error": error_details,
+                                        "expected": rpc_result.expected,
+                                    },
+                                )
+                                success = False
+                                return False, delivery_futures, expected_watermark
+
+                            try:
+                                value, meta = rpc_result
+                                process_started = time.perf_counter()
+                                processed_data = processor.process(cursor, value)
+                                phase_timings["process_ms"] += (time.perf_counter() - process_started) * 1000
+                                for processed_entity, rows in processed_data.items():
+                                    parsed_bundle.setdefault(processed_entity, []).extend(rows)
+
+                                head_cursor, head_lag, ingestion_lag = await self._compute_lag(cursor)
+                                if head_lag is not None:
+                                    self.metrics.CHAIN_LAG.record(head_lag)
+                                if ingestion_lag is not None:
+                                    self.metrics.INGESTION_LAG.record(ingestion_lag)
+
+                                latency = meta.extra.get("latency_ms", 0)
+                                queue_wait = meta.extra.get("queue_wait_ms", 0)
+                                inflight = meta.extra.get("inflight", 0)
+                                phase_timings["rpc_requests"] += 1
+                                phase_timings["rpc_ms_total_ms"] += float(latency)
+                                phase_timings["rpc_queue_total_ms"] += float(queue_wait)
+                                phase_timings["rpc_inflight_current"] = int(inflight)
+                                phase_timings["rpc_min_ms"] = (
+                                    float(latency)
+                                    if phase_timings["rpc_min_ms"] is None
+                                    else min(float(latency), phase_timings["rpc_min_ms"])
+                                )
+                                phase_timings["rpc_max_ms"] = (
+                                    float(latency)
+                                    if phase_timings["rpc_max_ms"] is None
+                                    else max(float(latency), phase_timings["rpc_max_ms"])
+                                )
+
+                                self.metrics.BLOCK_COUNTER.add(1, {"entity": entity})
+                                self.metrics.BLOCK_LATENCY.record(latency, {"entity": entity})
+                                self.metrics.QUEUE_WAIT.record(queue_wait, {"entity": entity})
+                                emitted_rows = sum(len(rows) for rows in processed_data.values())
+                                if self.logger:
+                                    self.logger.info(
+                                        "engine.processed",
+                                        component="engine",
+                                        cursor=cursor,
+                                        entity=entity,
+                                        latency_ms=latency,
+                                        payload=emitted_rows,
+                                        ingestion_lag=ingestion_lag,
+                                    )
+                            except Exception as e:
+                                await self._send_dlq(
+                                    entity=entity,
+                                    cursor=cursor,
+                                    stage="processor",
+                                    error_type=type(e).__name__,
+                                    error_message=str(e),
+                                    payload=value,
+                                    context={
+                                        "processor": processor.__class__.__name__,
+                                        "meta": meta.extra,
+                                    },
+                                )
+                                success = False
+                                return False, delivery_futures, expected_watermark
+
+                        if retry_requested:
+                            retry_delay = self._upstream_not_ready_retry_delay_seconds(attempt)
+                            if self.logger:
+                                self.logger.warn(
+                                    "engine.rpc_retry_scheduled",
+                                    component="engine",
+                                    entity=retry_entity,
+                                    cursor=cursor,
+                                    attempt=attempt,
+                                    max_attempts=self.upstream_not_ready_max_attempts,
+                                    retry_delay_ms=round(retry_delay * 1000, 2),
+                                    error=retry_error.error if retry_error is not None else None,
+                                    **(
+                                        {
+                                            key: value
+                                            for key, value in (retry_error.details or {}).items()
+                                            if key != "block"
+                                        }
+                                        if retry_error is not None
+                                        else {}
+                                    ),
+                                )
+
+                            await asyncio.sleep(retry_delay)
+                            attempt += 1
+                            continue
+
+                        if success:
+                            decode_started = time.perf_counter()
+                            if self.decoder is not None:
+                                decoded_bundle = await self.decoder.decode(parsed_bundle)
+                            else:
+                                decoded_bundle = parsed_bundle
+                            phase_timings["decode_ms"] += (time.perf_counter() - decode_started) * 1000
+
+                            enrich_started = time.perf_counter()
+                            if self.enricher is not None:
+                                final_bundle = self.enricher.enrich(decoded_bundle)
+                            else:
+                                final_bundle = decoded_bundle
+                            phase_timings["enrich_ms"] += (time.perf_counter() - enrich_started) * 1000
+                            cursor_observation["event_timestamp_ms"] = self._extract_event_timestamp_ms(
+                                final_bundle
                             )
+                            emitted_rows = 0
+                            for entity, topic in self.topics.items():
+                                rows = final_bundle.get(entity, [])
+                                self.metrics.ROW_COUNTER.add(len(rows), {"entity": entity})
+                                if not rows:
+                                    continue
+                                emitted_rows += len(rows)
+                                sink_started = time.perf_counter()
+                                if self.eos_enabled:
+                                    transactional_topic_rows.append((topic, rows))
+                                else:
+                                    delivery_future = await self.sink.send(
+                                        topic,
+                                        rows,
+                                        wait_delivery=self.watermark_manager is not None,
+                                    )
+                                    if delivery_future is not None:
+                                        delivery_futures.append(delivery_future)
+                                phase_timings["sink_enqueue_ms"] += (time.perf_counter() - sink_started) * 1000
+                            receipt_rows = (
+                                len(final_bundle.get("receipt", []))
+                                if "receipt" not in self.topics
+                                else 0
+                            )
+                            cursor_observation["message_count"] = emitted_rows + receipt_rows
                     except Exception as e:
+                        with self._tracer.start_as_current_span("engine.error") as error_span:
+                            error_span.set_status(Status(StatusCode.ERROR))
+                            error_span.set_attribute("error.message", str(e))
+                            error_span.set_attribute("entity", current_entity)
+                            error_span.set_attribute("cursor_value", cursor)
+
+                        error_msg = repr(e)
+                        self.metrics.ERROR_COUNTER.add(1, {"stage": "processor"})
+
+                        if self.logger:
+                            self.logger.error(
+                                "engine.processor_error",
+                                component="engine",
+                                entity=current_entity,
+                                cursor=cursor,
+                                error=error_msg
+                            )
+
                         await self._send_dlq(
-                            entity=entity,
+                            entity=current_entity,
                             cursor=cursor,
                             stage="processor",
                             error_type=type(e).__name__,
                             error_message=str(e),
-                            payload=value,
-                            context={
-                                "processor": processor.__class__.__name__,
-                                "meta": meta.extra,
-                            },
+                            payload=None,
+                            context={},
                         )
                         success = False
+                        return False, delivery_futures, expected_watermark
 
-                if success:
-                    decode_started = time.perf_counter()
-                    if self.decoder is not None:
-                        decoded_bundle = await self.decoder.decode(parsed_bundle)
-                    else:
-                        decoded_bundle = parsed_bundle
-                    phase_timings["decode_ms"] += (time.perf_counter() - decode_started) * 1000
+                    if success:
+                        break
 
-                    enrich_started = time.perf_counter()
-                    if self.enricher is not None:
-                        final_bundle = self.enricher.enrich(decoded_bundle)
-                    else:
-                        final_bundle = decoded_bundle
-                    phase_timings["enrich_ms"] += (time.perf_counter() - enrich_started) * 1000
-                    cursor_observation["event_timestamp_ms"] = self._extract_event_timestamp_ms(
-                        final_bundle
-                    )
-                    emitted_rows = 0
-                    for entity, topic in self.topics.items():
-                        rows = final_bundle.get(entity, [])
-                        self.metrics.ROW_COUNTER.add(len(rows), {"entity": entity})
-                        if not rows:
-                            continue
-                        emitted_rows += len(rows)
-                        sink_started = time.perf_counter()
-                        if self.eos_enabled:
-                            transactional_topic_rows.append((topic, rows))
-                        else:
-                            delivery_future = await self.sink.send(
-                                topic,
-                                rows,
-                                wait_delivery=self.watermark_manager is not None,
+                    if attempt < self.upstream_not_ready_max_attempts:
+                        attempt += 1
+                        continue
+
+                    if retry_error is not None and retry_entity is not None:
+                        await self._send_dlq(
+                            entity=retry_entity,
+                            cursor=cursor,
+                            stage="rpc",
+                            error_type="RpcError",
+                            error_message=retry_error.error,
+                            payload=None,
+                            context={
+                                "request": retry_meta,
+                                "rpc_error": retry_error.details,
+                                "expected": retry_error.expected,
+                                "retry_attempts": attempt,
+                            },
+                        )
+                    return False, delivery_futures, expected_watermark
+
+                if success and self.eos_enabled:
+                    should_persist_cursor_state = False
+                    if self.watermark_manager is not None:
+                        should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
+                            cursor
+                        )
+                        expected_watermark = await self.watermark_manager.preview_completed(cursor)
+                        if should_persist_cursor_state:
+                            transactional_topic_rows.append(
+                                (
+                                    self.watermark_manager.state_topic,
+                                    [
+                                        build_watermark_state_row(
+                                            self.watermark_manager.identity,
+                                            cursor,
+                                            status="completed",
+                                        )
+                                    ],
+                                )
                             )
-                            if delivery_future is not None:
-                                delivery_futures.append(delivery_future)
-                        phase_timings["sink_enqueue_ms"] += (time.perf_counter() - sink_started) * 1000
-                    receipt_rows = (
-                        len(final_bundle.get("receipt", []))
-                        if "receipt" not in self.topics
-                        else 0
-                    )
-                    cursor_observation["message_count"] = emitted_rows + receipt_rows
-        except Exception as e:
-            with self._tracer.start_as_current_span("engine.error") as error_span:
-                error_span.set_status(Status(StatusCode.ERROR))
-                error_span.set_attribute("error.message", str(e))
-                error_span.set_attribute("entity", current_entity)
-                error_span.set_attribute("cursor_value", cursor)
-
-            error_msg = repr(e)
-            self.metrics.ERROR_COUNTER.add(1, {"stage": "processor"})
-
-            if self.logger:
-                self.logger.error(
-                    "engine.processor_error",
-                    component="engine",
-                    entity=current_entity,
-                    cursor=cursor,
-                    error=error_msg
-                )
-
-            await self._send_dlq(
-                entity=current_entity,
-                cursor=cursor,
-                stage="processor",
-                error_type=type(e).__name__,
-                error_message=str(e),
-                payload=None,
-                context={},
-            )
-            success = False
-
+                    if expected_watermark is not None and self.watermark_manager is not None:
+                        transactional_topic_rows.append(
+                            (
+                                self.watermark_manager.topic,
+                                [
+                                    build_checkpoint_row(
+                                        self.watermark_manager.identity,
+                                        expected_watermark,
+                                        status="running",
+                                    )
+                                ],
+                            )
+                        )
+                    delivery_future = await self.sink.send_transaction(transactional_topic_rows)
+                    if delivery_future is not None:
+                        delivery_futures.append(delivery_future)
+                return success, delivery_futures, expected_watermark
         finally:
             rpc_requests = max(int(phase_timings.get("rpc_requests", 0)), 0)
             if rpc_requests > 0:
@@ -473,43 +591,38 @@ class IngestionEngine:
             total_ms = (time.time() - start_total) * 1000
             self.metrics.TOTAL_TIME.record(total_ms, {"entity": current_entity})
 
-        if success and self.eos_enabled:
-            should_persist_cursor_state = False
-            if self.watermark_manager is not None:
-                should_persist_cursor_state = await self.watermark_manager.requires_cursor_state(
-                    cursor
-                )
-                expected_watermark = await self.watermark_manager.preview_completed(cursor)
-                if should_persist_cursor_state:
-                    transactional_topic_rows.append(
-                        (
-                            self.watermark_manager.state_topic,
-                            [
-                                build_watermark_state_row(
-                                    self.watermark_manager.identity,
-                                    cursor,
-                                    status="completed",
-                                )
-                            ],
-                        )
-                    )
-            if expected_watermark is not None and self.watermark_manager is not None:
-                transactional_topic_rows.append(
-                    (
-                        self.watermark_manager.topic,
-                        [
-                            build_checkpoint_row(
-                                self.watermark_manager.identity,
-                                expected_watermark,
-                                status="running",
-                            )
-                        ],
-                    )
-                )
-            delivery_future = await self.sink.send_transaction(transactional_topic_rows)
-            if delivery_future is not None:
-                delivery_futures.append(delivery_future)
-        return success, delivery_futures, expected_watermark
+    def _should_retry_upstream_not_ready(self, *, attempt: int) -> bool:
+        return attempt < self.upstream_not_ready_max_attempts
+
+    def _upstream_not_ready_retry_delay_seconds(self, attempt: int) -> float:
+        base_seconds = self._chain_block_time_seconds()
+        return max(base_seconds * max(attempt, 1), 0.1)
+
+    def _chain_block_time_seconds(self) -> float:
+        interval = getattr(self.chain, "interval_seconds", None)
+        if interval is not None:
+            try:
+                return max(float(interval), 0.1)
+            except (TypeError, ValueError):
+                pass
+
+        chain_name = getattr(self.chain, "name", None)
+        network = getattr(self.chain, "network", None)
+        if chain_name and network:
+            try:
+                return max(get_chain_profile(str(chain_name), str(network)).interval_seconds, 0.1)
+            except Exception:
+                pass
+
+        network_label = getattr(self.chain, "network_label", None)
+        if isinstance(network_label, str) and "-" in network_label:
+            chain_name, network = network_label.split("-", 1)
+            try:
+                return max(get_chain_profile(chain_name, network).interval_seconds, 0.1)
+            except Exception:
+                pass
+
+        return 1.0
 
     async def _finalize_checkpoint(
         self,

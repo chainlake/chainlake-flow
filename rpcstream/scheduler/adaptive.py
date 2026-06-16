@@ -107,12 +107,14 @@ class AdaptiveRpcScheduler(BaseScheduler):
 
                 return result, meta
 
-            except Exception as exc:               
+            except Exception as exc:
                 latency = (time.time() - submit_ts) * 1000
 
                 self.errors += 1
                 self._update_latency(latency)
-                self._adjust_window(False)
+                expected_warning = is_expected_rpc_warning(exc)
+                if not expected_warning:
+                    self._adjust_window(False)
 
                 error_msg = summarize_exception(exc)
                 error_fields = exception_log_fields(exc)
@@ -122,7 +124,7 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 span.set_attribute("scheduler.latency_ms", round(latency, 2))
 
                 if self.logger:
-                    log_method = self.logger.warn if is_expected_rpc_warning(exc) else self.logger.error
+                    log_method = self.logger.warn if expected_warning else self.logger.error
                     log_method(
                         "scheduler.request_failed",
                         component="scheduler",
@@ -136,7 +138,7 @@ class AdaptiveRpcScheduler(BaseScheduler):
                     error=error_msg,
                     meta=meta,
                     details=error_fields,
-                    expected=is_expected_rpc_warning(exc),
+                    expected=expected_warning,
                 )
 
             finally:

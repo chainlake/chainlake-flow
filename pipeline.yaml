@@ -11,8 +11,8 @@ entities:
   - "block"
   - "transaction"
   - "log"
-  #- "token_transfer"
-  #- "trace"
+  - "token_transfer"
+  #- "trace" 
 
 erpc:
   project_id: main
@@ -70,9 +70,7 @@ kafka:
   #    ca_path_env: KAFKA_CA_PATH     # omit if broker cert is signed by a public CA
   # ────────────────────────────────────────────────────────────────────────────
   common:
-    topic_template: "{type}_{chain}_{network}.{kind}_{entity}"
-  table_topic:
-    enabled: true # table topic for AutoMQ
+    topic_template: "{chain}_{kind}_{entity}"
   producer:
     linger_ms: 50
     batch_size: 65536

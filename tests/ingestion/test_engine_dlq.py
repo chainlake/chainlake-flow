@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from rpcstream.client.models import RpcErrorResult, RpcTaskMeta
 from rpcstream.adapters.evm.enrich import EvmEnricher
 from rpcstream.ingestion.engine import IngestionEngine
 from rpcstream.state.checkpoint import CheckpointIdentity, WatermarkManager
@@ -71,8 +72,8 @@ def build_engine(*, sink, eos_enabled=False):
         processors={"trace": FailingTraceProcessor()},
         enricher=EvmEnricher(),
         sink=sink,
-        topics={"trace": "evm_bsc_mainnet.raw_trace"},
-        dlq_topic="dlq.ingestion",
+        topics={"trace": "bsc_raw_traces"},
+        dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
         max_retry=1,
@@ -90,8 +91,8 @@ def build_success_engine(*, sink, eos_enabled=False):
         processors={"trace": SuccessfulTraceProcessor()},
         enricher=EvmEnricher(),
         sink=sink,
-        topics={"trace": "evm_bsc_mainnet.raw_trace"},
-        dlq_topic="dlq.ingestion",
+        topics={"trace": "bsc_raw_traces"},
+        dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
         max_retry=1,
@@ -109,8 +110,8 @@ def build_backfill_engine(*, sink):
         processors={"trace": SuccessfulTraceProcessor()},
         enricher=EvmEnricher(),
         sink=sink,
-        topics={"trace": "evm_bsc_mainnet.raw_trace"},
-        dlq_topic="dlq.ingestion",
+        topics={"trace": "bsc_raw_traces"},
+        dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(
             name="bsc_mainnet_backfill_10_20",
@@ -139,6 +140,57 @@ class BackfillCursorSource:
         return cursor
 
 
+class RetryThenSuccessFetcher:
+    def __init__(self, *, fail_attempts: int):
+        self.fail_attempts = fail_attempts
+        self.calls = 0
+
+    async def fetch(self, _cursor):
+        self.calls += 1
+        meta = RpcTaskMeta(task_id=self.calls, submit_ts=0.0, extra={"latency_ms": 1})
+        if self.calls <= self.fail_attempts:
+            rpc_error = RpcErrorResult(
+                error="rpc_response_error(method=eth_getBlockReceipts, code=-32603, message=upstream does not have the requested block yet)",
+                meta=meta,
+                details={
+                    "rpc_error_code": -32603,
+                    "rpc_error_message": "upstream does not have the requested block yet",
+                    "network_id": "evm:56",
+                    "project_id": "main",
+                    "upstreams_total": 19,
+                    "not_ready_upstreams": 19,
+                },
+                expected=True,
+            )
+            return {
+                "block": ({"type": "block", "block_number": 1}, meta),
+                "transaction": ({"type": "transaction", "block_number": 1}, meta),
+                "receipt": rpc_error,
+            }
+
+        return {
+            "block": ({"type": "block", "block_number": 1}, meta),
+            "transaction": ({"type": "transaction", "block_number": 1}, meta),
+            "receipt": ({"type": "receipt", "block_number": 1}, meta),
+        }
+
+
+class PassthroughProcessor:
+    def __init__(self, entity: str):
+        self.entity = entity
+
+    def process(self, cursor, value):
+        return {
+            self.entity: [
+                {
+                    "type": self.entity,
+                    "cursor": cursor,
+                    "value": value,
+                }
+            ]
+        }
+
+
 def test_engine_sends_trace_dlq_record_when_processor_fails():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=False)
@@ -150,7 +202,7 @@ def test_engine_sends_trace_dlq_record_when_processor_fails():
     assert expected_watermark is None
     assert len(sink.sent) == 1
     topic, rows, wait_delivery = sink.sent[0]
-    assert topic == "dlq.ingestion"
+    assert topic == "dlq_ingestion"
     assert wait_delivery is False
     assert len(rows) == 1
     record = rows[0]
@@ -176,7 +228,7 @@ def test_engine_sends_trace_dlq_via_transaction_when_eos_enabled():
     topic_rows = sink.sent_transactions[0]
     assert len(topic_rows) == 1
     topic, rows = topic_rows[0]
-    assert topic == "dlq.ingestion"
+    assert topic == "dlq_ingestion"
     assert len(rows) == 1
     assert rows[0]["entity"] == "trace"
 
@@ -195,10 +247,127 @@ def test_engine_sends_business_rows_via_transaction_when_eos_enabled_without_che
     topic_rows = sink.sent_transactions[0]
     assert topic_rows == [
         (
-            "evm_bsc_mainnet.raw_trace",
+            "bsc_raw_traces",
             [{"type": "trace", "block_number": 95281318, "trace_id": "95281318-root"}],
         )
     ]
+
+
+def test_engine_retries_upstream_not_ready_before_success(monkeypatch):
+    sink = RecordingSink()
+    sleep_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("rpcstream.ingestion.engine.asyncio.sleep", fake_sleep)
+
+    engine = IngestionEngine(
+        fetcher=RetryThenSuccessFetcher(fail_attempts=2),
+        processors={
+            "block": PassthroughProcessor("block"),
+            "transaction": PassthroughProcessor("transaction"),
+            "receipt": PassthroughProcessor("receipt"),
+        },
+        enricher=None,
+        decoder=None,
+        sink=sink,
+        topics={
+            "block": "bsc_raw_blocks",
+            "transaction": "bsc_enriched_transactions",
+        },
+        dlq_topic="dlq_ingestion",
+        chain=SimpleNamespace(
+            type="evm",
+            name="bsc",
+            network="mainnet",
+            network_label="bsc-mainnet",
+            interval_seconds=0.45,
+        ),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
+        max_retry=1,
+        concurrency=1,
+        logger=None,
+        watermark_manager=None,
+        checkpoint_reader=None,
+        eos_enabled=True,
+        upstream_not_ready_max_attempts=3,
+    )
+
+    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(103151849))
+
+    assert success is True
+    assert expected_watermark is None
+    assert delivery_futures == []
+    assert sleep_calls == [0.45, 0.9]
+    assert sink.sent == []
+    assert len(sink.sent_transactions) == 1
+    assert sink.sent_transactions[0] == [
+        (
+            "bsc_raw_blocks",
+            [{"type": "block", "cursor": 103151849, "value": {"type": "block", "block_number": 1}}],
+        ),
+        (
+            "bsc_enriched_transactions",
+            [{"type": "transaction", "cursor": 103151849, "value": {"type": "transaction", "block_number": 1}}],
+        ),
+    ]
+
+
+def test_engine_sends_dlq_after_exhausting_upstream_not_ready_retries(monkeypatch):
+    sink = RecordingSink()
+    sleep_calls = []
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr("rpcstream.ingestion.engine.asyncio.sleep", fake_sleep)
+
+    engine = IngestionEngine(
+        fetcher=RetryThenSuccessFetcher(fail_attempts=99),
+        processors={
+            "block": PassthroughProcessor("block"),
+            "transaction": PassthroughProcessor("transaction"),
+            "receipt": PassthroughProcessor("receipt"),
+        },
+        enricher=None,
+        decoder=None,
+        sink=sink,
+        topics={
+            "block": "bsc_raw_blocks",
+            "transaction": "bsc_enriched_transactions",
+        },
+        dlq_topic="dlq_ingestion",
+        chain=SimpleNamespace(
+            type="evm",
+            name="bsc",
+            network="mainnet",
+            network_label="bsc-mainnet",
+            interval_seconds=0.45,
+        ),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
+        max_retry=1,
+        concurrency=1,
+        logger=None,
+        watermark_manager=None,
+        checkpoint_reader=None,
+        eos_enabled=False,
+        upstream_not_ready_max_attempts=3,
+    )
+
+    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(103151849))
+
+    assert success is False
+    assert expected_watermark is None
+    assert delivery_futures == []
+    assert sleep_calls == [0.45, 0.9]
+    assert sink.sent_transactions == []
+    assert len(sink.sent) == 1
+    topic, rows, wait_delivery = sink.sent[0]
+    assert topic == "dlq_ingestion"
+    assert wait_delivery is False
+    assert rows[0]["entity"] == "receipt"
+    assert rows[0]["status"] == "pending"
 
 
 def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
@@ -228,7 +397,7 @@ def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
     assert len(sink.sent_transactions) == 1
     topic_rows = sink.sent_transactions[0]
     assert len(topic_rows) == 1
-    assert topic_rows[0][0] == "dlq.ingestion"
+    assert topic_rows[0][0] == "dlq_ingestion"
     assert topic_rows[0][1][0]["status"] == "resolved"
 
 
@@ -284,8 +453,8 @@ def test_engine_eos_checkpoint_uses_contiguous_watermark():
     )
     watermark_manager = WatermarkManager(
         sink=sink,
-        topic="evm_bsc_mainnet.commit_watermark",
-        state_topic="evm_bsc_mainnet.cursor_state",
+        topic="bsc_commit_watermark",
+        state_topic="bsc_cursor_state",
         identity=identity,
         initial_cursor=99,
         flush_on_advance=False,
@@ -323,20 +492,20 @@ def test_engine_eos_checkpoint_uses_contiguous_watermark():
     assert watermark_manager.cursor == 101
     assert len(sink.sent_transactions) == 2
     assert sink.sent_transactions[0][0] == (
-        "evm_bsc_mainnet.raw_trace",
+        "bsc_raw_traces",
         [{"type": "trace", "block_number": 101, "trace_id": "101-root"}],
     )
     state_topic_101, state_rows_101 = sink.sent_transactions[0][1]
-    assert state_topic_101 == "evm_bsc_mainnet.cursor_state"
+    assert state_topic_101 == "bsc_cursor_state"
     assert len(state_rows_101) == 1
     assert state_rows_101[0]["cursor"] == 101
     assert state_rows_101[0]["status"] == "completed"
     assert sink.sent_transactions[1][0] == (
-        "evm_bsc_mainnet.raw_trace",
+        "bsc_raw_traces",
         [{"type": "trace", "block_number": 100, "trace_id": "100-root"}],
     )
     checkpoint_topic, checkpoint_rows = sink.sent_transactions[1][1]
-    assert checkpoint_topic == "evm_bsc_mainnet.commit_watermark"
+    assert checkpoint_topic == "bsc_commit_watermark"
     assert len(checkpoint_rows) == 1
     checkpoint_row = checkpoint_rows[0]
     assert checkpoint_row["cursor"] == 101
@@ -366,8 +535,8 @@ def test_engine_eos_sequential_success_does_not_write_cursor_state():
     )
     watermark_manager = WatermarkManager(
         sink=sink,
-        topic="evm_bsc_mainnet.commit_watermark",
-        state_topic="evm_bsc_mainnet.cursor_state",
+        topic="bsc_commit_watermark",
+        state_topic="bsc_cursor_state",
         identity=identity,
         initial_cursor=99,
         flush_on_advance=False,
@@ -389,11 +558,11 @@ def test_engine_eos_sequential_success_does_not_write_cursor_state():
 
     assert len(sink.sent_transactions) == 1
     assert sink.sent_transactions[0][0] == (
-        "evm_bsc_mainnet.raw_trace",
+        "bsc_raw_traces",
         [{"type": "trace", "block_number": 100, "trace_id": "100-root"}],
     )
     checkpoint_topic, checkpoint_rows = sink.sent_transactions[0][1]
-    assert checkpoint_topic == "evm_bsc_mainnet.commit_watermark"
+    assert checkpoint_topic == "bsc_commit_watermark"
     assert checkpoint_rows[0]["cursor"] == 100
 
 

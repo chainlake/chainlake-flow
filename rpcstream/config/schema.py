@@ -24,10 +24,6 @@ class KafkaCommon(BaseModel):
     topic_template: Optional[str] = None
 
 
-class KafkaTableTopic(BaseModel):
-    enabled: bool = False
-
-
 class KafkaProducer(BaseModel):
     linger_ms: int
     batch_size: int
@@ -57,7 +53,6 @@ class KafkaEos(BaseModel):
 class KafkaConfig(BaseModel):
     connection: KafkaConnection
     common: KafkaCommon
-    table_topic: KafkaTableTopic = Field(default_factory=KafkaTableTopic)
     producer: KafkaProducer
     streaming: KafkaStreaming
     protobuf: KafkaProtobuf = Field(default_factory=KafkaProtobuf)
