@@ -188,16 +188,16 @@ entities:
 
 For EVM, the runtime can produce topics such as:
 
-- `bsc_raw_blocks`
-- `bsc_enriched_transactions`
-- `bsc_raw_logs`
-- `bsc_raw_traces`
-- `bsc_token_transfers`
+- `bsc.raw_block`
+- `bsc.enriched_transaction`
+- `bsc.raw_logs`
+- `bsc.raw_trace`
+- `bsc.token_transfer`
 
 Progress and recovery use:
 
-- `bsc_commit_watermark`
-- `bsc_cursor_state`
+- `bsc.commit_watermark`
+- `bsc.cursor_state`
 - `dlq_ingestion`
 
 High-level meaning:

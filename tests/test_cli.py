@@ -34,7 +34,7 @@ def make_config() -> PipelineConfig:
         },
         kafka={
             "connection": {"bootstrap_servers": "localhost:9092"},
-            "common": {"topic_template": "{chain}_{kind}_{entity}"},
+            "common": {"topic_template": "{namespace}.{kind}_{entity}"},
             "producer": {
                 "linger_ms": 50,
                 "batch_size": 65536,

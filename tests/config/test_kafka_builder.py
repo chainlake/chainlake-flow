@@ -72,11 +72,11 @@ def test_build_topic_maps_includes_main_and_system_topics():
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["block"] == "bsc_raw_blocks"
-    assert topic_maps.main["trace"] == "bsc_raw_traces"
+    assert topic_maps.main["block"] == "bsc.raw_block"
+    assert topic_maps.main["trace"] == "bsc.raw_trace"
     assert topic_maps.dlq == "dlq_ingestion"
-    assert topic_maps.checkpoint == "bsc_commit_watermark"
-    assert topic_maps.watermark_state == "bsc_cursor_state"
+    assert topic_maps.checkpoint == "bsc.commit_watermark"
+    assert topic_maps.watermark_state == "bsc.cursor_state"
 
 
 def test_build_topic_maps_uses_enriched_topic_for_transactions():
@@ -88,7 +88,7 @@ def test_build_topic_maps_uses_enriched_topic_for_transactions():
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["transaction"] == "bsc_enriched_transactions"
+    assert topic_maps.main["transaction"] == "bsc.enriched_transaction"
 
 
 def test_build_topic_maps_supports_token_transfer_topic():
@@ -100,7 +100,7 @@ def test_build_topic_maps_supports_token_transfer_topic():
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["token_transfer"] == "bsc_token_transfers"
+    assert topic_maps.main["token_transfer"] == "bsc.token_transfer"
 
 
 def test_build_topic_maps_supports_custom_checkpoint_topic():

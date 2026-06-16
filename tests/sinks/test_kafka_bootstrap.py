@@ -13,12 +13,12 @@ from rpcstream.sinks.kafka.schema import (
 def test_build_protobuf_topic_schemas_includes_main_and_system_topics():
     topic_maps = SimpleNamespace(
         main={
-            "block": "bsc_raw_blocks",
-            "trace": "bsc_raw_traces",
+            "block": "bsc.raw_block",
+            "trace": "bsc.raw_trace",
         },
         dlq="dlq_ingestion",
-        checkpoint="bsc_commit_watermark",
-        watermark_state="bsc_cursor_state",
+        checkpoint="bsc.commit_watermark",
+        watermark_state="bsc.cursor_state",
     )
     entity_schemas = {
         "block": EntitySchema(
@@ -38,22 +38,22 @@ def test_build_protobuf_topic_schemas_includes_main_and_system_topics():
     schemas = build_topic_schemas(topic_maps, entity_schemas, ["block", "trace"])
 
     assert set(schemas) == {
-        "bsc_raw_blocks",
-        "bsc_raw_traces",
+        "bsc.raw_block",
+        "bsc.raw_trace",
         "dlq_ingestion",
-        "bsc_commit_watermark",
-        "bsc_cursor_state",
+        "bsc.commit_watermark",
+        "bsc.cursor_state",
     }
 
 
 def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
     topic_maps = SimpleNamespace(
         main={
-            "transaction": "bsc_enriched_transactions",
+            "transaction": "bsc.enriched_transaction",
         },
         dlq="dlq_ingestion",
-        checkpoint="bsc_commit_watermark",
-        watermark_state="bsc_cursor_state",
+        checkpoint="bsc.commit_watermark",
+        watermark_state="bsc.cursor_state",
     )
     entity_schemas = {
         "transaction": EntitySchema(
@@ -67,10 +67,10 @@ def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
     schemas = build_topic_schemas(topic_maps, entity_schemas, ["transaction"])
 
     assert set(schemas) == {
-        "bsc_enriched_transactions",
+        "bsc.enriched_transaction",
         "dlq_ingestion",
-        "bsc_commit_watermark",
-        "bsc_cursor_state",
+        "bsc.commit_watermark",
+        "bsc.cursor_state",
     }
 
 
@@ -348,7 +348,7 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
         def build_protobuf_topic_schemas(self, *, topic_maps, entities):
             captured["adapter_topic_maps"] = topic_maps
             captured["adapter_entities"] = list(entities)
-            return {"bsc_raw_blocks": object()}
+            return {"bsc.raw_block": object()}
 
     runtime = SimpleNamespace(
         kafka=SimpleNamespace(
@@ -357,7 +357,7 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
             schema_registry_url="http://registry:8081",
         ),
         topic_map=SimpleNamespace(
-            main={"block": "bsc_raw_blocks"},
+            main={"block": "bsc.raw_block"},
             dlq="dlq_ingestion",
             checkpoint="checkpoint-topic",
             watermark_state="watermark-state",
@@ -376,9 +376,72 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
     bootstrap_kafka_resources(runtime, adapter=DummyAdapter())
 
     assert captured["ensure_topics"] == [
-        ["bsc_raw_blocks"],
+        ["bsc.raw_block"],
         ["dlq_ingestion", "watermark-state"],
     ]
     assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["schema_registry_url"] == "http://registry:8081"
+    assert captured["registry_started"] is True
+
+
+def test_bootstrap_kafka_resources_skips_protected_schema_topic(monkeypatch):
+    captured = {}
+
+    class DummyTopicManager:
+        def __init__(self, producer_config, logger=None):
+            captured["producer_config"] = producer_config
+            captured["logger"] = logger
+
+        def ensure_topics(self, topics):
+            captured.setdefault("ensure_topics", []).append(list(topics))
+
+        def ensure_compacted_topics(self, topics):
+            topic_list = list(topics)
+            captured.setdefault("ensure_compacted_topics", []).append(topic_list)
+            if topic_list == ["_schemas"]:
+                raise RuntimeError(
+                    "KafkaError{code=TOPIC_AUTHORIZATION_FAILED,val=29,str=\"Not authorized to alter_configs or topic is protected by 'kafka_nodelete_topics' or 'kafka_noproduce_topics'\"}"
+                )
+
+    class DummyRegistry:
+        def __init__(self, *, schema_registry_url, producer_config, topic_schemas, logger=None):
+            captured["schema_registry_url"] = schema_registry_url
+            captured["topic_schemas"] = topic_schemas
+            captured["registry_logger"] = logger
+
+        def start(self):
+            captured["registry_started"] = True
+
+    class DummyAdapter:
+        def build_protobuf_topic_schemas(self, *, topic_maps, entities):
+            captured["adapter_entities"] = list(entities)
+            return {"bsc.raw_block": object()}
+
+    runtime = SimpleNamespace(
+        kafka=SimpleNamespace(
+            config={"bootstrap.servers": "localhost:9092"},
+            protobuf_enabled=True,
+            schema_registry_url="http://registry:8081",
+        ),
+        topic_map=SimpleNamespace(
+            main={"block": "bsc.raw_block"},
+            dlq="dlq_ingestion",
+            checkpoint="checkpoint-topic",
+            watermark_state="watermark-state",
+        ),
+        checkpoint=SimpleNamespace(
+            topic="checkpoint-topic",
+            watermark_state_topic="watermark-state",
+        ),
+        chain=SimpleNamespace(type="evm", name="bsc", network="mainnet"),
+        entities=["block"],
+    )
+
+    monkeypatch.setattr("rpcstream.sinks.kafka.bootstrap.KafkaTopicManager", DummyTopicManager)
+    monkeypatch.setattr("rpcstream.sinks.kafka.bootstrap.ProtobufSerializerRegistry", DummyRegistry)
+
+    bootstrap_kafka_resources(runtime, adapter=DummyAdapter())
+
+    assert captured["ensure_topics"] == [["bsc.raw_block"], ["dlq_ingestion", "watermark-state"]]
+    assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["registry_started"] is True

@@ -72,7 +72,7 @@ def build_engine(*, sink, eos_enabled=False):
         processors={"trace": FailingTraceProcessor()},
         enricher=EvmEnricher(),
         sink=sink,
-        topics={"trace": "bsc_raw_traces"},
+        topics={"trace": "bsc.raw_trace"},
         dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
@@ -91,7 +91,7 @@ def build_success_engine(*, sink, eos_enabled=False):
         processors={"trace": SuccessfulTraceProcessor()},
         enricher=EvmEnricher(),
         sink=sink,
-        topics={"trace": "bsc_raw_traces"},
+        topics={"trace": "bsc.raw_trace"},
         dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
@@ -110,7 +110,7 @@ def build_backfill_engine(*, sink):
         processors={"trace": SuccessfulTraceProcessor()},
         enricher=EvmEnricher(),
         sink=sink,
-        topics={"trace": "bsc_raw_traces"},
+        topics={"trace": "bsc.raw_trace"},
         dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(
@@ -247,7 +247,7 @@ def test_engine_sends_business_rows_via_transaction_when_eos_enabled_without_che
     topic_rows = sink.sent_transactions[0]
     assert topic_rows == [
         (
-            "bsc_raw_traces",
+            "bsc.raw_trace",
             [{"type": "trace", "block_number": 95281318, "trace_id": "95281318-root"}],
         )
     ]
@@ -273,8 +273,8 @@ def test_engine_retries_upstream_not_ready_before_success(monkeypatch):
         decoder=None,
         sink=sink,
         topics={
-            "block": "bsc_raw_blocks",
-            "transaction": "bsc_enriched_transactions",
+            "block": "bsc.raw_block",
+            "transaction": "bsc.enriched_transaction",
         },
         dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(
@@ -304,11 +304,11 @@ def test_engine_retries_upstream_not_ready_before_success(monkeypatch):
     assert len(sink.sent_transactions) == 1
     assert sink.sent_transactions[0] == [
         (
-            "bsc_raw_blocks",
+            "bsc.raw_block",
             [{"type": "block", "cursor": 103151849, "value": {"type": "block", "block_number": 1}}],
         ),
         (
-            "bsc_enriched_transactions",
+            "bsc.enriched_transaction",
             [{"type": "transaction", "cursor": 103151849, "value": {"type": "transaction", "block_number": 1}}],
         ),
     ]
@@ -334,8 +334,8 @@ def test_engine_sends_dlq_after_exhausting_upstream_not_ready_retries(monkeypatc
         decoder=None,
         sink=sink,
         topics={
-            "block": "bsc_raw_blocks",
-            "transaction": "bsc_enriched_transactions",
+            "block": "bsc.raw_block",
+            "transaction": "bsc.enriched_transaction",
         },
         dlq_topic="dlq_ingestion",
         chain=SimpleNamespace(
@@ -453,8 +453,8 @@ def test_engine_eos_checkpoint_uses_contiguous_watermark():
     )
     watermark_manager = WatermarkManager(
         sink=sink,
-        topic="bsc_commit_watermark",
-        state_topic="bsc_cursor_state",
+        topic="bsc.commit_watermark",
+        state_topic="bsc.cursor_state",
         identity=identity,
         initial_cursor=99,
         flush_on_advance=False,
@@ -492,20 +492,20 @@ def test_engine_eos_checkpoint_uses_contiguous_watermark():
     assert watermark_manager.cursor == 101
     assert len(sink.sent_transactions) == 2
     assert sink.sent_transactions[0][0] == (
-        "bsc_raw_traces",
+        "bsc.raw_trace",
         [{"type": "trace", "block_number": 101, "trace_id": "101-root"}],
     )
     state_topic_101, state_rows_101 = sink.sent_transactions[0][1]
-    assert state_topic_101 == "bsc_cursor_state"
+    assert state_topic_101 == "bsc.cursor_state"
     assert len(state_rows_101) == 1
     assert state_rows_101[0]["cursor"] == 101
     assert state_rows_101[0]["status"] == "completed"
     assert sink.sent_transactions[1][0] == (
-        "bsc_raw_traces",
+        "bsc.raw_trace",
         [{"type": "trace", "block_number": 100, "trace_id": "100-root"}],
     )
     checkpoint_topic, checkpoint_rows = sink.sent_transactions[1][1]
-    assert checkpoint_topic == "bsc_commit_watermark"
+    assert checkpoint_topic == "bsc.commit_watermark"
     assert len(checkpoint_rows) == 1
     checkpoint_row = checkpoint_rows[0]
     assert checkpoint_row["cursor"] == 101
@@ -535,8 +535,8 @@ def test_engine_eos_sequential_success_does_not_write_cursor_state():
     )
     watermark_manager = WatermarkManager(
         sink=sink,
-        topic="bsc_commit_watermark",
-        state_topic="bsc_cursor_state",
+        topic="bsc.commit_watermark",
+        state_topic="bsc.cursor_state",
         identity=identity,
         initial_cursor=99,
         flush_on_advance=False,
@@ -558,11 +558,11 @@ def test_engine_eos_sequential_success_does_not_write_cursor_state():
 
     assert len(sink.sent_transactions) == 1
     assert sink.sent_transactions[0][0] == (
-        "bsc_raw_traces",
+        "bsc.raw_trace",
         [{"type": "trace", "block_number": 100, "trace_id": "100-root"}],
     )
     checkpoint_topic, checkpoint_rows = sink.sent_transactions[0][1]
-    assert checkpoint_topic == "bsc_commit_watermark"
+    assert checkpoint_topic == "bsc.commit_watermark"
     assert checkpoint_rows[0]["cursor"] == 100
 
 

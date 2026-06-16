@@ -291,7 +291,7 @@ def test_kafka_checkpoint_reader_consumer_config_enables_partition_eof():
         entities=("block",),
     )
     store = KafkaCheckpointReader(
-        topic="bsc_commit_watermark",
+        topic="bsc.commit_watermark",
         producer_config={"bootstrap.servers": "localhost:9092", "linger.ms": 50},
         identity=identity,
     )
@@ -329,7 +329,7 @@ def test_kafka_checkpoint_reader_returns_none_when_schema_is_missing(monkeypatch
 
     class FakeMetadata:
         def __init__(self):
-            self.topics = {"bsc_commit_watermark": FakeTopicMeta()}
+            self.topics = {"bsc.commit_watermark": FakeTopicMeta()}
 
     class FakeConsumer:
         def __init__(self, *_args, **_kwargs):
@@ -365,7 +365,7 @@ def test_kafka_checkpoint_reader_returns_none_when_schema_is_missing(monkeypatch
         entities=("block",),
     )
     reader = KafkaCheckpointReader(
-        topic="bsc_commit_watermark",
+        topic="bsc.commit_watermark",
         producer_config={"bootstrap.servers": "localhost:9092"},
         identity=identity,
         schema_registry_url="http://localhost:30081",
@@ -407,7 +407,7 @@ def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monke
 
     class FakeMetadata:
         def __init__(self):
-            self.topics = {"bsc_cursor_state": FakeTopicMeta()}
+            self.topics = {"bsc.cursor_state": FakeTopicMeta()}
 
     class FakeConsumer:
         def __init__(self, *_args, **_kwargs):
@@ -443,7 +443,7 @@ def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monke
         entities=("block",),
     )
     reader = KafkaWatermarkStateReader(
-        topic="bsc_cursor_state",
+        topic="bsc.cursor_state",
         producer_config={"bootstrap.servers": "localhost:9092"},
         identity=identity,
         schema_registry_url="http://localhost:30081",

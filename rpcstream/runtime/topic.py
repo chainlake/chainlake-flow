@@ -21,28 +21,27 @@ def normalize_entity(entity: str) -> str:
 
 
 def build_default_topic_namespace(cfg) -> str:
-    return f"{cfg.chain.name}"
-
-
-def _pluralize_topic_entity(entity: str) -> str:
-    normalized = normalize_entity(entity)
-    if normalized.endswith("s"):
-        return normalized
-    return f"{normalized}s"
+    chain_name = normalize_entity(str(cfg.chain.name))
+    network = normalize_entity(str(getattr(cfg.chain, "network", "") or ""))
+    if not network or network == "mainnet":
+        return chain_name
+    return f"{chain_name}_{network}"
 
 
 def build_topics(cfg, entity: str, adapter=None) -> TopicSet:
     template = (
         cfg.kafka.common.topic_template
-        or "{chain}_{kind}_{entity}"
+        or "{namespace}.{kind}_{entity}"
     )
-    topic_entity = _pluralize_topic_entity(entity)
+    namespace = build_default_topic_namespace(cfg)
+    topic_entity = normalize_entity(entity)
 
     def render(kind):
         return template.format(
             chain=cfg.chain.name,
             network=cfg.chain.network,
             type=cfg.chain.type,
+            namespace=namespace,
             entity=topic_entity,
             kind=kind,
         )
@@ -55,7 +54,7 @@ def build_topics(cfg, entity: str, adapter=None) -> TopicSet:
     kind = topic_kind_for_entity(entity)
     if entity == "token_transfer" or not kind:
         return TopicSet(
-            main=f"{build_default_topic_namespace(cfg)}_{topic_entity}",
+            main=f"{build_default_topic_namespace(cfg)}.{topic_entity}",
         )
 
     return TopicSet(
@@ -79,17 +78,13 @@ def build_checkpoint_topic(cfg) -> str:
     if configured:
         return configured
 
-    return f"{build_default_topic_namespace(cfg)}_commit_watermark"
+    return f"{build_default_topic_namespace(cfg)}.commit_watermark"
 
 
 def build_watermark_state_topic(cfg) -> str:
     checkpoint_topic = build_checkpoint_topic(cfg)
     if checkpoint_topic.endswith(".commit_watermark"):
         return checkpoint_topic.removesuffix(".commit_watermark") + ".cursor_state"
-    if checkpoint_topic.endswith("_commit_watermark"):
-        return checkpoint_topic.removesuffix("_commit_watermark") + "_cursor_state"
     if checkpoint_topic.endswith(".checkpoint_cursor"):
         return checkpoint_topic.removesuffix(".checkpoint_cursor") + ".cursor_state"
-    if checkpoint_topic.endswith("_checkpoint_cursor"):
-        return checkpoint_topic.removesuffix("_checkpoint_cursor") + "_cursor_state"
     return f"{checkpoint_topic}.cursor_state"

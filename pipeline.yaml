@@ -70,7 +70,7 @@ kafka:
   #    ca_path_env: KAFKA_CA_PATH     # omit if broker cert is signed by a public CA
   # ────────────────────────────────────────────────────────────────────────────
   common:
-    topic_template: "{chain}_{kind}_{entity}"
+    topic_template: "{namespace}.{kind}_{entity}"
   producer:
     linger_ms: 50
     batch_size: 65536

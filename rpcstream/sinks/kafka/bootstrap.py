@@ -61,7 +61,7 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
             "protobuf is enabled but schema registry url is missing; set KAFAK_SCHEMA_REGISTRY"
         )
 
-    topic_manager.ensure_compacted_topics([SCHEMA_REGISTRY_INTERNAL_TOPIC])
+    _ensure_schema_registry_internal_topic(topic_manager, logger=logger)
 
     protobuf_registry = ProtobufSerializerRegistry(
         schema_registry_url=runtime.kafka.schema_registry_url,
@@ -84,3 +84,29 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
             checkpoint_topic=runtime.checkpoint.topic,
             watermark_state_topic=runtime.checkpoint.watermark_state_topic,
         )
+
+
+def _ensure_schema_registry_internal_topic(topic_manager, logger=None) -> None:
+    try:
+        topic_manager.ensure_compacted_topics([SCHEMA_REGISTRY_INTERNAL_TOPIC])
+    except Exception as exc:
+        if not _is_topic_authorization_failed(exc):
+            raise
+
+        if logger:
+            logger.info(
+                "kafka.schema_registry_internal_topic_skipped",
+                component="sink",
+                topic=SCHEMA_REGISTRY_INTERNAL_TOPIC,
+                reason="topic is protected or alter_configs is not allowed",
+            )
+
+
+def _is_topic_authorization_failed(exc: Exception) -> bool:
+    text = str(exc)
+    return (
+        "TOPIC_AUTHORIZATION_FAILED" in text
+        or "kafka_nodelete_topics" in text
+        or "kafka_noproduce_topics" in text
+        or "alter_configs" in text
+    )
