@@ -53,8 +53,6 @@ data:
           ca_path_env: KAFKA_CA_PATH
       common:
         topic_template: "{type}_{chain}_{network}.{kind}_{entity}"
-      table_topic:
-        enabled: false
       producer:
         linger_ms: 50
         batch_size: 65536

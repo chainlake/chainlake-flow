@@ -71,8 +71,6 @@ kafka:
   # ────────────────────────────────────────────────────────────────────────────
   common:
     topic_template: "{type}_{chain}_{network}.{kind}_{entity}"
-  table_topic:
-    enabled: true # table topic for AutoMQ
   producer:
     linger_ms: 50
     batch_size: 65536

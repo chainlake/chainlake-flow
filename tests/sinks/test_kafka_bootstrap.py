@@ -332,12 +332,6 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
         def ensure_topics(self, topics):
             captured.setdefault("ensure_topics", []).append(list(topics))
 
-        def ensure_table_topics(self, topics, *, namespace):
-            captured["ensure_table_topics"] = {
-                "topics": list(topics),
-                "namespace": namespace,
-            }
-
         def ensure_compacted_topics(self, topics):
             captured.setdefault("ensure_compacted_topics", []).append(list(topics))
 
@@ -359,7 +353,6 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
     runtime = SimpleNamespace(
         kafka=SimpleNamespace(
             config={"bootstrap.servers": "localhost:9092"},
-            table_topic_enabled=True,
             protobuf_enabled=True,
             schema_registry_url="http://registry:8081",
         ),
@@ -381,11 +374,7 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
 
     bootstrap_kafka_resources(runtime, adapter=DummyAdapter())
 
-    assert captured["ensure_table_topics"] == {
-        "topics": ["evm_bsc_mainnet.raw_block"],
-        "namespace": "evm_bsc_mainnet",
-    }
-    assert captured["ensure_topics"] == [["dlq.ingestion", "watermark-state"]]
+    assert captured["ensure_topics"] == [["evm_bsc_mainnet.raw_block"], ["dlq.ingestion", "watermark-state"]]
     assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["schema_registry_url"] == "http://registry:8081"
     assert captured["registry_started"] is True

@@ -8,12 +8,6 @@ TOPIC_TIMESTAMP_VALUE = "LogAppendTime"
 TOPIC_CLEANUP_POLICY_CONFIG = "cleanup.policy"
 TOPIC_COMPACT_POLICY_VALUE = "compact"
 TOPIC_COMPACT_DELETE_POLICY_VALUE = "compact,delete"
-TABLE_TOPIC_ENABLE_CONFIG = "automq.table.topic.enable"
-TABLE_TOPIC_NAMESPACE_CONFIG = "automq.table.topic.namespace"
-TABLE_TOPIC_CONVERT_VALUE_TYPE_CONFIG = "automq.table.topic.convert.value.type"
-TABLE_TOPIC_CONVERT_VALUE_TYPE_BY_SCHEMA_ID = "by_schema_id"
-TABLE_TOPIC_TRANSFORM_VALUE_TYPE_CONFIG = "automq.table.topic.transform.value.type"
-TABLE_TOPIC_TRANSFORM_VALUE_TYPE_FLATTEN = "flatten"
 
 
 class KafkaTopicManager:
@@ -38,19 +32,6 @@ class KafkaTopicManager:
         )
         self._wait_for_topics(topics)
         self._ensure_compaction(topics)
-
-    def ensure_table_topics(self, topics: Iterable[str], *, namespace: str) -> None:
-        self._ensure_topics(
-            topics,
-            config={
-                TOPIC_TIMESTAMP_CONFIG: TOPIC_TIMESTAMP_VALUE,
-                TABLE_TOPIC_ENABLE_CONFIG: "true",
-                TABLE_TOPIC_NAMESPACE_CONFIG: namespace,
-                TABLE_TOPIC_CONVERT_VALUE_TYPE_CONFIG: TABLE_TOPIC_CONVERT_VALUE_TYPE_BY_SCHEMA_ID,
-                TABLE_TOPIC_TRANSFORM_VALUE_TYPE_CONFIG: TABLE_TOPIC_TRANSFORM_VALUE_TYPE_FLATTEN,
-            },
-        )
-        self._wait_for_topics(topics)
 
     def delete_topics(self, topics: Iterable[str]) -> None:
         from confluent_kafka.admin import AdminClient
