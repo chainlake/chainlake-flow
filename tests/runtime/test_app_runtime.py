@@ -29,7 +29,7 @@ def test_runtime_uses_eos_even_without_checkpoint(monkeypatch):
             eos_enabled=True,
             eos_init_timeout_sec=12,
         ),
-        topic_map=SimpleNamespace(main={"trace": "topic-a"}, dlq="dlq.ingestion"),
+        topic_map=SimpleNamespace(main={"trace": "topic-a"}, dlq="dlq_ingestion"),
         checkpoint=SimpleNamespace(
             topic="checkpoint-topic",
             watermark_state_topic="watermark-state-topic",

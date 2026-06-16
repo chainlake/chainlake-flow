@@ -63,7 +63,7 @@ def test_build_schema_registry_url_falls_back_to_pipeline_config():
     assert build_schema_registry_url(cfg) == "http://localhost:30081"
 
 
-def test_build_topic_maps_only_includes_main_and_dlq_topics():
+def test_build_topic_maps_includes_main_and_system_topics():
     cfg = SimpleNamespace(
         kafka=SimpleNamespace(common=SimpleNamespace(topic_template=None)),
         chain=SimpleNamespace(type="evm", name="bsc", network="mainnet"),
@@ -72,11 +72,11 @@ def test_build_topic_maps_only_includes_main_and_dlq_topics():
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["block"] == "evm_bsc_mainnet.raw_block"
-    assert topic_maps.main["trace"] == "evm_bsc_mainnet.raw_trace"
-    assert topic_maps.dlq == "dlq.ingestion"
-    assert topic_maps.checkpoint == "evm_bsc_mainnet.commit_watermark"
-    assert topic_maps.watermark_state == "evm_bsc_mainnet.cursor_state"
+    assert topic_maps.main["block"] == "bsc_raw_blocks"
+    assert topic_maps.main["trace"] == "bsc_raw_traces"
+    assert topic_maps.dlq == "dlq_ingestion"
+    assert topic_maps.checkpoint == "bsc_commit_watermark"
+    assert topic_maps.watermark_state == "bsc_cursor_state"
 
 
 def test_build_topic_maps_uses_enriched_topic_for_transactions():
@@ -88,7 +88,7 @@ def test_build_topic_maps_uses_enriched_topic_for_transactions():
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["transaction"] == "evm_bsc_mainnet.enriched_transaction"
+    assert topic_maps.main["transaction"] == "bsc_enriched_transactions"
 
 
 def test_build_topic_maps_supports_token_transfer_topic():
@@ -100,7 +100,7 @@ def test_build_topic_maps_supports_token_transfer_topic():
 
     topic_maps = build_topic_maps(cfg)
 
-    assert topic_maps.main["token_transfer"] == "evm_bsc_mainnet.token_transfer"
+    assert topic_maps.main["token_transfer"] == "bsc_token_transfers"
 
 
 def test_build_topic_maps_supports_custom_checkpoint_topic():

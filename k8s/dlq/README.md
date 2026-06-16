@@ -152,5 +152,5 @@ kubectl apply -f k8s/dlq/dlq-replay-job.yaml
 
 - Keep retry worker at one replica unless coordination is redesigned.
 - Replay works at block granularity, not single-event granularity.
-- Both retry and replay read latest DLQ state from `dlq.ingestion`.
+- Both retry and replay read latest DLQ state from `dlq_ingestion`.
 - If `pipeline.yaml` has `kafka.eos.enabled=true`, DLQ Kubernetes flows also use EOS writes.

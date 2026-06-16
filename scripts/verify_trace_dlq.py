@@ -46,7 +46,7 @@ class FailingTraceProcessor:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Trigger one synthetic trace processor failure and verify it lands in dlq.ingestion."
+        description="Trigger one synthetic trace processor failure and verify it lands in dlq_ingestion."
     )
     parser.add_argument(
         "--config",

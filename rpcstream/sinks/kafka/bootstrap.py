@@ -12,6 +12,8 @@ def all_topics(topic_maps) -> list[str]:
     topics.extend(topic_maps.main.values())
     if topic_maps.dlq:
         topics.append(topic_maps.dlq)
+    if getattr(topic_maps, "checkpoint", None):
+        topics.append(topic_maps.checkpoint)
     if getattr(topic_maps, "watermark_state", None):
         topics.append(topic_maps.watermark_state)
     return topics
@@ -38,7 +40,6 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
     )
 
     topic_manager.ensure_topics(business_topics(runtime.topic_map))
-
     topic_manager.ensure_topics(system_topics(runtime.topic_map))
     topic_manager.ensure_compacted_topics(
         [runtime.checkpoint.topic, runtime.checkpoint.watermark_state_topic]

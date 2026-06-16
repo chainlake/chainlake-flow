@@ -48,7 +48,7 @@ data:
         ssl:
           ca_path_env: KAFKA_CA_PATH
       common:
-        topic_template: "{type}_{chain}_{network}.{kind}_{entity}"
+        topic_template: "{chain}_{kind}_{entity}"
       producer:
         linger_ms: 50
         batch_size: 65536
