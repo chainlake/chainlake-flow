@@ -93,7 +93,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         schema_registry_type=schema_registry_type,
         checkpoint_topic=runtime.checkpoint.topic,
         watermark_state_topic=runtime.checkpoint.watermark_state_topic,
-        protobuf_enabled=runtime.kafka.protobuf_enabled,
         pipeline_start_cursor=pipeline_start_cursor,
         checkpoint_resume_enabled=(
             runtime.pipeline.mode == "backfill" or pipeline_start_cursor == "checkpoint"
