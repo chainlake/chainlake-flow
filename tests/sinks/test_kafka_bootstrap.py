@@ -16,7 +16,7 @@ def test_build_protobuf_topic_schemas_includes_main_and_system_topics():
             "block": "bsc.raw_block",
             "trace": "bsc.raw_trace",
         },
-        dlq="dlq_ingestion",
+        dlq="dlq.ingestion",
         checkpoint="bsc.commit_watermark",
         watermark_state="bsc.cursor_state",
     )
@@ -40,7 +40,7 @@ def test_build_protobuf_topic_schemas_includes_main_and_system_topics():
     assert set(schemas) == {
         "bsc.raw_block",
         "bsc.raw_trace",
-        "dlq_ingestion",
+        "dlq.ingestion",
         "bsc.commit_watermark",
         "bsc.cursor_state",
     }
@@ -51,7 +51,7 @@ def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
         main={
             "transaction": "bsc.enriched_transaction",
         },
-        dlq="dlq_ingestion",
+        dlq="dlq.ingestion",
         checkpoint="bsc.commit_watermark",
         watermark_state="bsc.cursor_state",
     )
@@ -68,7 +68,7 @@ def test_build_protobuf_topic_schemas_uses_enriched_transaction_topic():
 
     assert set(schemas) == {
         "bsc.enriched_transaction",
-        "dlq_ingestion",
+        "dlq.ingestion",
         "bsc.commit_watermark",
         "bsc.cursor_state",
     }
@@ -86,7 +86,7 @@ def test_kafka_writer_start_runs_protobuf_warmup():
         def __init__(self):
             self.started = False
             self.schema_registry_url = "https://registry.example.com"
-            self.topic_schemas = {"topic-a": object(), "dlq_ingestion": object()}
+            self.topic_schemas = {"topic-a": object(), "dlq.ingestion": object()}
 
         def start(self):
             self.started = True
@@ -98,7 +98,7 @@ def test_kafka_writer_start_runs_protobuf_warmup():
         logger=None,
         config=SimpleNamespace(batch_size=10, flush_interval_ms=10, queue_maxsize=10),
         producer_config={"bootstrap.servers": "localhost:9092"},
-        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq_ingestion"),
+        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq.ingestion"),
         protobuf_enabled=False,
     )
     writer.protobuf_registry = WarmupRegistry()
@@ -130,7 +130,7 @@ def test_kafka_writer_serializes_protobuf_lazily():
         logger=None,
         config=SimpleNamespace(batch_size=10, flush_interval_ms=10, queue_maxsize=10),
         producer_config={"bootstrap.servers": "localhost:9092"},
-        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq_ingestion"),
+        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq.ingestion"),
         protobuf_enabled=False,
     )
     writer.protobuf_registry = LazyRegistry()
@@ -177,7 +177,7 @@ def test_kafka_writer_wait_delivery_future_resolves_after_callback():
         logger=None,
         config=SimpleNamespace(batch_size=10, flush_interval_ms=1, queue_maxsize=10),
         producer_config={"bootstrap.servers": "localhost:9092"},
-        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq_ingestion"),
+        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq.ingestion"),
         protobuf_enabled=False,
     )
 
@@ -236,7 +236,7 @@ def test_kafka_writer_send_transaction_commits_business_and_checkpoint():
             "bootstrap.servers": "localhost:9092",
             "transactional.id": "tx-1",
         },
-        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq_ingestion"),
+        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq.ingestion"),
         protobuf_enabled=False,
         eos_enabled=True,
         eos_init_timeout_sec=12,
@@ -299,7 +299,7 @@ def test_kafka_writer_send_checkpoint_uses_common_message_envelope():
         logger=None,
         config=SimpleNamespace(batch_size=10, flush_interval_ms=1, queue_maxsize=10),
         producer_config={"bootstrap.servers": "localhost:9092"},
-        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq_ingestion"),
+        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq.ingestion"),
         protobuf_enabled=False,
     )
 
@@ -358,7 +358,7 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
         ),
         topic_map=SimpleNamespace(
             main={"block": "bsc.raw_block"},
-            dlq="dlq_ingestion",
+            dlq="dlq.ingestion",
             checkpoint="checkpoint-topic",
             watermark_state="watermark-state",
         ),
@@ -377,7 +377,7 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
 
     assert captured["ensure_topics"] == [
         ["bsc.raw_block"],
-        ["dlq_ingestion", "watermark-state"],
+        ["dlq.ingestion", "watermark-state"],
     ]
     assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["schema_registry_url"] == "http://registry:8081"
@@ -425,7 +425,7 @@ def test_bootstrap_kafka_resources_skips_protected_schema_topic(monkeypatch):
         ),
         topic_map=SimpleNamespace(
             main={"block": "bsc.raw_block"},
-            dlq="dlq_ingestion",
+            dlq="dlq.ingestion",
             checkpoint="checkpoint-topic",
             watermark_state="watermark-state",
         ),
@@ -442,6 +442,6 @@ def test_bootstrap_kafka_resources_skips_protected_schema_topic(monkeypatch):
 
     bootstrap_kafka_resources(runtime, adapter=DummyAdapter())
 
-    assert captured["ensure_topics"] == [["bsc.raw_block"], ["dlq_ingestion", "watermark-state"]]
+    assert captured["ensure_topics"] == [["bsc.raw_block"], ["dlq.ingestion", "watermark-state"]]
     assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["registry_started"] is True

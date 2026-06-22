@@ -295,6 +295,7 @@ async def _build_sink(
         topic_maps=runtime.topic_map,
         protobuf_enabled=runtime.kafka.protobuf_enabled,
         schema_registry_url=runtime.kafka.schema_registry_url,
+        schema_registry_type=runtime.kafka.schema_registry_type,
         protobuf_topic_schemas=adapter.build_protobuf_topic_schemas(
             topic_maps=runtime.topic_map,
             entities=runtime.entities,

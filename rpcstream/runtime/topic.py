@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-UNIFIED_DLQ_TOPIC = "dlq_ingestion"
+UNIFIED_DLQ_TOPIC = "dlq.ingestion"
 
 
 @dataclass

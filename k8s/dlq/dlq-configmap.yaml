@@ -57,8 +57,10 @@ data:
         batch_size: 100
         flush_interval_ms: 50
         queue_maxsize: 100
-      protobuf:
-        enabled: true
+      schemaRegistry:
+        enabled: true # false # if false, type and url will be discarded
+        type: avro # or protobuf (default avro)
+        url: "http://localhost:30081"
 
     telemetry:
       tracing:

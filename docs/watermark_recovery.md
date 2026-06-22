@@ -130,4 +130,6 @@ Operational note:
 - it is useful when you want to provision topics and pre-register schemas up
   front
 - it is not required before `rpcstream` ingestion starts, because the Kafka
-  writer auto-registers protobuf schemas on first use
+  writer auto-registers schema-registry definitions on first use
+- the default schema format is `avro`; use `kafka.schemaRegistry.type:
+  protobuf` if you want protobuf instead

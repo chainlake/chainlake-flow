@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import time
-import warnings
 from dataclasses import dataclass
 
 from confluent_kafka import Consumer, KafkaError, Producer, TopicPartition, OFFSET_BEGINNING, OFFSET_END
@@ -10,8 +9,8 @@ from confluent_kafka.serialization import MessageField, SerializationContext
 
 from rpcstream.sinks.kafka.protobuf import (
     DLQ_SCHEMA,
-    ProtobufSerializerRegistry,
-    build_message_class,
+    SchemaRegistrySerializerRegistry,
+    protobuf_message_to_dlq_record as _protobuf_message_to_dlq_record,
 )
 
 
@@ -33,6 +32,7 @@ class UnifiedDlqKafkaClient:
         producer_config: dict,
         schema_registry_url: str,
         group_id: str,
+        schema_registry_type: str = "protobuf",
         logger=None,
         auto_offset_reset: str = "earliest",
     ):
@@ -48,15 +48,17 @@ class UnifiedDlqKafkaClient:
             }
         )
         self._producer = Producer(_kafka_client_config(producer_config))
-        self._serializer_registry = ProtobufSerializerRegistry(
+        self._schema_registry_type = schema_registry_type
+        self._serializer_registry = SchemaRegistrySerializerRegistry(
             schema_registry_url=schema_registry_url,
             producer_config=producer_config,
             topic_schemas={topic: DLQ_SCHEMA},
             auto_register_schemas=False,
             logger=logger,
+            schema_format=schema_registry_type,
         )
         self._serializer_registry.prepare()
-        self._deserializer = _build_deserializer(schema_registry_url, producer_config)
+        self._deserializer = self._serializer_registry.build_deserializer(topic)
 
     def subscribe(self) -> None:
         self._consumer.subscribe([self.topic])
@@ -84,7 +86,10 @@ class UnifiedDlqKafkaClient:
             message.value(),
             SerializationContext(message.topic(), MessageField.VALUE),
         )
-        value = protobuf_message_to_dlq_record(record)
+        if self._schema_registry_type == "avro":
+            value = record
+        else:
+            value = _protobuf_message_to_dlq_record(record)
         key = message.key().decode("utf-8") if message.key() else None
         return DlqMessage(
             topic=message.topic(),
@@ -180,7 +185,10 @@ class UnifiedDlqKafkaClient:
             message.value(),
             SerializationContext(message.topic(), MessageField.VALUE),
         )
-        value = protobuf_message_to_dlq_record(record)
+        if self._schema_registry_type == "avro":
+            value = record
+        else:
+            value = _protobuf_message_to_dlq_record(record)
         key = message.key().decode("utf-8") if message.key() else None
         return DlqMessage(
             topic=message.topic(),
@@ -193,21 +201,7 @@ class UnifiedDlqKafkaClient:
 
 
 def protobuf_message_to_dlq_record(message) -> dict:
-    record = {}
-    for field in DLQ_SCHEMA.fields:
-        value = getattr(message, field.name)
-        if field.repeated:
-            record[field.name] = list(value)
-            continue
-
-        if field.scalar_type == "string":
-            record[field.name] = value or ""
-        elif field.scalar_type == "int64":
-            record[field.name] = int(value)
-        elif field.scalar_type == "bool":
-            record[field.name] = bool(value)
-        else:
-            record[field.name] = value
+    record = _protobuf_message_to_dlq_record(message)
 
     for field_name in ("payload", "context"):
         raw = record.get(field_name)
@@ -222,38 +216,6 @@ def protobuf_message_to_dlq_record(message) -> dict:
     if record.get("next_retry_at") == 0:
         record["next_retry_at"] = None
     return record
-
-
-def _build_deserializer(schema_registry_url: str, producer_config: dict):
-    with warnings.catch_warnings():
-        try:
-            from authlib.deprecate import AuthlibDeprecationWarning
-        except Exception:
-            AuthlibDeprecationWarning = DeprecationWarning
-
-        warnings.filterwarnings(
-            "ignore",
-            category=AuthlibDeprecationWarning,
-            module=r"authlib\._joserfc_helpers",
-        )
-
-        from confluent_kafka.schema_registry import SchemaRegistryClient
-        from confluent_kafka.schema_registry.protobuf import ProtobufDeserializer
-
-    client = SchemaRegistryClient(_schema_registry_conf(schema_registry_url, producer_config))
-    return ProtobufDeserializer(
-        build_message_class(DLQ_SCHEMA),
-        schema_registry_client=client,
-    )
-
-
-def _schema_registry_conf(schema_registry_url: str, producer_config: dict) -> dict:
-    username = producer_config.get("sasl.username")
-    password = producer_config.get("sasl.password")
-    conf = {"url": schema_registry_url}
-    if username and password:
-        conf["basic.auth.user.info"] = f"{username}:{password}"
-    return conf
 
 
 def _kafka_client_config(producer_config: dict) -> dict:

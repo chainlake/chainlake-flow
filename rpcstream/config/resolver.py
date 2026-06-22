@@ -5,6 +5,7 @@ from rpcstream.adapters import build_chain_adapter
 from rpcstream.config.builder import (
     build_erpc_endpoint,
     build_kafka_config,
+    build_schema_registry_config,
     build_schema_registry_url,
     build_topic_maps,
 )
@@ -18,8 +19,10 @@ from rpcstream.runtime.topic import TopicMaps
 class KafkaRuntime:
     config: Dict[str, Any]
     streaming: any
-    protobuf_enabled: bool
+    schema_registry_enabled: bool
+    schema_registry_type: str | None
     schema_registry_url: str | None
+    protobuf_enabled: bool
     eos_enabled: bool
     transactional_id: str | None
     eos_init_timeout_sec: float
@@ -99,8 +102,12 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
     kafka = KafkaRuntime(
         config=kafka_config,
         streaming=cfg.kafka.streaming,
-        protobuf_enabled=cfg.kafka.protobuf.enabled,
+        schema_registry_enabled=bool(schema_registry := build_schema_registry_config(cfg)),
+        schema_registry_type=schema_registry["type"] if schema_registry else None,
         schema_registry_url=build_schema_registry_url(cfg),
+        protobuf_enabled=bool(
+            schema_registry and schema_registry["type"] == "protobuf"
+        ),
         eos_enabled=cfg.kafka.eos.enabled,
         transactional_id=kafka_config.get("transactional.id"),
         eos_init_timeout_sec=cfg.kafka.eos.init_timeout_sec,

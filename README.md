@@ -17,7 +17,7 @@ Current implementation is centered on:
 
 - EVM chains
 - Kafka as the sink
-- Protobuf + Schema Registry
+- Avro by default, with optional protobuf via Schema Registry
 - `commit_watermark` and `cursor_state` based recovery
 
 Planned or partial work exists for additional chains and sinks, but the README below reflects the current runnable system.
@@ -113,10 +113,19 @@ rpcstream init
 ```
 
 This is an optional environment-preparation step.
-It creates the Kafka topics and pre-registers protobuf schemas from
-`pipeline.yaml`, but ingestion does not depend on it.
-`rpcstream` can still start without it because protobuf schemas are
-auto-registered on first use.
+It creates the Kafka topics and pre-registers schema-registry definitions from
+`pipeline.yaml`. The default format is `avro`, but `protobuf` is also
+supported.
+`rpcstream` can still start without it because schemas are auto-registered on
+first use.
+
+If you want protobuf instead of the default avro, set:
+
+```yaml
+kafka:
+  schemaRegistry:
+    type: protobuf
+```
 
 ### Benchmark dashboard
 
@@ -160,7 +169,7 @@ rpcstream config print
 - entities to ingest
 - RPC endpoint and inflight settings
 - Kafka connection and topic pattern
-- protobuf and schema registry
+- schema registry settings (`enabled`, `type: avro|protobuf`, `url`)
 - EOS settings
 - telemetry
 
@@ -198,13 +207,13 @@ Progress and recovery use:
 
 - `bsc.commit_watermark`
 - `bsc.cursor_state`
-- `dlq_ingestion`
+- `dlq.ingestion`
 
 High-level meaning:
 
 - `commit_watermark`: the last contiguous successfully committed cursor
 - `cursor_state`: gap-only state used to explain and recover holes
-- `dlq_ingestion`: failure records used for retry and replay
+- `dlq.ingestion`: failure records used for retry and replay
 
 Detailed behavior is documented in:
 

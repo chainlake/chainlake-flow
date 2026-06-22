@@ -53,8 +53,10 @@ data:
         batch_size: 100          # micro-batch size
         flush_interval_ms: 50    # max wait time
         queue_maxsize: 100       # backpressure control
-      protobuf:
-        enabled: true
+      schemaRegistry:
+        enabled: true # false # if false, type and url will be discarded
+        type: avro # or protobuf (default avro)
+        url: "http://localhost:30081"
 
     telemetry:
       tracing:

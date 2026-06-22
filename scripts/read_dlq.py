@@ -20,7 +20,7 @@ from rpcstream.sinks.kafka.dlq import UnifiedDlqKafkaClient  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read and decode protobuf records from the unified DLQ topic."
+        description="Read and decode schema-registry records from the unified DLQ topic."
     )
     parser.add_argument(
         "--config",
@@ -67,14 +67,27 @@ def main() -> int:
     args = parse_args()
     config_path = Path(args.config).resolve()
     runtime = resolve(load_pipeline_config(str(config_path)))
+    schema_registry_enabled = getattr(
+        runtime.kafka,
+        "schema_registry_enabled",
+        getattr(runtime.kafka, "protobuf_enabled", False),
+    )
+    schema_registry_type = getattr(
+        runtime.kafka,
+        "schema_registry_type",
+        "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+    )
 
-    if not runtime.kafka.schema_registry_url:
-        raise SystemExit("protobuf DLQ decoding requires KAFKA_SCHEMA_REGISTRY or KAFAK_SCHEMA_REGISTRY")
+    if not schema_registry_enabled:
+        raise SystemExit(
+            "schema registry decoding requires KAFKA_SCHEMA_REGISTRY or KAFAK_SCHEMA_REGISTRY"
+        )
 
     client = UnifiedDlqKafkaClient(
         topic=runtime.topic_map.dlq,
         producer_config=runtime.kafka.config,
         schema_registry_url=runtime.kafka.schema_registry_url,
+        schema_registry_type=schema_registry_type or "protobuf",
         group_id=args.group_id,
         auto_offset_reset=args.offset,
     )

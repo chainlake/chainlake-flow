@@ -51,8 +51,19 @@ Semantics:
   bounded backfill
 - `rpcstream init`
   optional environment preparation only; it creates topics and pre-registers
-  protobuf schemas, but it is not required before starting ingestion because
-  schemas are auto-registered on first write
+  schema-registry definitions, but it is not required before starting
+  ingestion because schemas are auto-registered on first write. The default
+  format is `avro`; set `kafka.schemaRegistry.type: protobuf` to use protobuf.
+
+  Example:
+
+  ```yaml
+  kafka:
+    schemaRegistry:
+      enabled: true
+      type: avro
+      url: "http://localhost:30081"
+  ```
 - `rpcstream benchmark`
   benchmark runtime with a live progress dashboard, cursor timing details,
   recent info-level logs, and explicit EOS control via `--eos-enabled true|false`

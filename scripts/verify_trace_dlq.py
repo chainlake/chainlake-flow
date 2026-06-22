@@ -46,7 +46,7 @@ class FailingTraceProcessor:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Trigger one synthetic trace processor failure and verify it lands in dlq_ingestion."
+        description="Trigger one synthetic trace processor failure and verify it lands in dlq.ingestion."
     )
     parser.add_argument(
         "--config",
@@ -112,6 +112,11 @@ def main() -> int:
 
 
 async def send_one_trace_dlq(runtime, logger, marker: str, block_number: int) -> None:
+    schema_registry_type = getattr(
+        runtime.kafka,
+        "schema_registry_type",
+        "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+    )
     writer = KafkaWriter(
         producer=Producer(runtime.kafka.config),
         id_calculator=EventIdCalculator(),
@@ -122,6 +127,7 @@ async def send_one_trace_dlq(runtime, logger, marker: str, block_number: int) ->
         topic_maps=runtime.topic_map,
         protobuf_enabled=runtime.kafka.protobuf_enabled,
         schema_registry_url=runtime.kafka.schema_registry_url,
+        schema_registry_type=schema_registry_type,
         protobuf_topic_schemas=build_protobuf_topic_schemas(runtime.topic_map, runtime.entities),
         observability=ObservabilityContext.disabled(),
         eos_enabled=runtime.kafka.eos_enabled,
@@ -157,16 +163,27 @@ async def send_one_trace_dlq(runtime, logger, marker: str, block_number: int) ->
 
 def build_verifier_consumer(runtime, marker: str):
     group_id = f"rpcstream-dlq-verify-{marker}"
-    if runtime.kafka.protobuf_enabled:
+    schema_registry_enabled = getattr(
+        runtime.kafka,
+        "schema_registry_enabled",
+        getattr(runtime.kafka, "protobuf_enabled", False),
+    )
+    schema_registry_type = getattr(
+        runtime.kafka,
+        "schema_registry_type",
+        "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+    )
+    if schema_registry_enabled:
         if not runtime.kafka.schema_registry_url:
             raise SystemExit(
-                "protobuf DLQ verification requires KAFKA_SCHEMA_REGISTRY or KAFAK_SCHEMA_REGISTRY"
+                "schema registry verification requires KAFKA_SCHEMA_REGISTRY or KAFAK_SCHEMA_REGISTRY"
             )
         return ProtobufDlqVerifier(
             UnifiedDlqKafkaClient(
                 topic=runtime.topic_map.dlq,
                 producer_config=runtime.kafka.config,
                 schema_registry_url=runtime.kafka.schema_registry_url,
+                schema_registry_type=schema_registry_type or "protobuf",
                 group_id=group_id,
                 auto_offset_reset="latest",
             )

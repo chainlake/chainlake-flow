@@ -2,7 +2,7 @@
 
 `chainlake-flow` uses one unified DLQ topic:
 
-- topic: `dlq_ingestion`
+- topic: `dlq.ingestion`
 
 This topic stores the latest state of failed ingestion records and is used by:
 
@@ -25,7 +25,7 @@ Each DLQ record has one of these statuses:
 
 ## When A Record Enters DLQ
 
-A record is written into `dlq_ingestion` when ingestion cannot complete for a block/entity.
+A record is written into `dlq.ingestion` when ingestion cannot complete for a block/entity.
 
 Typical cases:
 
@@ -60,7 +60,7 @@ The DLQ record includes:
 
 Behavior:
 
-- consumes `dlq_ingestion`
+- consumes `dlq.ingestion`
 - only considers records whose latest status is retryable
 - checks retry timing and retry budget
 - re-runs ingestion for the record's `block_number`
@@ -79,7 +79,7 @@ Use `retry` for:
 
 Behavior:
 
-- scans the latest records in `dlq_ingestion`
+- scans the latest records in `dlq.ingestion`
 - filters by conditions such as `entity`, `status`, `stage`
 - extracts matching `block_number` values
 - re-runs the normal ingestion flow for those blocks
@@ -181,7 +181,7 @@ kafka:
 then all Kafka write paths use EOS transactions, including:
 
 - main raw topics
-- `dlq_ingestion`
+- `dlq.ingestion`
 - retry result writes
 - replay result writes
 - resolved-state writes

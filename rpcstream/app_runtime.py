@@ -57,6 +57,16 @@ def build_runtime_stack(
         config = load_pipeline_config(config_path)
     runtime = resolve(config)
     adapter = build_chain_adapter(runtime.chain.type)
+    schema_registry_enabled = getattr(
+        runtime.kafka,
+        "schema_registry_enabled",
+        getattr(runtime.kafka, "protobuf_enabled", False),
+    )
+    schema_registry_type = getattr(
+        runtime.kafka,
+        "schema_registry_type",
+        "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+    )
     observability = build_observability(runtime.observability.config, runtime.pipeline.name)
     logger = JsonLogger(
         level=config.logLevel,
@@ -116,9 +126,10 @@ def build_runtime_stack(
             identity=checkpoint_identity,
             schema_registry_url=(
                 runtime.kafka.schema_registry_url
-                if runtime.kafka.protobuf_enabled
+                if schema_registry_enabled
                 else None
             ),
+            schema_registry_type=schema_registry_type or "protobuf",
             logger=logger,
         )
         checkpoint_record = checkpoint_reader.load()
@@ -130,9 +141,10 @@ def build_runtime_stack(
             identity=checkpoint_identity,
             schema_registry_url=(
                 runtime.kafka.schema_registry_url
-                if runtime.kafka.protobuf_enabled
+                if schema_registry_enabled
                 else None
             ),
+            schema_registry_type=schema_registry_type or "protobuf",
             logger=logger,
         )
         state_records = state_reader.load()
@@ -148,6 +160,7 @@ def build_runtime_stack(
         topic_maps=runtime.topic_map,
         protobuf_enabled=runtime.kafka.protobuf_enabled,
         schema_registry_url=runtime.kafka.schema_registry_url,
+        schema_registry_type=schema_registry_type,
         protobuf_topic_schemas=adapter.build_protobuf_topic_schemas(
             topic_maps=runtime.topic_map,
             entities=runtime.entities,

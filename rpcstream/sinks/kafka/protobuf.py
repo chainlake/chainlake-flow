@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import warnings
 
@@ -18,8 +19,14 @@ TYPE_MAP = {
     "bool": "bool",
 }
 
+AVRO_TYPE_MAP = {
+    "string": "string",
+    "int64": "long",
+    "bool": "boolean",
+}
 
-class ProtobufSerializerRegistry:
+
+class SchemaRegistrySerializerRegistry:
     def __init__(
         self,
         schema_registry_url: str,
@@ -27,12 +34,14 @@ class ProtobufSerializerRegistry:
         topic_schemas: dict[str, EntitySchema],
         auto_register_schemas: bool = True,
         logger=None,
+        schema_format: str = "protobuf",
     ):
         self.schema_registry_url = schema_registry_url
         self.producer_config = producer_config
         self.topic_schemas = topic_schemas
         self.auto_register_schemas = auto_register_schemas
         self.logger = logger
+        self.schema_format = _normalize_schema_format(schema_format)
         self._serializers = {}
         self._started = False
 
@@ -47,15 +56,18 @@ class ProtobufSerializerRegistry:
             return
         self.prepare()
         for topic, schema in self.topic_schemas.items():
-            self._serializers[topic]["serializer"](
-                self._serializers[topic]["message_class"](),
+            entry = self._serializers[topic]
+            payload = self._empty_payload(entry["schema"])
+            entry["serializer"](
+                payload,
                 self._serialization_context(topic),
             )
             if self.logger:
                 self.logger.debug(
-                    "kafka.protobuf_schema_ready",
+                    "kafka.schema_ready",
                     component="sink",
                     topic=topic,
+                    schema_format=self.schema_format,
                     message_name=schema.message_name,
                     schema_registry=self.schema_registry_url,
                 )
@@ -66,28 +78,80 @@ class ProtobufSerializerRegistry:
         if entry is None:
             schema = self.topic_schemas.get(topic)
             if schema is None:
-                raise KeyError(f"missing protobuf serializer for topic {topic}")
+                raise KeyError(f"missing schema serializer for topic {topic}")
             entry = self._build_serializer(topic, schema)
             self._serializers[topic] = entry
 
-        message = entry["message_class"]()
-        self._populate_message(message, entry["schema"], row)
-        return entry["serializer"](message, self._serialization_context(topic))
+        if self.schema_format == "protobuf":
+            message = entry["message_class"]()
+            self._populate_message(message, entry["schema"], row)
+            return entry["serializer"](message, self._serialization_context(topic))
+
+        normalized = self._normalize_record(entry["schema"], row)
+        return entry["serializer"](normalized, self._serialization_context(topic))
+
+    def build_deserializer(self, topic: str):
+        entry = self._serializers.get(topic)
+        if entry is None:
+            schema = self.topic_schemas.get(topic)
+            if schema is None:
+                raise KeyError(f"missing schema serializer for topic {topic}")
+            entry = self._build_serializer(topic, schema)
+            self._serializers[topic] = entry
+
+        return entry["deserializer"]
 
     def _build_serializer(self, topic: str, schema: EntitySchema) -> dict:
-        SchemaRegistryClient, ProtobufSerializer = _import_schema_registry_components()
+        SchemaRegistryClient, SerializerCls, DeserializerCls = _import_schema_registry_components(
+            self.schema_format
+        )
 
         client = SchemaRegistryClient(self._schema_registry_conf())
-        message_class = build_message_class(schema)
-        serializer = ProtobufSerializer(
-            message_class,
+        if self.schema_format == "protobuf":
+            message_class = build_message_class(schema)
+            serializer = _instantiate_schema_registry_serializer(
+                SerializerCls,
+                client,
+                schema,
+                schema_format=self.schema_format,
+                message_class=message_class,
+                auto_register_schemas=self.auto_register_schemas,
+            )
+            deserializer = _instantiate_schema_registry_deserializer(
+                DeserializerCls,
+                client,
+                schema,
+                schema_format=self.schema_format,
+                message_class=message_class,
+            )
+            return {
+                "schema": schema,
+                "message_class": message_class,
+                "serializer": serializer,
+                "deserializer": deserializer,
+            }
+
+        avro_schema = build_avro_schema(schema)
+        serializer = _instantiate_schema_registry_serializer(
+            SerializerCls,
             client,
-            conf={"auto.register.schemas": self.auto_register_schemas},
+            schema,
+            schema_format=self.schema_format,
+            avro_schema=avro_schema,
+            auto_register_schemas=self.auto_register_schemas,
+        )
+        deserializer = _instantiate_schema_registry_deserializer(
+            DeserializerCls,
+            client,
+            schema,
+            schema_format=self.schema_format,
+            avro_schema=avro_schema,
         )
         return {
             "schema": schema,
-            "message_class": message_class,
+            "avro_schema": avro_schema,
             "serializer": serializer,
+            "deserializer": deserializer,
         }
 
     def _schema_registry_conf(self) -> dict:
@@ -103,6 +167,20 @@ class ProtobufSerializerRegistry:
         from confluent_kafka.serialization import MessageField, SerializationContext
 
         return SerializationContext(topic, MessageField.VALUE)
+
+    def _empty_payload(self, schema: EntitySchema):
+        if self.schema_format == "protobuf":
+            return build_message_class(schema)()
+        return {}
+
+    def _normalize_record(self, schema: EntitySchema, row: dict) -> dict:
+        normalized: dict[str, object] = {}
+        for field in schema.fields:
+            value = row.get(field.name)
+            if value is None:
+                continue
+            normalized[field.name] = normalize_value(field, value)
+        return normalized
 
     def _populate_message(self, message, schema: EntitySchema, row: dict) -> None:
         for field in schema.fields:
@@ -171,7 +249,33 @@ def build_message_class(schema: EntitySchema):
     return message_factory.GetMessageClass(descriptor)
 
 
-def _import_schema_registry_components():
+def build_avro_schema(schema: EntitySchema) -> str:
+    avro_fields = []
+    for field in schema.fields:
+        avro_type = AVRO_TYPE_MAP[field.scalar_type]
+        if field.repeated:
+            avro_type = {"type": "array", "items": avro_type}
+        avro_fields.append(
+            {
+                "name": field.name,
+                "type": ["null", avro_type],
+                "default": None,
+            }
+        )
+
+    return json.dumps(
+        {
+            "type": "record",
+            "name": schema.message_name,
+            "namespace": schema.package,
+            "fields": avro_fields,
+        },
+        separators=(",", ":"),
+    )
+
+
+def _import_schema_registry_components(schema_format: str = "protobuf"):
+    schema_format = _normalize_schema_format(schema_format)
     with warnings.catch_warnings():
         try:
             from authlib.deprecate import AuthlibDeprecationWarning
@@ -185,6 +289,171 @@ def _import_schema_registry_components():
         )
 
         from confluent_kafka.schema_registry import SchemaRegistryClient
-        from confluent_kafka.schema_registry.protobuf import ProtobufSerializer
 
-    return SchemaRegistryClient, ProtobufSerializer
+        if schema_format == "protobuf":
+            from confluent_kafka.schema_registry.protobuf import (
+                ProtobufDeserializer,
+                ProtobufSerializer,
+            )
+
+            return SchemaRegistryClient, ProtobufSerializer, ProtobufDeserializer
+
+        from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
+
+        return SchemaRegistryClient, AvroSerializer, AvroDeserializer
+
+
+def _instantiate_schema_registry_serializer(
+    serializer_cls,
+    client,
+    schema: EntitySchema,
+    *,
+    schema_format: str,
+    message_class=None,
+    avro_schema: str | None = None,
+    auto_register_schemas: bool,
+):
+    if schema_format == "protobuf":
+        candidates = (
+            {
+                "schema_registry_client": client,
+                "message_type": message_class,
+                "conf": {"auto.register.schemas": auto_register_schemas},
+            },
+            {
+                "schema_registry_client": client,
+                "message_class": message_class,
+                "conf": {"auto.register.schemas": auto_register_schemas},
+            },
+            {
+                "schema_registry_client": client,
+                "message_class": message_class,
+            },
+        )
+    else:
+        candidates = (
+            {
+                "schema_registry_client": client,
+                "schema_str": avro_schema,
+                "to_dict": lambda value, _ctx: value,
+                "conf": {"auto.register.schemas": auto_register_schemas},
+            },
+            {
+                "schema_registry_client": client,
+                "schema_str": avro_schema,
+                "to_dict": lambda value, _ctx: value,
+            },
+            {
+                "schema_registry_client": client,
+                "schema_str": avro_schema,
+            },
+        )
+
+    for candidate in candidates:
+        try:
+            return serializer_cls(**candidate)
+        except TypeError:
+            continue
+
+    if schema_format == "protobuf":
+        return serializer_cls(message_class, client)
+    return serializer_cls(client, avro_schema)
+
+
+def _instantiate_schema_registry_deserializer(
+    deserializer_cls,
+    client,
+    schema: EntitySchema,
+    *,
+    schema_format: str,
+    message_class=None,
+    avro_schema: str | None = None,
+):
+    if schema_format == "protobuf":
+        candidates = (
+            {
+                "schema_registry_client": client,
+                "message_type": message_class,
+            },
+            {
+                "schema_registry_client": client,
+                "message_class": message_class,
+            },
+        )
+    else:
+        candidates = (
+            {
+                "schema_registry_client": client,
+                "from_dict": lambda value, _ctx: value,
+            },
+            {
+                "schema_registry_client": client,
+                "schema_str": avro_schema,
+                "from_dict": lambda value, _ctx: value,
+            },
+        )
+
+    for candidate in candidates:
+        try:
+            return deserializer_cls(**candidate)
+        except TypeError:
+            continue
+
+    if schema_format == "protobuf":
+        return deserializer_cls(message_class, schema_registry_client=client)
+    return deserializer_cls(schema_registry_client=client)
+
+
+def _normalize_schema_format(schema_format: str) -> str:
+    normalized = str(schema_format).strip().lower()
+    if normalized not in {"avro", "protobuf"}:
+        raise ValueError("schema registry format must be avro or protobuf")
+    return normalized
+
+
+def _record_to_dict(message, schema: EntitySchema) -> dict:
+    record = {}
+    for field in schema.fields:
+        value = getattr(message, field.name)
+        if field.repeated:
+            record[field.name] = list(value)
+            continue
+
+        if field.scalar_type == "string":
+            record[field.name] = value or ""
+        elif field.scalar_type == "int64":
+            record[field.name] = int(value)
+        elif field.scalar_type == "bool":
+            record[field.name] = bool(value)
+        else:
+            record[field.name] = value
+    return record
+
+
+def protobuf_message_to_dlq_record(message) -> dict:
+    record = _record_to_dict(message, DLQ_SCHEMA)
+
+    for field_name in ("payload", "context"):
+        raw = record.get(field_name)
+        if raw:
+            try:
+                record[field_name] = json.loads(raw)
+            except json.JSONDecodeError:
+                record[field_name] = {"raw": raw}
+        else:
+            record[field_name] = {}
+
+    if record.get("next_retry_at") == 0:
+        record["next_retry_at"] = None
+    return record
+
+
+def checkpoint_message_to_record(message) -> dict:
+    return _record_to_dict(message, CHECKPOINT_SCHEMA)
+
+
+def watermark_state_message_to_record(message) -> dict:
+    return _record_to_dict(message, WATERMARK_STATE_SCHEMA)
+
+
+ProtobufSerializerRegistry = SchemaRegistrySerializerRegistry

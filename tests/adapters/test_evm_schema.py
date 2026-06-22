@@ -5,6 +5,7 @@ import pytest
 from rpcstream.adapters.evm.schema import EVM_ENTITY_SCHEMAS
 from rpcstream.sinks.kafka.protobuf import (
     ProtobufSerializerRegistry,
+    build_avro_schema,
     _import_schema_registry_components,
     build_message_class,
     normalize_scalar,
@@ -32,6 +33,13 @@ def test_protobuf_message_class_contains_trace_address_field():
 
 def test_normalize_scalar_serializes_complex_values_as_json_strings():
     assert normalize_scalar("string", {"hello": "world"}) == '{"hello":"world"}'
+
+
+def test_build_avro_schema_uses_nullable_fields_and_arrays():
+    schema = build_avro_schema(EVM_ENTITY_SCHEMAS["trace"])
+
+    assert '"name":"trace_address"' in schema
+    assert '"type":["null",{"type":"array","items":"long"}]' in schema
 
 
 def test_schema_registry_conf_uses_basic_auth_user_info_only():

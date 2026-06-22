@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional
+
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from rpcstream.runtime.observability.config import ObservabilityConfig
 
 
@@ -36,9 +37,27 @@ class KafkaStreaming(BaseModel):
     queue_maxsize: int = 100
 
 
-class KafkaProtobuf(BaseModel):
+class KafkaSchemaRegistry(BaseModel):
     enabled: bool = True
-    schema_registry_url: str = "http://localhost:30081"
+    type: str = "avro"
+    url: str = Field(
+        default="http://localhost:30081",
+        validation_alias=AliasChoices("url", "schema_registry_url"),
+    )
+
+    @model_validator(mode="after")
+    def validate_schema_registry(self):
+        schema_type = str(self.type).strip().lower()
+        if schema_type not in {"avro", "protobuf"}:
+            raise ValueError("kafka.schemaRegistry.type must be avro or protobuf")
+        self.type = schema_type
+
+        url = str(self.url).strip()
+        if not url:
+            raise ValueError("kafka.schemaRegistry.url must not be empty")
+        self.url = url
+
+        return self
 
 
 class KafkaEos(BaseModel):
@@ -55,8 +74,33 @@ class KafkaConfig(BaseModel):
     common: KafkaCommon
     producer: KafkaProducer
     streaming: KafkaStreaming
-    protobuf: KafkaProtobuf = Field(default_factory=KafkaProtobuf)
+    schemaRegistry: KafkaSchemaRegistry = Field(
+        default_factory=KafkaSchemaRegistry,
+        validation_alias=AliasChoices("schemaRegistry", "protobuf"),
+    )
     eos: KafkaEos = Field(default_factory=KafkaEos)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_schema_registry(cls, values):
+        if not isinstance(values, dict):
+            return values
+
+        if "schemaRegistry" in values or "protobuf" not in values:
+            return values
+
+        legacy = values.get("protobuf") or {}
+        if isinstance(legacy, BaseModel):
+            legacy = legacy.model_dump()
+        elif not isinstance(legacy, dict):
+            legacy = dict(getattr(legacy, "__dict__", {}))
+
+        migrated = dict(legacy)
+        migrated.setdefault("type", "protobuf")
+
+        copied = dict(values)
+        copied["schemaRegistry"] = migrated
+        return copied
 
 
 class ChainConfig(BaseModel):

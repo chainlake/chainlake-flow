@@ -4,7 +4,6 @@ import asyncio
 import contextlib
 import hashlib
 import time
-import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,8 +13,9 @@ from rpcstream.metrics.watermark import WatermarkMetrics
 from rpcstream.sinks.kafka.protobuf import (
     CHECKPOINT_SCHEMA,
     WATERMARK_STATE_SCHEMA,
-    ProtobufSerializerRegistry,
-    build_message_class,
+    SchemaRegistrySerializerRegistry,
+    checkpoint_message_to_record,
+    watermark_state_message_to_record,
 )
 
 
@@ -168,12 +168,14 @@ class KafkaCheckpointReader:
         producer_config: dict,
         identity: CheckpointIdentity,
         schema_registry_url: str | None = None,
+        schema_registry_type: str = "protobuf",
         logger=None,
     ):
         self.topic = topic
         self.producer_config = producer_config
         self.identity = identity
         self.schema_registry_url = schema_registry_url
+        self.schema_registry_type = schema_registry_type
         self.logger = logger
         self._producer = None
         self._serializer_registry = None
@@ -181,15 +183,16 @@ class KafkaCheckpointReader:
         self.schema_missing = False
 
         if self.schema_registry_url:
-            self._serializer_registry = ProtobufSerializerRegistry(
+            self._serializer_registry = SchemaRegistrySerializerRegistry(
                 schema_registry_url=self.schema_registry_url,
                 producer_config=self.producer_config,
                 topic_schemas={self.topic: CHECKPOINT_SCHEMA},
                 auto_register_schemas=False,
                 logger=logger,
+                schema_format=self.schema_registry_type,
             )
             self._serializer_registry.prepare()
-            self._deserializer = self._build_deserializer()
+            self._deserializer = self._serializer_registry.build_deserializer(self.topic)
 
     def load(self) -> CheckpointRecord | None:
         from confluent_kafka import Consumer, KafkaError, TopicPartition
@@ -286,29 +289,9 @@ class KafkaCheckpointReader:
             payload,
             SerializationContext(self.topic, MessageField.VALUE),
         )
+        if self.schema_registry_type == "avro":
+            return message
         return checkpoint_message_to_record(message)
-
-    def _build_deserializer(self):
-        with warnings.catch_warnings():
-            try:
-                from authlib.deprecate import AuthlibDeprecationWarning
-            except Exception:
-                AuthlibDeprecationWarning = DeprecationWarning
-
-            warnings.filterwarnings(
-                "ignore",
-                category=AuthlibDeprecationWarning,
-                module=r"authlib\._joserfc_helpers",
-            )
-
-            from confluent_kafka.schema_registry import SchemaRegistryClient
-            from confluent_kafka.schema_registry.protobuf import ProtobufDeserializer
-
-        client = SchemaRegistryClient(self._schema_registry_conf())
-        return ProtobufDeserializer(
-            build_message_class(CHECKPOINT_SCHEMA),
-            schema_registry_client=client,
-        )
 
     def _schema_registry_conf(self) -> dict:
         username = self.producer_config.get("sasl.username")
@@ -350,18 +333,30 @@ class KafkaWatermarkStateReader:
         producer_config: dict,
         identity: CheckpointIdentity,
         schema_registry_url: str | None = None,
+        schema_registry_type: str = "protobuf",
         logger=None,
     ):
         self.topic = topic
         self.producer_config = producer_config
         self.identity = identity
         self.schema_registry_url = schema_registry_url
+        self.schema_registry_type = schema_registry_type
         self.logger = logger
+        self._serializer_registry = None
         self._deserializer = None
         self.schema_missing = False
 
         if self.schema_registry_url:
-            self._deserializer = self._build_deserializer()
+            self._serializer_registry = SchemaRegistrySerializerRegistry(
+                schema_registry_url=self.schema_registry_url,
+                producer_config=self.producer_config,
+                topic_schemas={self.topic: WATERMARK_STATE_SCHEMA},
+                auto_register_schemas=False,
+                logger=logger,
+                schema_format=self.schema_registry_type,
+            )
+            self._serializer_registry.prepare()
+            self._deserializer = self._serializer_registry.build_deserializer(self.topic)
 
     def load(self) -> dict[int, WatermarkStateRecord]:
         from confluent_kafka import Consumer, KafkaError, TopicPartition
@@ -462,29 +457,9 @@ class KafkaWatermarkStateReader:
             payload,
             SerializationContext(self.topic, MessageField.VALUE),
         )
-        return checkpoint_message_to_record(message)
-
-    def _build_deserializer(self):
-        with warnings.catch_warnings():
-            try:
-                from authlib.deprecate import AuthlibDeprecationWarning
-            except Exception:
-                AuthlibDeprecationWarning = DeprecationWarning
-
-            warnings.filterwarnings(
-                "ignore",
-                category=AuthlibDeprecationWarning,
-                module=r"authlib\._joserfc_helpers",
-            )
-
-            from confluent_kafka.schema_registry import SchemaRegistryClient
-            from confluent_kafka.schema_registry.protobuf import ProtobufDeserializer
-
-        client = SchemaRegistryClient(self._schema_registry_conf())
-        return ProtobufDeserializer(
-            build_message_class(WATERMARK_STATE_SCHEMA),
-            schema_registry_client=client,
-        )
+        if self.schema_registry_type == "avro":
+            return message
+        return watermark_state_message_to_record(message)
 
     def _schema_registry_conf(self) -> dict:
         username = self.producer_config.get("sasl.username")

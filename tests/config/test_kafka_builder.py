@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from rpcstream.config.builder import build_kafka_config, build_schema_registry_url, build_topic_maps
+from rpcstream.config.builder import (
+    build_kafka_config,
+    build_schema_registry_config,
+    build_schema_registry_url,
+    build_topic_maps,
+)
 
 
 def test_build_kafka_config_enables_compression(monkeypatch):
@@ -63,6 +68,38 @@ def test_build_schema_registry_url_falls_back_to_pipeline_config():
     assert build_schema_registry_url(cfg) == "http://localhost:30081"
 
 
+def test_build_schema_registry_config_uses_new_schema_registry_block():
+    cfg = SimpleNamespace(
+        kafka=SimpleNamespace(
+            schemaRegistry=SimpleNamespace(
+                enabled=True,
+                type="protobuf",
+                url="registry.example.com:8081",
+            )
+        )
+    )
+
+    assert build_schema_registry_config(cfg) == {
+        "enabled": True,
+        "type": "protobuf",
+        "url": "https://registry.example.com:8081",
+    }
+
+
+def test_build_schema_registry_config_disables_when_flag_is_false():
+    cfg = SimpleNamespace(
+        kafka=SimpleNamespace(
+            schemaRegistry=SimpleNamespace(
+                enabled=False,
+                type="avro",
+                url="registry.example.com:8081",
+            )
+        )
+    )
+
+    assert build_schema_registry_config(cfg) is None
+
+
 def test_build_topic_maps_includes_main_and_system_topics():
     cfg = SimpleNamespace(
         kafka=SimpleNamespace(common=SimpleNamespace(topic_template=None)),
@@ -74,7 +111,7 @@ def test_build_topic_maps_includes_main_and_system_topics():
 
     assert topic_maps.main["block"] == "bsc.raw_block"
     assert topic_maps.main["trace"] == "bsc.raw_trace"
-    assert topic_maps.dlq == "dlq_ingestion"
+    assert topic_maps.dlq == "dlq.ingestion"
     assert topic_maps.checkpoint == "bsc.commit_watermark"
     assert topic_maps.watermark_state == "bsc.cursor_state"
 

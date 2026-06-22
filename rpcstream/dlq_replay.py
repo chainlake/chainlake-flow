@@ -42,6 +42,7 @@ async def run_dlq_replay(
         topic=stack.runtime.topic_map.dlq,
         producer_config=stack.runtime.kafka.config,
         schema_registry_url=stack.runtime.kafka.schema_registry_url,
+        schema_registry_type=stack.runtime.kafka.schema_registry_type or "protobuf",
         group_id=group_id,
         logger=stack.logger,
     )

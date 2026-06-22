@@ -102,17 +102,44 @@ def build_transactional_id(cfg: PipelineConfig) -> str:
     )
 
 
-def build_schema_registry_url(cfg: PipelineConfig) -> str | None:
+def build_schema_registry_config(cfg: PipelineConfig):
+    schema_registry = getattr(cfg.kafka, "schemaRegistry", None)
+    default_type = "avro"
+    if schema_registry is None:
+        schema_registry = getattr(cfg.kafka, "protobuf", None)
+        if schema_registry is not None:
+            default_type = "protobuf"
+    if schema_registry is None or not getattr(schema_registry, "enabled", True):
+        return None
+
+    registry_type = os.getenv(
+        "KAFKA_SCHEMA_REGISTRY_TYPE",
+        getattr(schema_registry, "type", default_type),
+    )
     raw = (
         os.getenv("KAFAK_SCHEMA_REGISTRY")
         or os.getenv("KAFKA_SCHEMA_REGISTRY")
-        or cfg.kafka.protobuf.schema_registry_url
+        or getattr(schema_registry, "url", None)
+        or getattr(schema_registry, "schema_registry_url", None)
     )
     if not raw:
         return None
     if raw.startswith(("http://", "https://")):
-        return raw
-    return f"https://{raw}"
+        url = raw
+    else:
+        url = f"https://{raw}"
+    return {
+        "enabled": True,
+        "type": str(registry_type).strip().lower() or "avro",
+        "url": url,
+    }
+
+
+def build_schema_registry_url(cfg: PipelineConfig) -> str | None:
+    settings = build_schema_registry_config(cfg)
+    if settings is None:
+        return None
+    return settings["url"]
 
 
 def build_topic_maps(cfg, adapter=None) -> TopicMaps:

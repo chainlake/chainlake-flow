@@ -19,14 +19,40 @@ def main() -> None:
         component="sink",
         config_path=config_path,
         pipeline=runtime.pipeline.name,
+        schema_registry_enabled=getattr(
+            runtime.kafka,
+            "schema_registry_enabled",
+            getattr(runtime.kafka, "protobuf_enabled", False),
+        ),
+        schema_registry_mode=getattr(
+            runtime.kafka,
+            "schema_registry_type",
+            "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+        )
+        or "disabled",
     )
     logger.info(
         "kafka.bootstrap_context",
         component="sink",
         schema_registry_url=runtime.kafka.schema_registry_url,
+        schema_registry_type=getattr(
+            runtime.kafka,
+            "schema_registry_type",
+            "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+        ),
         checkpoint_topic=runtime.checkpoint.topic,
         watermark_state_topic=runtime.checkpoint.watermark_state_topic,
-        protobuf_enabled=runtime.kafka.protobuf_enabled,
+        schema_registry_enabled=getattr(
+            runtime.kafka,
+            "schema_registry_enabled",
+            getattr(runtime.kafka, "protobuf_enabled", False),
+        ),
+        schema_registry_mode=getattr(
+            runtime.kafka,
+            "schema_registry_type",
+            "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+        )
+        or "disabled",
     )
     bootstrap_kafka_resources(runtime, adapter=adapter, logger=logger)
 

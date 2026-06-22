@@ -96,7 +96,13 @@ def main(
         fail(exc)
 
 
-app.command("init", help="Provision Kafka topics and pre-register adapter schemas.")(kafka_init_command)
+app.command(
+    "init",
+    help=(
+        "Provision Kafka topics and pre-register schema-registry definitions. "
+        "Defaults to avro; set kafka.schemaRegistry.type=protobuf to use protobuf."
+    ),
+)(kafka_init_command)
 
 
 def cli() -> None:

@@ -52,7 +52,7 @@ The script creates Kafka-native ACLs for:
 - `TransactionalId` when Kafka EOS is enabled.
 - `Cluster` `IdempotentWrite` when Kafka EOS is enabled.
 - Main sink topics derived from `kafka.common.topic_template` and `entities`.
-- The unified `dlq_ingestion` topic.
+- The unified `dlq.ingestion` topic.
 - The `commit_watermark` topic and `checkpoint-loader-` consumer group when checkpointing is enabled.
 
 Notes:
@@ -66,9 +66,10 @@ Notes:
 
 ## Read Unified DLQ
 
-`read_dlq.py` reads `dlq_ingestion` and decodes the protobuf value using the
-project Schema Registry settings. This is useful because Aiven's topic browser
-shows protobuf payloads as binary text unless it is using a schema-aware decoder.
+`read_dlq.py` reads `dlq.ingestion` and decodes the schema-registry value
+using the project settings. The default format is `avro`; `protobuf` is also
+supported. This is useful because Aiven's topic browser shows schema-managed
+payloads as binary text unless it is using a schema-aware decoder.
 
 Read up to 20 records from the beginning with a one-off consumer group:
 
@@ -115,7 +116,7 @@ final scanned/emitted counters are printed to stderr.
 ## Verify Trace DLQ Write
 
 `verify_trace_dlq.py` triggers one synthetic `trace` processor failure and then
-reads `dlq_ingestion` back to confirm the record was actually written.
+reads `dlq.ingestion` back to confirm the record was actually written.
 
 Run with the default pipeline config:
 

@@ -76,10 +76,21 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
     shutdown_event = install_shutdown_handlers(logger)
     await observability.start()
     pipeline_start_cursor = runtime.pipeline.start_cursor
+    schema_registry_enabled = getattr(
+        runtime.kafka,
+        "schema_registry_enabled",
+        getattr(runtime.kafka, "protobuf_enabled", False),
+    )
+    schema_registry_type = getattr(
+        runtime.kafka,
+        "schema_registry_type",
+        "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+    )
     logger.info(
         "runtime.startup_context",
         component="runtime",
         schema_registry_url=runtime.kafka.schema_registry_url,
+        schema_registry_type=schema_registry_type,
         checkpoint_topic=runtime.checkpoint.topic,
         watermark_state_topic=runtime.checkpoint.watermark_state_topic,
         protobuf_enabled=runtime.kafka.protobuf_enabled,
@@ -154,9 +165,10 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
                 identity=checkpoint_identity,
                 schema_registry_url=(
                     runtime.kafka.schema_registry_url
-                    if runtime.kafka.protobuf_enabled
+                    if schema_registry_enabled
                     else None
                 ),
+                schema_registry_type=schema_registry_type or "protobuf",
                 logger=logger,
             )
             logger.info(
@@ -174,9 +186,10 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
                 identity=checkpoint_identity,
                 schema_registry_url=(
                     runtime.kafka.schema_registry_url
-                    if runtime.kafka.protobuf_enabled
+                    if schema_registry_enabled
                     else None
                 ),
+                schema_registry_type=schema_registry_type or "protobuf",
                 logger=logger,
             )
             state_records = await asyncio.to_thread(state_reader.load)
@@ -227,6 +240,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             topic_maps=topic_maps,
             protobuf_enabled=runtime.kafka.protobuf_enabled,
             schema_registry_url=runtime.kafka.schema_registry_url,
+            schema_registry_type=schema_registry_type,
             protobuf_topic_schemas=adapter.build_protobuf_topic_schemas(
                 topic_maps=topic_maps,
                 entities=runtime.entities,

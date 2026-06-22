@@ -1,6 +1,6 @@
 [project]
 name = "rpcstream"
-version = "0.1.6"
+version = "0.1.7"
 description = "High-throughput blockchain ingestion engine for realtime streaming and historical backfill."
 authors = [
   { name = "Chainlake" }
@@ -33,6 +33,7 @@ dependencies = [
   "cachetools>=7.0.6",
   "pytest>=9.0.3",
   "protobuf>=6.33.0",
+  "fastavro>=1.10.0",
 ]
 
 [project.optional-dependencies]

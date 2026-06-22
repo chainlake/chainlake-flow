@@ -73,7 +73,7 @@ def build_engine(*, sink, eos_enabled=False):
         enricher=EvmEnricher(),
         sink=sink,
         topics={"trace": "bsc.raw_trace"},
-        dlq_topic="dlq_ingestion",
+        dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
         max_retry=1,
@@ -92,7 +92,7 @@ def build_success_engine(*, sink, eos_enabled=False):
         enricher=EvmEnricher(),
         sink=sink,
         topics={"trace": "bsc.raw_trace"},
-        dlq_topic="dlq_ingestion",
+        dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
         max_retry=1,
@@ -111,7 +111,7 @@ def build_backfill_engine(*, sink):
         enricher=EvmEnricher(),
         sink=sink,
         topics={"trace": "bsc.raw_trace"},
-        dlq_topic="dlq_ingestion",
+        dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
         pipeline=SimpleNamespace(
             name="bsc_mainnet_backfill_10_20",
@@ -202,7 +202,7 @@ def test_engine_sends_trace_dlq_record_when_processor_fails():
     assert expected_watermark is None
     assert len(sink.sent) == 1
     topic, rows, wait_delivery = sink.sent[0]
-    assert topic == "dlq_ingestion"
+    assert topic == "dlq.ingestion"
     assert wait_delivery is False
     assert len(rows) == 1
     record = rows[0]
@@ -228,7 +228,7 @@ def test_engine_sends_trace_dlq_via_transaction_when_eos_enabled():
     topic_rows = sink.sent_transactions[0]
     assert len(topic_rows) == 1
     topic, rows = topic_rows[0]
-    assert topic == "dlq_ingestion"
+    assert topic == "dlq.ingestion"
     assert len(rows) == 1
     assert rows[0]["entity"] == "trace"
 
@@ -276,7 +276,7 @@ def test_engine_retries_upstream_not_ready_before_success(monkeypatch):
             "block": "bsc.raw_block",
             "transaction": "bsc.enriched_transaction",
         },
-        dlq_topic="dlq_ingestion",
+        dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(
             type="evm",
             name="bsc",
@@ -337,7 +337,7 @@ def test_engine_sends_dlq_after_exhausting_upstream_not_ready_retries(monkeypatc
             "block": "bsc.raw_block",
             "transaction": "bsc.enriched_transaction",
         },
-        dlq_topic="dlq_ingestion",
+        dlq_topic="dlq.ingestion",
         chain=SimpleNamespace(
             type="evm",
             name="bsc",
@@ -364,7 +364,7 @@ def test_engine_sends_dlq_after_exhausting_upstream_not_ready_retries(monkeypatc
     assert sink.sent_transactions == []
     assert len(sink.sent) == 1
     topic, rows, wait_delivery = sink.sent[0]
-    assert topic == "dlq_ingestion"
+    assert topic == "dlq.ingestion"
     assert wait_delivery is False
     assert rows[0]["entity"] == "receipt"
     assert rows[0]["status"] == "pending"
@@ -397,7 +397,7 @@ def test_engine_marks_dlq_resolved_via_transaction_when_eos_enabled():
     assert len(sink.sent_transactions) == 1
     topic_rows = sink.sent_transactions[0]
     assert len(topic_rows) == 1
-    assert topic_rows[0][0] == "dlq_ingestion"
+    assert topic_rows[0][0] == "dlq.ingestion"
     assert topic_rows[0][1][0]["status"] == "resolved"
 
 

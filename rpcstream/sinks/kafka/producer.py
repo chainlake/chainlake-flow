@@ -8,7 +8,7 @@ from opentelemetry.trace import Link
 
 from rpcstream.metrics.kafka import KafkaMetrics
 from rpcstream.runtime.observability.context import ObservabilityContext
-from rpcstream.sinks.kafka.protobuf import ProtobufSerializerRegistry
+from rpcstream.sinks.kafka.protobuf import SchemaRegistrySerializerRegistry
 
 class KafkaWriter:
     def __init__(
@@ -22,6 +22,7 @@ class KafkaWriter:
         topic_maps,
         protobuf_enabled=False,
         schema_registry_url=None,
+        schema_registry_type: str | None = None,
         protobuf_topic_schemas=None,
         protobuf_auto_register_schemas: bool = True,
         observability: ObservabilityContext | None = None,
@@ -41,7 +42,11 @@ class KafkaWriter:
         self.flush_interval = config.flush_interval_ms / 1000
         self.queue_maxsize = config.queue_maxsize
         self.topic_maps = topic_maps
-        self.protobuf_enabled = protobuf_enabled
+        self.schema_registry_type = schema_registry_type or (
+            "protobuf" if protobuf_enabled else None
+        )
+        self.protobuf_enabled = self.schema_registry_type == "protobuf"
+        self.schema_registry_enabled = self.schema_registry_type is not None
         self.eos_enabled = eos_enabled
         self.eos_init_timeout_sec = eos_init_timeout_sec
         self.protobuf_registry = None
@@ -53,17 +58,18 @@ class KafkaWriter:
         self._worker_task = None
         self._last_delivery_summary = None
 
-        if self.protobuf_enabled:
+        if self.schema_registry_enabled:
             if not schema_registry_url:
                 raise ValueError(
-                    "protobuf is enabled but schema registry url is missing; set KAFAK_SCHEMA_REGISTRY"
+                    "schema registry is enabled but schema registry url is missing; set KAFAK_SCHEMA_REGISTRY"
                 )
-            self.protobuf_registry = ProtobufSerializerRegistry(
+            self.protobuf_registry = SchemaRegistrySerializerRegistry(
                 schema_registry_url=schema_registry_url,
                 producer_config=producer_config,
                 topic_schemas=protobuf_topic_schemas or {},
                 auto_register_schemas=protobuf_auto_register_schemas,
                 logger=logger,
+                schema_format=self.schema_registry_type,
             )
 
     # ----------------------------
@@ -465,17 +471,19 @@ class KafkaWriter:
             warmup_started = time.time()
             if self.logger:
                 self.logger.debug(
-                    "kafka.protobuf_warmup_started",
+                    "kafka.schema_registry_warmup_started",
                     component="sink",
                     schema_registry=self.protobuf_registry.schema_registry_url,
+                    schema_registry_type=self.schema_registry_type,
                     topic_count=len(self.protobuf_registry.topic_schemas),
                 )
             self.protobuf_registry.start()
             if self.logger:
                 self.logger.debug(
-                    "kafka.protobuf_warmup_complete",
+                    "kafka.schema_registry_warmup_complete",
                     component="sink",
                     schema_registry=self.protobuf_registry.schema_registry_url,
+                    schema_registry_type=self.schema_registry_type,
                     topic_count=len(self.protobuf_registry.topic_schemas),
                     elapsed_ms=round((time.time() - warmup_started) * 1000, 2),
                 )

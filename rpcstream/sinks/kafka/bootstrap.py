@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from rpcstream.adapters import build_chain_adapter
 from rpcstream.sinks.kafka.admin import KafkaTopicManager
-from rpcstream.sinks.kafka.protobuf import ProtobufSerializerRegistry
+from rpcstream.sinks.kafka.protobuf import SchemaRegistrySerializerRegistry
+
+ProtobufSerializerRegistry = SchemaRegistrySerializerRegistry
 
 SCHEMA_REGISTRY_INTERNAL_TOPIC = "_schemas"
 
@@ -34,6 +36,16 @@ def system_topics(topic_maps) -> list[str]:
 
 def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
     adapter = adapter or build_chain_adapter(runtime.chain.type)
+    schema_registry_enabled = getattr(
+        runtime.kafka,
+        "schema_registry_enabled",
+        getattr(runtime.kafka, "protobuf_enabled", False),
+    )
+    schema_registry_type = getattr(
+        runtime.kafka,
+        "schema_registry_type",
+        "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
+    )
     topic_manager = KafkaTopicManager(
         producer_config=runtime.kafka.config,
         logger=logger,
@@ -45,12 +57,13 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
         [runtime.checkpoint.topic, runtime.checkpoint.watermark_state_topic]
     )
 
-    if not runtime.kafka.protobuf_enabled:
+    if not schema_registry_enabled:
         if logger:
             logger.info(
                 "kafka.bootstrap_complete",
                 component="sink",
-                protobuf_enabled=False,
+                schema_registry_enabled=False,
+                schema_registry_mode="disabled",
                 checkpoint_topic=runtime.checkpoint.topic,
                 watermark_state_topic=runtime.checkpoint.watermark_state_topic,
             )
@@ -58,27 +71,37 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
 
     if not runtime.kafka.schema_registry_url:
         raise ValueError(
-            "protobuf is enabled but schema registry url is missing; set KAFAK_SCHEMA_REGISTRY"
+            f"schema registry mode {schema_registry_type or 'avro'} is enabled but schema registry url is missing; set KAFAK_SCHEMA_REGISTRY or KAFKA_SCHEMA_REGISTRY"
         )
 
     _ensure_schema_registry_internal_topic(topic_manager, logger=logger)
 
-    protobuf_registry = ProtobufSerializerRegistry(
-        schema_registry_url=runtime.kafka.schema_registry_url,
-        producer_config=runtime.kafka.config,
-        topic_schemas=adapter.build_protobuf_topic_schemas(
+    registry_kwargs = {
+        "schema_registry_url": runtime.kafka.schema_registry_url,
+        "producer_config": runtime.kafka.config,
+        "topic_schemas": adapter.build_protobuf_topic_schemas(
             topic_maps=runtime.topic_map,
             entities=runtime.entities,
         ),
-        logger=logger,
-    )
+        "logger": logger,
+    }
+    if schema_registry_type:
+        registry_kwargs["schema_format"] = schema_registry_type
+    registry_cls = ProtobufSerializerRegistry
+    try:
+        protobuf_registry = registry_cls(**registry_kwargs)
+    except TypeError:
+        registry_kwargs.pop("schema_format", None)
+        protobuf_registry = registry_cls(**registry_kwargs)
     protobuf_registry.start()
 
     if logger:
         logger.info(
             "kafka.bootstrap_complete",
             component="sink",
-            protobuf_enabled=True,
+            schema_registry_enabled=True,
+            schema_registry_type=schema_registry_type,
+            schema_registry_mode=schema_registry_type or "avro",
             topic_count=len(all_topics(runtime.topic_map)),
             schema_topic_count=len(protobuf_registry.topic_schemas),
             checkpoint_topic=runtime.checkpoint.topic,
