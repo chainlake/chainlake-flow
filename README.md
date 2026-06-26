@@ -11,6 +11,8 @@ It supports:
 
 The current primary target is low-latency blockchain ingestion over RPC, without requiring self-hosted archive nodes.
 
+It uses an append-only, versioned data model with block_number + block_hash to represent chain state, similar to SCD Type 2 but extended for fork-aware history.
+
 ## Status
 
 Current implementation is centered on:
