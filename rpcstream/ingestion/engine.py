@@ -384,14 +384,17 @@ class IngestionEngine:
                                 self.metrics.QUEUE_WAIT.record(queue_wait, {"entity": entity})
                                 emitted_rows = sum(len(rows) for rows in processed_data.values())
                                 if self.logger:
+                                    ingestion_lag_ms = self._compute_ingestion_lag_ms(
+                                        parsed_bundle
+                                    )
                                     self.logger.info(
                                         "engine.processed",
                                         component="engine",
                                         cursor=cursor,
                                         entity=entity,
-                                        latency_ms=latency,
+                                        rpc_latency_ms=latency,
                                         payload=emitted_rows,
-                                        ingestion_lag=ingestion_lag,
+                                        ingestion_lag_ms=ingestion_lag_ms,
                                     )
                             except Exception as e:
                                 await self._send_dlq(
@@ -919,6 +922,18 @@ class IngestionEngine:
         if not timestamps:
             return None
         return min(timestamps)
+
+    def _compute_ingestion_lag_ms(
+        self,
+        bundle: dict,
+        ingestion_timestamp_ms: int | None = None,
+    ) -> int | None:
+        block_timestamp_ms = self._extract_event_timestamp_ms(bundle)
+        if block_timestamp_ms is None:
+            return None
+        if ingestion_timestamp_ms is None:
+            ingestion_timestamp_ms = int(time.time() * 1000)
+        return ingestion_timestamp_ms - block_timestamp_ms
         
     
     async def _compute_lag(self, cursor):

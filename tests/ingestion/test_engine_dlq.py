@@ -127,6 +127,38 @@ def build_backfill_engine(*, sink):
     )
 
 
+def test_compute_ingestion_lag_ms_uses_block_timestamp_seconds():
+    engine = build_success_engine(sink=RecordingSink())
+
+    lag_ms = engine._compute_ingestion_lag_ms(
+        {"block": [{"type": "block", "timestamp": 1_700_000_000}]},
+        ingestion_timestamp_ms=1_700_000_012_345,
+    )
+
+    assert lag_ms == 12_345
+
+
+def test_compute_ingestion_lag_ms_returns_none_without_block_timestamp():
+    engine = build_success_engine(sink=RecordingSink())
+
+    assert engine._compute_ingestion_lag_ms({"trace": [{"block_number": 1}]}) is None
+
+
+def test_compute_ingestion_lag_ms_uses_block_timestamp_from_accumulated_bundle():
+    engine = build_success_engine(sink=RecordingSink())
+
+    lag_ms = engine._compute_ingestion_lag_ms(
+        {
+            "block": [{"type": "block", "timestamp": 1_700_000_000}],
+            "receipt": [{"block_number": 1}],
+            "log": [{"block_number": 1}],
+        },
+        ingestion_timestamp_ms=1_700_000_000_750,
+    )
+
+    assert lag_ms == 750
+
+
 class BackfillCursorSource:
     def __init__(self, start=1, end=100):
         self.current = start

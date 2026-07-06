@@ -16,7 +16,7 @@ entities:
 
 erpc:
   project_id: main
-  base_url: http://clh001:30040 # endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
+  base_url: http://localhost:30041 # endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
   timeout_sec: 10
   max_retries: 1
   inflight:
