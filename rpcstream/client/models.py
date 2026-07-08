@@ -156,7 +156,7 @@ def summarize_exception(exc: Exception) -> str:
 def exception_log_fields(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, RpcResponseError):
         return exc.log_fields()
-    return {"error": str(exc)}
+    return {"exception": str(exc)}
 
 
 def is_expected_rpc_warning(exc: Exception) -> bool:

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import warnings
+from urllib.parse import urlparse
 
 from rpcstream.sinks.kafka.schema import (
     CHECKPOINT_SCHEMA,
@@ -44,6 +46,7 @@ class SchemaRegistrySerializerRegistry:
         self.schema_format = _normalize_schema_format(schema_format)
         self._serializers = {}
         self._started = False
+        _ensure_schema_registry_host_bypasses_proxy(schema_registry_url)
 
     def prepare(self) -> None:
         for topic, schema in self.topic_schemas.items():
@@ -409,6 +412,20 @@ def _normalize_schema_format(schema_format: str) -> str:
     if normalized not in {"avro", "protobuf"}:
         raise ValueError("schema registry format must be avro or protobuf")
     return normalized
+
+
+def _ensure_schema_registry_host_bypasses_proxy(schema_registry_url: str) -> None:
+    host = urlparse(schema_registry_url).hostname
+    if not host:
+        return
+
+    for env_name in ("NO_PROXY", "no_proxy"):
+        existing = os.environ.get(env_name, "")
+        entries = [entry.strip() for entry in existing.split(",") if entry.strip()]
+        if host in entries:
+            continue
+        entries.append(host)
+        os.environ[env_name] = ",".join(entries)
 
 
 def _record_to_dict(message, schema: EntitySchema) -> dict:
