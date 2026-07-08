@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -74,3 +75,26 @@ def test_startup_context_no_longer_includes_protobuf_enabled(monkeypatch):
     assert "protobuf_enabled" not in captured["kwargs"]
     assert captured["kwargs"]["schema_registry_type"] == "avro"
     assert captured["kwargs"]["schema_registry_url"] == "http://registry:8081"
+
+
+def test_configure_local_proxy_bypass_adds_exact_runtime_hosts(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1,192.168.122.0/24")
+    monkeypatch.setenv("no_proxy", "localhost,127.0.0.1,192.168.122.0/24")
+
+    runtime = SimpleNamespace(
+        client=SimpleNamespace(base_url="http://clh001:30041/main/evm/56"),
+        kafka=SimpleNamespace(
+            schema_registry_url="http://192.168.122.50:30081",
+            config={"bootstrap.servers": "192.168.122.50:30092"},
+        ),
+    )
+
+    appended = main_mod.configure_local_proxy_bypass(runtime)
+
+    assert appended == ["clh001", "192.168.122.50"]
+    no_proxy = os.environ["NO_PROXY"].split(",")
+    lower_no_proxy = os.environ["no_proxy"].split(",")
+    assert "192.168.122.50" in no_proxy
+    assert "clh001" in no_proxy
+    assert "192.168.122.50" in lower_no_proxy
+    assert "clh001" in lower_no_proxy

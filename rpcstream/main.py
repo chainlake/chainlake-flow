@@ -2,6 +2,7 @@ import asyncio
 import os
 import signal
 from contextlib import suppress
+from urllib.parse import urlparse
 from confluent_kafka import Producer
 
 from rpcstream.config.loader import load_pipeline_config
@@ -24,6 +25,76 @@ from rpcstream.state.checkpoint import (
 )
 
 from rpcstream.utils.logger import JsonLogger
+
+
+def _append_no_proxy_hosts(hosts: list[str]) -> list[str]:
+    clean_hosts = [host.strip() for host in hosts if host and host.strip()]
+    if not clean_hosts:
+        return []
+
+    appended: list[str] = []
+    for env_key in ("NO_PROXY", "no_proxy"):
+        existing = [
+            item.strip()
+            for item in os.getenv(env_key, "").split(",")
+            if item.strip()
+        ]
+        seen = set(existing)
+        updated = list(existing)
+        for host in clean_hosts:
+            if host not in seen:
+                updated.append(host)
+                seen.add(host)
+                if host not in appended:
+                    appended.append(host)
+        if updated:
+            os.environ[env_key] = ",".join(updated)
+    return appended
+
+
+def _host_from_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    return parsed.hostname
+
+
+def _host_from_bootstrap_server(value: str) -> str | None:
+    server = value.strip()
+    if not server:
+        return None
+    if "://" in server:
+        return _host_from_url(server)
+    if server.startswith("["):
+        end = server.find("]")
+        return server[1:end] if end > 0 else None
+    return server.rsplit(":", 1)[0] if ":" in server else server
+
+
+def configure_local_proxy_bypass(runtime) -> list[str]:
+    """Make local pipeline endpoints bypass shell-level HTTP proxies.
+
+    Some Python clients do not honor CIDR entries in NO_PROXY. Adding exact
+    hosts keeps Schema Registry/eRPC traffic local while preserving proxies for
+    upstream RPC providers.
+    """
+    hosts: list[str] = []
+
+    def add_host(host: str | None) -> None:
+        if host and host not in hosts:
+            hosts.append(host)
+
+    for url in (
+        getattr(runtime.client, "base_url", None),
+        getattr(runtime.kafka, "schema_registry_url", None),
+    ):
+        add_host(_host_from_url(url))
+
+    bootstrap_servers = getattr(runtime.kafka, "config", {}).get("bootstrap.servers", "")
+    for server in str(bootstrap_servers).split(","):
+        add_host(_host_from_bootstrap_server(server))
+
+    return _append_no_proxy_hosts(hosts)
 
 
 def install_shutdown_handlers(logger) -> asyncio.Event:
@@ -98,6 +169,13 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             runtime.pipeline.mode == "backfill" or pipeline_start_cursor == "checkpoint"
         ),
     )
+    bypass_hosts = configure_local_proxy_bypass(runtime)
+    if bypass_hosts:
+        logger.info(
+            "runtime.proxy_bypass_configured",
+            component="runtime",
+            hosts=bypass_hosts,
+        )
 
     client = None
     tracker = None
