@@ -233,7 +233,7 @@ class TrackerConfig(BaseModel):
 
 
 class EngineConfig(BaseModel):
-    concurrency: int | None = None
+    concurrency: int = 0
     # Sink (Kafka) health: when delivery hangs/fails, pause pulling new cursors
     # so we don't generate unbounded failed work. Bounds checkpoint-task growth.
     sink_failure_timeout_sec: float = 10.0
@@ -241,8 +241,8 @@ class EngineConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_concurrency(self):
-        if self.concurrency is not None and self.concurrency < 1:
-            raise ValueError("engine.concurrency must be >= 1")
+        if self.concurrency < 0:
+            raise ValueError("engine.concurrency must be >= 0 (0 = adaptive)")
         if self.sink_failure_timeout_sec <= 0:
             raise ValueError("engine.sink_failure_timeout_sec must be > 0")
         if self.sink_cooldown_sec <= 0:

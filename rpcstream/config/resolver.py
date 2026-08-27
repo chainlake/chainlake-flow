@@ -57,7 +57,11 @@ class SchedulerRuntime:
 
 @dataclass
 class EngineRuntime:
-    concurrency: int
+    # 0 = adaptive: worker pool tracks scheduler.current_limit, capped at max_inflight.
+    # 1 = serial (single worker). N > 1 = fixed N workers.
+    concurrency: int = 0
+    # Hard upper bound for the adaptive worker pool (mirrors scheduler max_inflight).
+    max_inflight: int = 1
     sink_failure_timeout_sec: float = 10.0
     sink_cooldown_sec: float = 15.0
 
@@ -143,7 +147,8 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
     )
 
     engine = EngineRuntime(
-        concurrency=cfg.engine.concurrency or cfg.erpc.inflight.max_inflight,
+        concurrency=cfg.engine.concurrency,
+        max_inflight=cfg.erpc.inflight.max_inflight,
         sink_failure_timeout_sec=cfg.engine.sink_failure_timeout_sec,
         sink_cooldown_sec=cfg.engine.sink_cooldown_sec,
     )

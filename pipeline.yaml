@@ -24,7 +24,13 @@ erpc:
     latency_target_ms: 0 # (new default) → purely adaptive, no per-chain tuning.
 
 engine:
-  concurrency: 10
+  # Cursor ingestion worker pool size.
+  # 0   = adaptive: tracks erpc.inflight.current_limit, capped at max_inflight
+  #       (workers >= scheduler limit at all times; shrinks via cooperative
+  #       exit when the circuit breaker trips / latency inflates).
+  # 1   = serial: single worker, strict per-block order (matches eos_enabled).
+  # N>1 = fixed: N long-lived workers, independent of scheduler dynamics.
+  concurrency: 0
 
 tracker:
   # ratio of the chain block interval used to poll head updates

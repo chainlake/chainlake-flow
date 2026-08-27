@@ -55,7 +55,10 @@ def test_load_pipeline_config_resolves_chain_profile_fields(tmp_path):
     assert runtime.scheduler.min_inflight == 1
     assert runtime.scheduler.max_inflight == 5
     assert runtime.scheduler.initial_inflight == 2
-    assert runtime.engine.concurrency == 5
+    # engine.concurrency=0 means adaptive (track scheduler.current_limit);
+    # the ceiling is exposed separately as max_inflight.
+    assert runtime.engine.concurrency == 0
+    assert runtime.engine.max_inflight == 5
     assert runtime.tracker.poll_interval == pytest.approx(0.225)
 
 
