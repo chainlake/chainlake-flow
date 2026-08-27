@@ -9,9 +9,9 @@ chain:
 
 entities:
   - "block"
-  #- "transaction"
+  - "transaction"
   #- "log"
-  #- "token_transfer"
+  - "token_transfer"
   #- "trace" 
 
 erpc:
@@ -21,10 +21,10 @@ erpc:
   max_retries: 1
   inflight:
     max_inflight: 20
-    latency_target_ms: 200
+    latency_target_ms: 0 # (new default) → purely adaptive, no per-chain tuning.
 
 engine:
-  concurrency: 1
+  concurrency: 10
 
 tracker:
   # ratio of the chain block interval used to poll head updates
@@ -37,7 +37,7 @@ kafka:
   # 1. PLAINTEXT — no auth, no TLS (local dev / internal trusted network)
   #
   connection:
-    bootstrap_servers: "localhost:30092"
+    bootstrap_servers: "localhost:8081"
   #
   # ───────────────────────────────────────────────────────────────────────────
   # 2. SASL_PLAINTEXT — SASL auth over plaintext (internal network with auth)

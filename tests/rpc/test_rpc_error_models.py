@@ -85,3 +85,19 @@ def test_rpc_response_error_non_expected_warning_keeps_basic_fields():
         "rpc_error_code": -32000,
         "rpc_error_message": "execution reverted",
     }
+
+
+def test_rpc_response_error_upstream_not_synced_is_expected_warning():
+    # "1 upstream not synced" is a transient catch-up gap, not a hard failure.
+    error = RpcResponseError.from_payload(
+        method="eth_getBlockReceipts",
+        request_meta={"cursor": 118376228},
+        error={
+            "code": -32603,
+            "message": "gave up retrying on network-level after 468.345186ms: 1 upstream not synced",
+        },
+    )
+
+    assert error.is_upstream_not_synced() is True
+    assert error.is_upstream_block_not_ready() is False
+    assert is_expected_rpc_warning(error) is True

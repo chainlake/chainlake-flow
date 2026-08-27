@@ -47,10 +47,19 @@ class SchedulerRuntime:
     max_inflight: int
     min_inflight: int
     latency_target_ms: int
+    target_multiplier: float = 3.0
+    circuit_breaker_enabled: bool = True
+    trip_consecutive_failures: int = 5
+    trip_failure_rate: float = 0.5
+    backoff_base_sec: float = 1.0
+    backoff_max_sec: float = 30.0
+    probe_budget: int = 3
 
 @dataclass
 class EngineRuntime:
     concurrency: int
+    sink_failure_timeout_sec: float = 10.0
+    sink_cooldown_sec: float = 15.0
 
 @dataclass
 class TrackerRuntime:
@@ -124,10 +133,19 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
         max_inflight=cfg.erpc.inflight.max_inflight,
         min_inflight=cfg.erpc.inflight.min_inflight,
         latency_target_ms=cfg.erpc.inflight.latency_target_ms,
+        target_multiplier=cfg.erpc.inflight.target_multiplier,
+        circuit_breaker_enabled=cfg.erpc.inflight.circuit_breaker_enabled,
+        trip_consecutive_failures=cfg.erpc.inflight.trip_consecutive_failures,
+        trip_failure_rate=cfg.erpc.inflight.trip_failure_rate,
+        backoff_base_sec=cfg.erpc.inflight.backoff_base_sec,
+        backoff_max_sec=cfg.erpc.inflight.backoff_max_sec,
+        probe_budget=cfg.erpc.inflight.probe_budget,
     )
 
     engine = EngineRuntime(
-        concurrency=cfg.engine.concurrency or cfg.erpc.inflight.max_inflight
+        concurrency=cfg.engine.concurrency or cfg.erpc.inflight.max_inflight,
+        sink_failure_timeout_sec=cfg.engine.sink_failure_timeout_sec,
+        sink_cooldown_sec=cfg.engine.sink_cooldown_sec,
     )
 
     pipeline = PipelineRuntime(

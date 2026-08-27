@@ -19,6 +19,7 @@ from rpcstream.state.checkpoint import (
     build_checkpoint_identity,
 )
 from rpcstream.utils.logger import JsonLogger
+from rpcstream.utils.throttle import ThrottledLogger
 
 
 @dataclass
@@ -72,6 +73,9 @@ def build_runtime_stack(
         level=config.logLevel,
         logger_provider=observability.get_logger_provider(),
     )
+    # Rate-limit repetitive error/warn lines so a failure storm can't saturate
+    # disk I/O. All components below share this wrapped logger.
+    logger = ThrottledLogger(logger)
 
     client = JsonRpcClient(
         base_url=runtime.client.base_url,
@@ -95,6 +99,13 @@ def build_runtime_stack(
         max_inflight=runtime.scheduler.max_inflight,
         min_inflight=runtime.scheduler.min_inflight,
         latency_target_ms=runtime.scheduler.latency_target_ms,
+        target_multiplier=runtime.scheduler.target_multiplier,
+        circuit_breaker_enabled=runtime.scheduler.circuit_breaker_enabled,
+        trip_consecutive_failures=runtime.scheduler.trip_consecutive_failures,
+        trip_failure_rate=runtime.scheduler.trip_failure_rate,
+        backoff_base_sec=runtime.scheduler.backoff_base_sec,
+        backoff_max_sec=runtime.scheduler.backoff_max_sec,
+        probe_budget=runtime.scheduler.probe_budget,
         logger=logger,
         observability=observability,
     )
@@ -195,6 +206,8 @@ def build_runtime_stack(
         pipeline=runtime.pipeline,
         max_retry=runtime.client.max_retries,
         concurrency=runtime.engine.concurrency,
+        sink_failure_timeout_sec=runtime.engine.sink_failure_timeout_sec,
+        sink_cooldown_sec=runtime.engine.sink_cooldown_sec,
         logger=logger,
         observability=observability,
         watermark_manager=watermark_manager,

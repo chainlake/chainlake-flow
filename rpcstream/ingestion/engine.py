@@ -31,7 +31,9 @@ class IngestionEngine:
         chain=None,
         pipeline=None,
         max_retry=0,
-        concurrency=10, 
+        concurrency=10,
+        sink_failure_timeout_sec: float = 10.0,
+        sink_cooldown_sec: float = 15.0,
         logger=None,
         observability: ObservabilityContext | None = None,
         decoder=None,
@@ -56,6 +58,12 @@ class IngestionEngine:
         self.pipeline = pipeline
         self.max_retry = max_retry
         self.concurrency = concurrency
+        self.sink_failure_timeout_sec = sink_failure_timeout_sec
+        self.sink_cooldown_sec = sink_cooldown_sec
+        # When the sink (Kafka) is unavailable, pulling new cursors is paused
+        # and checkpoint waits are bounded so we don't accumulate unbounded
+        # failed work / memory. See _should_pause_ingestion / _finalize_checkpoint.
+        self._sink_unhealthy_until = None
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
         self._latest_processed_block = 0
@@ -93,6 +101,14 @@ class IngestionEngine:
         async def producer():
             try:
                 while not self._is_shutdown_requested(shutdown_event):
+                    # Backpressure: if the source (circuit breaker tripped) or
+                    # the sink (Kafka down) is unhealthy, stop pulling new
+                    # cursors so we don't generate a flood of doomed work that
+                    # would otherwise peg CPU / memory / disk. Resume once the
+                    # breaker half-opens or the sink cooldown elapses.
+                    if self._should_pause_ingestion(shutdown_event):
+                        await asyncio.sleep(0.2)
+                        continue
                     cursor = await self._next_cursor_or_shutdown(cursor_source, shutdown_event)
                     if cursor is None:
                         break
@@ -165,6 +181,21 @@ class IngestionEngine:
 
     def _is_shutdown_requested(self, shutdown_event: asyncio.Event | None) -> bool:
         return shutdown_event is not None and shutdown_event.is_set()
+
+    def _should_pause_ingestion(self, shutdown_event: asyncio.Event | None) -> bool:
+        if self._is_shutdown_requested(shutdown_event):
+            return True
+        # Source-side: scheduler circuit breaker is open (upstream unhealthy).
+        scheduler = getattr(self.fetcher, "scheduler", None)
+        if scheduler is not None and scheduler.is_tripped():
+            return True
+        # Sink-side: Kafka (or other sink) is unavailable; pause until cooldown.
+        if self._sink_unhealthy_until is not None and time.monotonic() < self._sink_unhealthy_until:
+            return True
+        return False
+
+    def _mark_sink_unhealthy(self):
+        self._sink_unhealthy_until = time.monotonic() + self.sink_cooldown_sec
 
     async def _next_cursor_or_shutdown(self, cursor_source, shutdown_event: asyncio.Event | None):
         if shutdown_event is None:
@@ -641,7 +672,30 @@ class IngestionEngine:
         try:
             delivery_results = []
             if delivery_futures:
-                delivery_results = await asyncio.gather(*delivery_futures)
+                try:
+                    delivery_results = await asyncio.wait_for(
+                        asyncio.gather(*delivery_futures, return_exceptions=True),
+                        timeout=self.sink_failure_timeout_sec,
+                    )
+                except asyncio.TimeoutError:
+                    delivery_results = None
+                sink_failed = delivery_results is None or any(
+                    isinstance(r, Exception) for r in (delivery_results or [])
+                )
+                if sink_failed:
+                    # Sink (Kafka) is unavailable: mark it unhealthy (the
+                    # producer loop will pause) and record the cursor as failed
+                    # WITHOUT advancing the watermark. Bounded wait only.
+                    self._mark_sink_unhealthy()
+                    if self.logger:
+                        self.logger.warn(
+                            "engine.sink_delivery_failed",
+                            component="engine",
+                            cursor=cursor,
+                            timed_out=delivery_results is None,
+                        )
+                    await self._record_failed_watermark_state(cursor)
+                    return
                 delivery_summary = self._aggregate_delivery_summaries(delivery_results)
                 if delivery_summary:
                     self._last_delivery_summary = delivery_summary
@@ -723,7 +777,11 @@ class IngestionEngine:
         if self.eos_enabled:
             delivery_future = await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
             if delivery_future is not None:
-                await delivery_future
+                try:
+                    await asyncio.wait_for(delivery_future, timeout=self.sink_failure_timeout_sec)
+                except Exception:
+                    # Sink down: best-effort only; ingestion is already paused.
+                    pass
             return
         checkpoint_future = await self.sink.send(
             self.watermark_manager.state_topic,
@@ -731,7 +789,11 @@ class IngestionEngine:
             wait_delivery=True,
         )
         if checkpoint_future is not None:
-            await checkpoint_future
+            try:
+                await asyncio.wait_for(checkpoint_future, timeout=self.sink_failure_timeout_sec)
+            except Exception:
+                # Sink down: best-effort only; ingestion is already paused.
+                pass
 
 
 

@@ -12,6 +12,7 @@ from rpcstream.client.models import (
 from rpcstream.protocol.request import BaseRpcRequest  # Generic RPC request
 from rpcstream.scheduler.base import BaseScheduler
 from rpcstream.runtime.observability.context import ObservabilityContext
+from rpcstream.metrics.scheduler import SchedulerMetrics
 
 
 class AdaptiveRpcScheduler(BaseScheduler):
@@ -20,13 +21,29 @@ class AdaptiveRpcScheduler(BaseScheduler):
         client: BaseClient,
         logger=None,
         observability: ObservabilityContext | None = None,
+        circuit_breaker_enabled=True,
+        trip_consecutive_failures=5,
+        trip_failure_rate=0.5,
+        backoff_base_sec=1.0,
+        backoff_max_sec=30.0,
+        probe_budget=3,
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        super().__init__(
+            circuit_breaker_enabled=circuit_breaker_enabled,
+            trip_consecutive_failures=trip_consecutive_failures,
+            trip_failure_rate=trip_failure_rate,
+            backoff_base_sec=backoff_base_sec,
+            backoff_max_sec=backoff_max_sec,
+            probe_budget=probe_budget,
+            **kwargs,
+        )
         self.client = client
         self.logger = logger
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
+        self.metrics = SchedulerMetrics(self.observability.get_meter("rpcstream.scheduler"))
+        self.metrics.bind(self)
         
     # ----------------------------
     # Generic submit method for BaseRpcRequest
@@ -89,6 +106,7 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 self.success += 1
                 self._update_latency(latency)
                 self._adjust_window(True)
+                self._record_outcome(True)
 
                 meta.extra["latency_ms"] = round(latency, 2)
 
@@ -115,6 +133,7 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 expected_warning = is_expected_rpc_warning(exc)
                 if not expected_warning:
                     self._adjust_window(False)
+                    self._record_outcome(False)
 
                 error_msg = summarize_exception(exc)
                 error_fields = exception_log_fields(exc)
@@ -160,6 +179,11 @@ class AdaptiveRpcScheduler(BaseScheduler):
         mild_decrease_factor = 0.95
         strong_decrease_factor = 0.85
 
+        # Adaptive target: derived from the learned provider latency floor, so
+        # it is correct for any chain/provider without manual tuning. An optional
+        # absolute latency_target_ms (if set) acts as an additional hard floor.
+        target = self.effective_target_ms()
+
         if not success:
             self.current_limit = max(
                 self.min_inflight,
@@ -167,16 +191,16 @@ class AdaptiveRpcScheduler(BaseScheduler):
             )
             reason = "error"
         else:
-            latency = self.latency_ema or self.latency_target_ms
+            latency = self.latency_ema or target
 
-            if latency > self.latency_target_ms * 3:
+            if latency > target * 3:
                 self.current_limit = max(
                     self.min_inflight,
                     int(cur * strong_decrease_factor),
                 )
                 reason = "high_latency_strong"
 
-            elif latency > self.latency_target_ms:
+            elif latency > target:
                 self.current_limit = max(
                     self.min_inflight,
                     max(cur - 1, int(cur * mild_decrease_factor)),
@@ -199,4 +223,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 new_window=self.current_limit,
                 reason=reason,
                 latency_ema_ms=round(self.latency_ema or 0, 2),
+                latency_floor_ms=round(self.latency_floor or 0, 2),
+                effective_target_ms=round(target, 2),
             )

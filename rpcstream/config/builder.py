@@ -66,6 +66,12 @@ def build_kafka_config(cfg: PipelineConfig) -> dict:
         kafka.producer.compression_type,
     )
 
+    # Bound the internal producer buffer so a broker outage can't make librdkafka
+    # buffer up to ~1GB and exhaust memory. The sink already applies backpressure
+    # (BufferError) once this is full. setdefault lets operators override.
+    result.setdefault("queue.buffering.max.messages", 5000)
+    result.setdefault("queue.buffering.max.kbytes", 32768)
+
     if kafka.eos.enabled:
         result["enable.idempotence"] = True
         result["acks"] = "all"

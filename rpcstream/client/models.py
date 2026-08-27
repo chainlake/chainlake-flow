@@ -89,8 +89,18 @@ class RpcResponseError(Exception):
 
         return bool(self._upstream_block_unavailable_causes())
 
+    def is_upstream_not_synced(self) -> bool:
+        # An upstream being momentarily behind the chain head ("not synced")
+        # is a benign propagation gap: the block will be serveable once that
+        # upstream catches up (the surrounding blocks keep processing fine).
+        # This is the same transient class as block-not-ready and must NOT be
+        # treated as a hard failure — otherwise it would shrink the adaptive
+        # window and (with the circuit breaker) trip the whole pipeline on a
+        # single flaky upstream. Erpc surfaces it as -32603 with "not synced".
+        return "not synced" in str(self.message).lower()
+
     def is_expected_warning(self) -> bool:
-        return self.is_upstream_block_not_ready()
+        return self.is_upstream_block_not_ready() or self.is_upstream_not_synced()
 
     def log_fields(self) -> dict[str, Any]:
         fields = {

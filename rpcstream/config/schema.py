@@ -112,12 +112,26 @@ class ChainConfig(BaseModel):
 
 class ErpcInflight(BaseModel):
     max_inflight: int
-    latency_target_ms: int
+    latency_target_ms: int = 0
     min_inflight: int = 1
     initial_inflight: int | None = None
+    target_multiplier: float = 3.0
+    # Failure-aware circuit breaker: pause admission (and collapse concurrency)
+    # when the upstream is unhealthy, so a temporary fault can't saturate CPU /
+    # memory / disk. Safe defaults; only trips on real sustained failures.
+    circuit_breaker_enabled: bool = True
+    trip_consecutive_failures: int = 5
+    trip_failure_rate: float = 0.5
+    backoff_base_sec: float = 1.0
+    backoff_max_sec: float = 30.0
+    probe_budget: int = 3
 
     @model_validator(mode="after")
     def validate_bounds(self):
+        if self.latency_target_ms < 0:
+            raise ValueError("erpc.inflight.latency_target_ms must be >= 0")
+        if self.target_multiplier <= 0:
+            raise ValueError("erpc.inflight.target_multiplier must be > 0")
         if self.min_inflight < 1:
             raise ValueError("erpc.inflight.min_inflight must be >= 1")
         if self.max_inflight < self.min_inflight:
@@ -129,6 +143,16 @@ class ErpcInflight(BaseModel):
                 "erpc.inflight.initial_inflight must be between "
                 "erpc.inflight.min_inflight and erpc.inflight.max_inflight"
             )
+        if self.trip_consecutive_failures < 1:
+            raise ValueError("erpc.inflight.trip_consecutive_failures must be >= 1")
+        if not (0.0 < self.trip_failure_rate <= 1.0):
+            raise ValueError("erpc.inflight.trip_failure_rate must be in (0, 1]")
+        if self.backoff_base_sec <= 0:
+            raise ValueError("erpc.inflight.backoff_base_sec must be > 0")
+        if self.backoff_max_sec < self.backoff_base_sec:
+            raise ValueError("erpc.inflight.backoff_max_sec must be >= backoff_base_sec")
+        if self.probe_budget < 1:
+            raise ValueError("erpc.inflight.probe_budget must be >= 1")
         return self
 
 
@@ -210,11 +234,19 @@ class TrackerConfig(BaseModel):
 
 class EngineConfig(BaseModel):
     concurrency: int | None = None
+    # Sink (Kafka) health: when delivery hangs/fails, pause pulling new cursors
+    # so we don't generate unbounded failed work. Bounds checkpoint-task growth.
+    sink_failure_timeout_sec: float = 10.0
+    sink_cooldown_sec: float = 15.0
 
     @model_validator(mode="after")
     def validate_concurrency(self):
         if self.concurrency is not None and self.concurrency < 1:
             raise ValueError("engine.concurrency must be >= 1")
+        if self.sink_failure_timeout_sec <= 0:
+            raise ValueError("engine.sink_failure_timeout_sec must be > 0")
+        if self.sink_cooldown_sec <= 0:
+            raise ValueError("engine.sink_cooldown_sec must be > 0")
         return self
 
 
