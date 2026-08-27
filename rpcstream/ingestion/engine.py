@@ -155,11 +155,15 @@ class IngestionEngine:
                 # shutdown-aware queue getter. Otherwise use sentinels to stop
                 # workers after the bounded source is exhausted.
                 if not self._is_shutdown_requested(shutdown_event):
-                    for _ in range(worker_count):
+                    for _ in range(worker_pool_size):
                         await queue.put(None)
 
-        async def worker():
-            while True:
+        async def worker(idx: int):
+            # Cooperative exit: when the scheduler shrinks current_limit in
+            # adaptive mode, the engine marks the corresponding exit flag and
+            # this worker exits cleanly after its current cursor (no mid-RPC
+            # cancellation).
+            while not worker_exit_flags[idx].is_set():
                 cursor = await self._queue_get_or_shutdown(queue, shutdown_event)
                 if cursor is None:
                     break
