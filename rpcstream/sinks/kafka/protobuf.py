@@ -68,7 +68,6 @@ class SchemaRegistrySerializerRegistry:
             if self.logger:
                 self.logger.debug(
                     "kafka.schema_ready",
-                    component="sink",
                     topic=topic,
                     schema_format=self.schema_format,
                     message_name=schema.message_name,

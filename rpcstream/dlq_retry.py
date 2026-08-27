@@ -39,7 +39,6 @@ async def run_dlq_retry(
 
     stack.logger.info(
         "dlq.retry_worker_started",
-        component="dlq",
         topic=stack.runtime.topic_map.dlq,
         group_id=group_id,
     )
@@ -65,7 +64,6 @@ async def run_dlq_retry(
                 await stack.engine.mark_dlq_resolved(record)
                 stack.logger.info(
                     "dlq.retry_succeeded",
-                    component="dlq",
                     entity=record.get("entity"),
                     cursor=record.get("cursor"),
                     retry_count=record.get("retry_count", 0),
@@ -73,7 +71,6 @@ async def run_dlq_retry(
             else:
                 stack.logger.warn(
                     "dlq.retry_failed",
-                    component="dlq",
                     entity=record.get("entity"),
                     cursor=record.get("cursor"),
                     retry_count=record.get("retry_count", 0) + 1,

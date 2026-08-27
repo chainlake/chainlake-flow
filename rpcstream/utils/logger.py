@@ -50,7 +50,7 @@ class JsonLogger:
 
     def _log(self, level, message, **kwargs):
         trace_context = _get_trace_context()
-        
+
         log = {
             "level": level,
             "time": int(time.time() * 1000),
@@ -68,17 +68,25 @@ class JsonLogger:
         if self._otel_logger is None:
             return
 
+        attributes = {
+            key: _otel_attribute_value(value)
+            for key, value in log.items()
+            if key != "message" and value is not None
+        }
+        if (
+            "component" not in attributes
+            and isinstance(message, str)
+            and "." in message
+        ):
+            attributes["component"] = message.split(".", 1)[0]
+
         span_context = trace.get_current_span().get_span_context()
         kwargs = {
             "timestamp": log["time"] * 1_000_000,
             "severity_text": level.upper(),
             "severity_number": self._OTEL_SEVERITY[level],
             "body": message,
-            "attributes": {
-                key: _otel_attribute_value(value)
-                for key, value in log.items()
-                if key != "message" and value is not None
-            },
+            "attributes": attributes,
         }
         if span_context.is_valid:
             kwargs.update(

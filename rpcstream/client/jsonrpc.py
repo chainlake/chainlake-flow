@@ -60,7 +60,6 @@ class JsonRpcClient(BaseClient):
         if self.logger:
             self.logger.debug(
                 "client.http_send",
-                component="client",
                 method=request.method,
                 payload_preview=str(payload)[:200]
             )
@@ -85,14 +84,12 @@ class JsonRpcClient(BaseClient):
                 if exc.is_expected_warning():
                     self.logger.debug(
                         "client.rpc_response_error",
-                        component="client",
                         method=request.method,
                         **exc.log_fields(),
                     )
                 else:
                     self.logger.error(
                         "client.rpc_response_error",
-                        component="client",
                         method=request.method,
                         **exc.log_fields(),
                     )
@@ -102,7 +99,6 @@ class JsonRpcClient(BaseClient):
         if self.logger:
             self.logger.debug(
                 "client.rpc_response",
-                component="client",
                 method=request.method,
                 response_preview=str(data)[:200]
             )

@@ -103,7 +103,6 @@ class EvmChainHeadTracker:
         if self.logger:
             self.logger.debug(
                 "block_tracker.update",
-                component="tracker",
                 head_cursor=head_cursor,
                 source=source,
             )
@@ -124,7 +123,6 @@ class EvmChainHeadTracker:
                     if self.logger:
                         self.logger.warn(
                             "block_tracker.invalid_response",
-                            component="tracker",
                             source="poll",
                             result=str(result)[:200],
                         )
@@ -132,7 +130,6 @@ class EvmChainHeadTracker:
                 if self.logger:
                     self.logger.debug(
                         "block_tracker.latency",
-                        component="tracker",
                         source="poll",
                         latency_ms=self._last_poll_latency_ms,
                     )
@@ -143,7 +140,6 @@ class EvmChainHeadTracker:
                 if self.logger:
                     self.logger.error(
                         "block_tracker.error",
-                        component="tracker",
                         source="poll",
                         error=str(exc),
                     )
@@ -197,7 +193,6 @@ class EvmChainHeadTracker:
                     if self.logger:
                         self.logger.info(
                             "block_tracker.ws_connected",
-                            component="tracker",
                             websocket_url=self.websocket_url,
                         )
 
@@ -223,7 +218,6 @@ class EvmChainHeadTracker:
                                 if self.logger:
                                     self.logger.warn(
                                         "block_tracker.ws_decode_error",
-                                        component="tracker",
                                         websocket_url=self.websocket_url,
                                         error=str(exc),
                                     )
@@ -234,7 +228,6 @@ class EvmChainHeadTracker:
                                 if self.logger:
                                     self.logger.info(
                                         "block_tracker.ws_subscribed",
-                                        component="tracker",
                                         websocket_url=self.websocket_url,
                                         subscription_id=subscription_id,
                                     )
@@ -246,7 +239,6 @@ class EvmChainHeadTracker:
                                 if self.logger:
                                     self.logger.debug(
                                         "block_tracker.ws_update",
-                                        component="tracker",
                                         websocket_url=self.websocket_url,
                                         subscription_id=subscription_id,
                                         head_cursor=head_cursor,
@@ -266,7 +258,6 @@ class EvmChainHeadTracker:
                 if self.logger:
                     self.logger.error(
                         "block_tracker.ws_error",
-                        component="tracker",
                         websocket_url=self.websocket_url,
                         error=str(exc),
                     )

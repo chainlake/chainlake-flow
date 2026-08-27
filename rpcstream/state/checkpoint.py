@@ -252,7 +252,6 @@ class KafkaCheckpointReader:
                         if self.logger:
                             self.logger.warn(
                                 "checkpoint.schema_missing",
-                                component="checkpoint",
                                 topic=self.topic,
                                 key=self.identity.key,
                                 error=str(exc),
@@ -272,7 +271,6 @@ class KafkaCheckpointReader:
         if latest_record and self.logger:
             self.logger.info(
                 "checkpoint.loaded",
-                component="checkpoint",
                 topic=self.topic,
                 key=self.identity.key,
                 cursor=latest_record.cursor,
@@ -419,7 +417,6 @@ class KafkaWatermarkStateReader:
                         if self.logger:
                             self.logger.warn(
                                 "watermark.schema_missing",
-                                component="checkpoint",
                                 topic=self.topic,
                                 key=self.identity.key,
                                 error=str(exc),
@@ -441,7 +438,6 @@ class KafkaWatermarkStateReader:
         if records and self.logger:
                 self.logger.info(
                     "watermark.external_state_loaded",
-                    component="checkpoint",
                     topic=self.topic,
                     key=self.identity.key,
                     cursor_count=len(records),
@@ -660,7 +656,6 @@ class WatermarkManager:
         if self.logger:
             self.logger.warn(
                 "watermark.cursor_failed",
-                component="checkpoint",
                 cursor=cursor,
                 error=error,
             )
@@ -746,7 +741,6 @@ class WatermarkManager:
                 if advanced_watermark is not None and self.logger is not None:
                     self.logger.info(
                         "watermark.external_state_merged",
-                        component="checkpoint",
                         cursor=advanced_watermark,
                         topic=self.state_reader.topic,
                     )
@@ -754,7 +748,6 @@ class WatermarkManager:
                 if self.logger is not None:
                     self.logger.warn(
                         "watermark.external_state_refresh_failed",
-                        component="checkpoint",
                         topic=getattr(self.state_reader, "topic", None),
                         error=str(exc),
                     )

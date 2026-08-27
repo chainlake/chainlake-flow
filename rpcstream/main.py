@@ -107,7 +107,6 @@ def install_shutdown_handlers(logger) -> asyncio.Event:
         if logger:
             logger.warn(
                 "runtime.shutdown_requested",
-                component="runtime",
                 signal=signal_name,
             )
         shutdown_event.set()
@@ -159,7 +158,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
     )
     logger.info(
         "runtime.startup_context",
-        component="runtime",
         schema_registry_url=runtime.kafka.schema_registry_url,
         schema_registry_type=schema_registry_type,
         checkpoint_topic=runtime.checkpoint.topic,
@@ -173,7 +171,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
     if bypass_hosts:
         logger.info(
             "runtime.proxy_bypass_configured",
-            component="runtime",
             hosts=bypass_hosts,
         )
 
@@ -257,7 +254,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             )
             logger.info(
                 "checkpoint.load_started",
-                component="checkpoint",
                 topic=runtime.checkpoint.topic,
                 key=checkpoint_reader.identity.key,
             )
@@ -283,7 +279,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             ):
                 logger.warn(
                     "checkpoint.schema_reset_requested",
-                    component="checkpoint",
                     checkpoint_topic=runtime.checkpoint.topic,
                     watermark_state_topic=runtime.checkpoint.watermark_state_topic,
                     schema_registry_url=runtime.kafka.schema_registry_url,
@@ -391,7 +386,6 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         if shutdown_event.is_set():
             logger.warn(
                 "runtime.shutdown_complete",
-                component="runtime",
             )
 
 

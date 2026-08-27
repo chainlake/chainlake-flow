@@ -42,7 +42,6 @@ class BaseClient(ABC):
         if self.logger:
             self.logger.debug(
                 "rpc.request",
-                component="client",
                 rpc_url=self.base_url,
                 method=method,
                 params_preview=str(request.params)[:100]
@@ -75,7 +74,6 @@ class BaseClient(ABC):
                         if self.logger:
                             self.logger.debug(
                                 "rpc.success",
-                                component="client",
                                 method=method,
                                 attempt=attempt,
                             )
@@ -91,7 +89,6 @@ class BaseClient(ABC):
                         if self.logger:
                             self.logger.warn(
                                 "rpc.timeout",
-                                component="client",
                                 method=method,
                                 attempt=attempt,
                             )
@@ -112,7 +109,6 @@ class BaseClient(ABC):
                             log_method = self.logger.debug if is_expected_rpc_warning(exc) else self.logger.warn
                             log_method(
                                 "rpc.transport_error",
-                                component="client",
                                 method=method,
                                 attempt=attempt,
                                 **exception_log_fields(exc),
@@ -139,7 +135,6 @@ class BaseClient(ABC):
                         log_method = self.logger.error
                     log_method(
                         "rpc.failed",
-                        component="client",
                         method=method,
                         **exception_log_fields(exc),
                     )
@@ -159,7 +154,6 @@ class BaseClient(ABC):
                 if self.logger:
                     self.logger.debug(
                         "rpc.complete",
-                        component="client",
                         method=method,
                         latency_ms=round(latency, 2),
                     )

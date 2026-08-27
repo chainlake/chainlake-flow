@@ -19,7 +19,6 @@ class EvmRpcFetcher:
         if self.logger:
             self.logger.debug(
                 "fetcher.request",
-                component="fetcher",
                 entities=self.entities,
                 block=cursor,
                 cursor=cursor,
@@ -86,7 +85,6 @@ class EvmRpcFetcher:
             for entity in raw_data:
                 self.logger.debug(
                     "fetcher.response",
-                    component="fetcher",
                     method=req_method[entity],
                     block=cursor,
                     cursor=cursor,

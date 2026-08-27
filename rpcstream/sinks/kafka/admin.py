@@ -48,7 +48,6 @@ class KafkaTopicManager:
                 if self.logger:
                     self.logger.info(
                         "kafka.topic_deleted",
-                        component="sink",
                         topic=topic,
                     )
             except Exception as exc:
@@ -82,7 +81,6 @@ class KafkaTopicManager:
                 if self.logger:
                     self.logger.info(
                         "kafka.topic_created",
-                        component="sink",
                         topic=topic,
                         config=config,
                     )
@@ -135,7 +133,6 @@ class KafkaTopicManager:
             if self.logger:
                 self.logger.info(
                     "kafka.topic_compaction_updated",
-                    component="sink",
                     topic=resource.name,
                     cleanup_policy=TOPIC_COMPACT_DELETE_POLICY_VALUE,
                 )
@@ -180,7 +177,6 @@ class KafkaTopicManager:
             if self.logger:
                 self.logger.info(
                     "kafka.topic_timestamp_updated",
-                    component="sink",
                     topic=resource.name,
                     message_timestamp_type=TOPIC_TIMESTAMP_VALUE,
                 )
@@ -226,7 +222,6 @@ class KafkaTopicManager:
         if self.logger:
             self.logger.warning(
                 "kafka.topic_visibility_timeout",
-                component="sink",
                 topics=unique_topics,
                 timeout_seconds=timeout_seconds,
             )

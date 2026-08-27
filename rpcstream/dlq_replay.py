@@ -61,7 +61,6 @@ async def run_dlq_replay(
     try:
         stack.logger.info(
             "dlq.replay_started",
-            component="dlq",
             topic=stack.runtime.topic_map.dlq,
             entity=entity,
             status=status,

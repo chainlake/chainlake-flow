@@ -62,7 +62,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
             if self.logger:  # DEBUG
                 self.logger.debug(
                     "scheduler.enqueue",
-                    component="scheduler",
                     method=request.operation_name(),
                     inflight=self.inflight,
                     window=self.current_limit,
@@ -76,7 +75,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
             if self.logger:
                 self.logger.debug(
                     "scheduler.slot_acquired",
-                    component="scheduler",
                     method=request.operation_name(),
                     queue_wait_ms=round(wait_ms, 2),
                     inflight=self.inflight,
@@ -116,7 +114,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 if self.logger:
                     self.logger.debug(
                         "scheduler.request_success",
-                        component="scheduler",
                         method=request.operation_name(),
                         latency_ms=round(latency, 2),
                         inflight=self.inflight,
@@ -146,7 +143,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
                     log_method = self.logger.warn if expected_warning else self.logger.error
                     log_method(
                         "scheduler.request_failed",
-                        component="scheduler",
                         method=request.operation_name(),
                         inflight=self.inflight,
                         window=self.current_limit,
@@ -166,7 +162,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 if self.logger:
                     self.logger.debug(
                         "scheduler.slot_released",
-                        component="scheduler",
                         inflight=self.inflight,
                         window=self.current_limit,
                     )
@@ -218,7 +213,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
         if self.logger and self.current_limit != prev:
             self.logger.debug(
                 "scheduler.window_adjusted",
-                component="scheduler",
                 prev_window=prev,
                 new_window=self.current_limit,
                 reason=reason,

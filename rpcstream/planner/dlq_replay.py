@@ -104,7 +104,6 @@ class DlqReplayCursorSource(CursorSource):
         if self.logger:
             self.logger.info(
                 "dlq.replay_cursors_loaded",
-                component="dlq",
                 cursor_count=len(self._cursors),
                 scanned_records=scanned,
                 latest_record_count=len(latest_records),

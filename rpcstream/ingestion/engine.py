@@ -155,7 +155,6 @@ class IngestionEngine:
             if self._is_shutdown_requested(shutdown_event) and self.logger:
                 self.logger.warn(
                     "engine.shutdown_draining",
-                    component="engine",
                     queued_blocks=queue.qsize(),
                     checkpoint_tasks=len(self._checkpoint_tasks),
                 )
@@ -164,7 +163,6 @@ class IngestionEngine:
             if self.logger:
                 self.logger.warn(
                     "engine.shutdown_cancelled",
-                    component="engine",
                 )
             for task in workers:
                 task.cancel()
@@ -341,7 +339,6 @@ class IngestionEngine:
                                 if self.logger:
                                     self.logger.warn(
                                         "engine.rpc_failed",
-                                        component="engine",
                                         entity=entity,
                                         cursor=cursor,
                                         error=error_msg,
@@ -420,7 +417,6 @@ class IngestionEngine:
                                     )
                                     self.logger.info(
                                         "engine.processed",
-                                        component="engine",
                                         cursor=cursor,
                                         entity=entity,
                                         rpc_latency_ms=latency,
@@ -448,7 +444,6 @@ class IngestionEngine:
                             if self.logger:
                                 self.logger.warn(
                                     "engine.rpc_retry_scheduled",
-                                    component="engine",
                                     entity=retry_entity,
                                     cursor=cursor,
                                     attempt=attempt,
@@ -525,7 +520,6 @@ class IngestionEngine:
                         if self.logger:
                             self.logger.error(
                                 "engine.processor_error",
-                                component="engine",
                                 entity=current_entity,
                                 cursor=cursor,
                                 error=error_msg
@@ -690,7 +684,6 @@ class IngestionEngine:
                     if self.logger:
                         self.logger.warn(
                             "engine.sink_delivery_failed",
-                            component="engine",
                             cursor=cursor,
                             timed_out=delivery_results is None,
                         )
@@ -755,7 +748,6 @@ class IngestionEngine:
             ):
                 self.logger.warn(
                     "watermark.advance_mismatch",
-                    component="checkpoint",
                     cursor=cursor,
                     expected=expected_watermark,
                     actual=advanced_watermark,
@@ -814,7 +806,6 @@ class IngestionEngine:
             if self.logger:
                 self.logger.warn(
                     "engine.dlq_missing_topic",
-                    component="engine",
                     entity=entity,
                     cursor=cursor,
                 )
@@ -858,7 +849,6 @@ class IngestionEngine:
         if self.logger:
             self.logger.warn(
                 "engine.dlq_sent",
-                component="engine",
                 topic=topic,
                 entity=entity,
                 cursor=cursor,

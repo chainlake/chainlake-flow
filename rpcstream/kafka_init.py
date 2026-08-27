@@ -16,7 +16,6 @@ def main() -> None:
 
     logger.info(
         "kafka.bootstrap_started",
-        component="sink",
         config_path=config_path,
         pipeline=runtime.pipeline.name,
         schema_registry_enabled=getattr(
@@ -33,7 +32,6 @@ def main() -> None:
     )
     logger.info(
         "kafka.bootstrap_context",
-        component="sink",
         schema_registry_url=runtime.kafka.schema_registry_url,
         schema_registry_type=getattr(
             runtime.kafka,

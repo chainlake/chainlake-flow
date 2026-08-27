@@ -61,7 +61,6 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
         if logger:
             logger.info(
                 "kafka.bootstrap_complete",
-                component="sink",
                 schema_registry_enabled=False,
                 schema_registry_mode="disabled",
                 checkpoint_topic=runtime.checkpoint.topic,
@@ -98,7 +97,6 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
     if logger:
         logger.info(
             "kafka.bootstrap_complete",
-            component="sink",
             schema_registry_enabled=True,
             schema_registry_type=schema_registry_type,
             schema_registry_mode=schema_registry_type or "avro",
@@ -119,7 +117,6 @@ def _ensure_schema_registry_internal_topic(topic_manager, logger=None) -> None:
         if logger:
             logger.info(
                 "kafka.schema_registry_internal_topic_skipped",
-                component="sink",
                 topic=SCHEMA_REGISTRY_INTERNAL_TOPIC,
                 reason="topic is protected or alter_configs is not allowed",
             )

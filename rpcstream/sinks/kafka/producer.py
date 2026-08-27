@@ -81,7 +81,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.error(
                     "kafka.delivery_failed",
-                    component="sink",
                     topic=msg.topic(),
                     error=str(err),
                 )
@@ -90,7 +89,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.debug(
                     "kafka.delivery_success",
-                    component="sink",
                     topic=msg.topic(),
                     partition=msg.partition(),
                     offset=msg.offset(),
@@ -214,7 +212,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.debug(
                     "kafka.enqueue",
-                    component="sink",
                     topic=topic,
                     batch_size=len(rows),
                     queue_size=self.queue.qsize(),
@@ -312,7 +309,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.debug(
                     "kafka.batch_send",
-                    component="sink",
                     batch_size=len(items),
                     topics=dict(topic_counts),
                 )
@@ -472,7 +468,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.debug(
                     "kafka.schema_registry_warmup_started",
-                    component="sink",
                     schema_registry=self.protobuf_registry.schema_registry_url,
                     schema_registry_type=self.schema_registry_type,
                     topic_count=len(self.protobuf_registry.topic_schemas),
@@ -481,7 +476,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.debug(
                     "kafka.schema_registry_warmup_complete",
-                    component="sink",
                     schema_registry=self.protobuf_registry.schema_registry_url,
                     schema_registry_type=self.schema_registry_type,
                     topic_count=len(self.protobuf_registry.topic_schemas),
@@ -492,7 +486,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.info(
                     "kafka.eos_init_started",
-                    component="sink",
                     transactional_id=self.producer_config.get("transactional.id"),
                     timeout_sec=self.eos_init_timeout_sec,
                 )
@@ -500,7 +493,6 @@ class KafkaWriter:
             if self.logger:
                 self.logger.info(
                     "kafka.eos_init_complete",
-                    component="sink",
                     transactional_id=self.producer_config.get("transactional.id"),
                 )
 
@@ -530,7 +522,6 @@ class KafkaWriter:
                 if self.logger:
                     self.logger.warn(
                         "kafka.eos_init_failed",
-                        component="sink",
                         transactional_id=self.producer_config.get("transactional.id"),
                         attempt=attempt,
                         attempts=attempts,
