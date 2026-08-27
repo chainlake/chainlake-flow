@@ -437,6 +437,7 @@ async def _run_benchmark_async(
             pipeline=runtime.pipeline,
             max_retry=runtime.client.max_retries,
             concurrency=runtime.engine.concurrency,
+            max_inflight=runtime.engine.max_inflight,
             logger=logger,
             observability=observability,
             watermark_manager=watermark_manager,

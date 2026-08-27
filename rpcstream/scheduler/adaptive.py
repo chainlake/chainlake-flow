@@ -180,32 +180,40 @@ class AdaptiveRpcScheduler(BaseScheduler):
         target = self.effective_target_ms()
 
         if not success:
-            self.current_limit = max(
-                self.min_inflight,
-                int(cur * strong_decrease_factor),
+            self._set_current_limit(
+                max(
+                    self.min_inflight,
+                    int(cur * strong_decrease_factor),
+                )
             )
             reason = "error"
         else:
             latency = self.latency_ema or target
 
             if latency > target * 3:
-                self.current_limit = max(
-                    self.min_inflight,
-                    int(cur * strong_decrease_factor),
+                self._set_current_limit(
+                    max(
+                        self.min_inflight,
+                        int(cur * strong_decrease_factor),
+                    )
                 )
                 reason = "high_latency_strong"
 
             elif latency > target:
-                self.current_limit = max(
-                    self.min_inflight,
-                    max(cur - 1, int(cur * mild_decrease_factor)),
+                self._set_current_limit(
+                    max(
+                        self.min_inflight,
+                        max(cur - 1, int(cur * mild_decrease_factor)),
+                    )
                 )
                 reason = "high_latency_mild"
 
             else:
-                self.current_limit = min(
-                    self.max_inflight,
-                    cur + increase_step,
+                self._set_current_limit(
+                    min(
+                        self.max_inflight,
+                        cur + increase_step,
+                    )
                 )
                 reason = "increase"
 

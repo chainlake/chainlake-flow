@@ -86,6 +86,47 @@ class BaseScheduler:
 
         self.start_ts = time.time()
 
+        # Listeners notified synchronously whenever `current_limit` changes
+        # (adaptive grow/shrink, circuit breaker collapse, etc.). Used by the
+        # adaptive engine worker pool to track inflight without polling.
+        self._window_change_listeners: list = []
+
+    def add_window_change_listener(self, listener):
+        """Register a callback fired synchronously when `current_limit` changes.
+        The listener receives the new limit. Returns the listener so it can be
+        passed back to `remove_window_change_listener` for cleanup.
+        """
+        self._window_change_listeners.append(listener)
+        return listener
+
+    def remove_window_change_listener(self, listener):
+        try:
+            self._window_change_listeners.remove(listener)
+        except ValueError:
+            pass
+
+    def _set_current_limit(self, new_limit):
+        """Single mutation point: update current_limit, replace the admission
+        semaphore, and fire window-change listeners. Callers (cb_trip,
+        _adjust_window) must use this instead of writing self.current_limit
+        directly so the listeners stay consistent.
+        """
+        new_limit = max(self.min_inflight, min(self.max_inflight, int(new_limit)))
+        if new_limit == self.current_limit:
+            return False
+        self.current_limit = new_limit
+        # Replace the admission semaphore (matches the existing
+        # `_on_window_change` pattern: workers holding the old reference
+        # release it normally; new acquires go to the fresh semaphore).
+        self.sem = asyncio.Semaphore(self.current_limit)
+        for listener in list(self._window_change_listeners):
+            try:
+                listener(self.current_limit)
+            except Exception:
+                # Listener failures must not break the scheduler.
+                pass
+        return True
+
     async def _acquire_slot(self):
         while True:
             # Circuit breaker: while OPEN, wait out the cooldown (yield to the
@@ -140,7 +181,7 @@ class BaseScheduler:
         self.cb_probes_remaining = 0
         self.cb_probe_success = 0
         # Collapse concurrency immediately so we stop hammering the upstream.
-        self.current_limit = self.min_inflight
+        self._set_current_limit(self.min_inflight)
 
     def _cb_half_open(self):
         self.cb_state = CB_HALF_OPEN

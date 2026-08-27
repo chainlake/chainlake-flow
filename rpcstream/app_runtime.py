@@ -206,6 +206,7 @@ def build_runtime_stack(
         pipeline=runtime.pipeline,
         max_retry=runtime.client.max_retries,
         concurrency=runtime.engine.concurrency,
+        max_inflight=runtime.engine.max_inflight,
         sink_failure_timeout_sec=runtime.engine.sink_failure_timeout_sec,
         sink_cooldown_sec=runtime.engine.sink_cooldown_sec,
         logger=logger,

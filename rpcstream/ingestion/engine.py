@@ -31,7 +31,8 @@ class IngestionEngine:
         chain=None,
         pipeline=None,
         max_retry=0,
-        concurrency=10,
+        concurrency=0,
+        max_inflight: int = 1,
         sink_failure_timeout_sec: float = 10.0,
         sink_cooldown_sec: float = 15.0,
         logger=None,
@@ -58,6 +59,15 @@ class IngestionEngine:
         self.pipeline = pipeline
         self.max_retry = max_retry
         self.concurrency = concurrency
+        # Upper bound for the adaptive worker pool. Only used when
+        # concurrency == 0 (adaptive mode) — we spawn that many workers at
+        # startup and let cooperative shrink reduce the active count when the
+        # scheduler's current_limit drops (CB trip, latency inflation, ...).
+        self.max_inflight = max(1, int(max_inflight))
+        # Track the live worker count for the OTel observable gauge.
+        # Populated when run_stream spawns the workers.
+        self._active_worker_count = 0
+        self._worker_exit_flags: list[asyncio.Event] = []
         self.sink_failure_timeout_sec = sink_failure_timeout_sec
         self.sink_cooldown_sec = sink_cooldown_sec
         # When the sink (Kafka) is unavailable, pulling new cursors is paused
@@ -71,7 +81,10 @@ class IngestionEngine:
         self._active_dlq_record = None
         self.observability = observability or ObservabilityContext.disabled()
         self._tracer = self.observability.get_tracer(__name__)
-        self.metrics = EngineMetrics(self.observability.get_meter("rpcstream.engine"))
+        self.metrics = EngineMetrics(
+            self.observability.get_meter("rpcstream.engine"),
+            engine=self,
+        )
         self.decoder = decoder
         self.watermark_manager = watermark_manager
         self.checkpoint_reader = checkpoint_reader
@@ -95,8 +108,26 @@ class IngestionEngine:
             await self.watermark_manager.start()
             checkpoint_started = True
 
-        worker_count = 1 if self.eos_enabled else self.concurrency
         queue = asyncio.Queue(maxsize=1 if self.eos_enabled else 1000)
+        # Worker pool sizing:
+        #   - eos_enabled: 1 worker, single permit, strict serial.
+        #   - concurrency == 0 (adaptive): spawn max_inflight workers, register
+        #     a scheduler callback that shrinks the active set when the
+        #     scheduler's current_limit drops. Grow is free (workers already
+        #     exist); constraint `active >= current_limit` is upheld because
+        #     shrink only marks excess workers for exit, never the ones still
+        #     needed.
+        #   - concurrency > 0 (fixed): spawn N workers, no adaptive behaviour.
+        if self.eos_enabled:
+            worker_pool_size = 1
+        elif self.concurrency == 0:
+            worker_pool_size = self.max_inflight
+        else:
+            worker_pool_size = self.concurrency
+        is_adaptive = (self.concurrency == 0) and not self.eos_enabled
+        worker_exit_flags = [asyncio.Event() for _ in range(worker_pool_size)]
+        self._worker_exit_flags = worker_exit_flags
+        self._active_worker_count = worker_pool_size
 
         async def producer():
             try:
@@ -145,11 +176,47 @@ class IngestionEngine:
                     self._checkpoint_tasks.add(task)
                     task.add_done_callback(self._checkpoint_tasks.discard)
 
+        listener = None
         try:
             workers = [
-                asyncio.create_task(worker())
-                for _ in range(worker_count)
+                asyncio.create_task(worker(i))
+                for i in range(worker_pool_size)
             ]
+
+            # Register scheduler callback for adaptive shrink.
+            if is_adaptive:
+                scheduler = getattr(self.fetcher, "scheduler", None)
+
+                def _on_limit_change(new_limit: int):
+                    if not worker_exit_flags:
+                        return
+                    target = max(1, min(int(new_limit), worker_pool_size))
+                    active = [
+                        i for i, flag in enumerate(worker_exit_flags)
+                        if not flag.is_set()
+                    ]
+                    active_count = len(active)
+                    if target >= active_count:
+                        # Grow is free: workers were pre-spawned, just update gauge.
+                        self._active_worker_count = active_count
+                        return
+                    for i in active[target:]:
+                        worker_exit_flags[i].set()
+                    self._active_worker_count = target
+                    if self.logger:
+                        self.logger.debug(
+                            "engine.worker_pool_shrunk",
+                            target=target,
+                            inflight_limit=int(new_limit),
+                            pool_size=worker_pool_size,
+                        )
+
+                listener = _on_limit_change
+                if scheduler is not None:
+                    scheduler.add_window_change_listener(listener)
+                    # Fire once with the initial value so the gauge / state
+                    # is consistent from the very first observation.
+                    listener(scheduler.current_limit)
 
             await producer()
             if self._is_shutdown_requested(shutdown_event) and self.logger:
@@ -169,6 +236,15 @@ class IngestionEngine:
             if workers:
                 await asyncio.gather(*workers, return_exceptions=True)
         finally:
+            # Set every exit flag (even ones already set) and unregister the
+            # scheduler listener so a subsequent run_stream() on the same
+            # engine instance starts with a clean slate.
+            for flag in worker_exit_flags:
+                flag.set()
+            if listener is not None:
+                scheduler = getattr(self.fetcher, "scheduler", None)
+                if scheduler is not None:
+                    scheduler.remove_window_change_listener(listener)
             if self._checkpoint_tasks:
                 await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
             if self.watermark_manager is not None and checkpoint_started:

@@ -1,3 +1,6 @@
+from opentelemetry.metrics import Observation
+
+
 class _NoOp:
     def add(self, *args, **kwargs):
         pass
@@ -5,8 +8,13 @@ class _NoOp:
     def record(self, *args, **kwargs):
         pass
 
+
 class EngineMetrics:
-    def __init__(self, meter=None):
+    def __init__(self, meter=None, engine=None):
+        # `engine` is an optional weak reference target so the WORKER_COUNT
+        # observable gauge can pull the live active-worker count at scrape
+        # time without forcing callers to call `bind(engine)` after the fact.
+        self._engine = engine
         if meter is None:
             self.BLOCK_COUNTER = _NoOp()
             self.ROW_COUNTER = _NoOp()
@@ -18,6 +26,7 @@ class EngineMetrics:
             self.ERROR_COUNTER = _NoOp()
             self.CHAIN_LAG = _NoOp()
             self.INGESTION_LAG = _NoOp()
+            self.WORKER_COUNT = _NoOp()
             return
 
         # Throughput
@@ -69,3 +78,29 @@ class EngineMetrics:
             name="rpcstream_engine_ingestion_lag",
             description="TRUE pipeline lag (monotonic)",
         )
+
+        # Adaptive worker pool visibility — pairs with
+        # rpcstream_scheduler_current_limit / _effective_target_ms so Grafana
+        # can plot "are workers starving the inflight window?".
+        self.WORKER_COUNT = meter.create_observable_gauge(
+            "rpcstream_engine_worker_count",
+            description=(
+                "Live cursor-fetching worker count. In adaptive mode "
+                "(engine.concurrency == 0) this tracks "
+                "erpc.inflight.current_limit, bounded by max_inflight. "
+                "In fixed mode this equals engine.concurrency."
+            ),
+            callbacks=[self._observe_worker_count],
+        )
+
+    def bind(self, engine):
+        """Attach the engine instance so WORKER_COUNT can read its live
+        _active_worker_count. Optional — the constructor accepts it too."""
+        self._engine = engine
+
+    def _observe_worker_count(self, options):
+        if self._engine is None:
+            return
+        # Report 0 before run_stream() spawns workers and after it ends so
+        # the gauge never publishes a stale "active" reading between runs.
+        yield Observation(value=float(getattr(self._engine, "_active_worker_count", 0)))
