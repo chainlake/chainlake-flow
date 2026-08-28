@@ -54,7 +54,7 @@ kafka:
   # 1. PLAINTEXT — no auth, no TLS (local dev / internal trusted network)
   #
   connection:
-    bootstrap_servers: "clh001:8081"
+    bootstrap_servers: "localhost:30092"
   #
   # ───────────────────────────────────────────────────────────────────────────
   # 2. SASL_PLAINTEXT — SASL auth over plaintext (internal network with auth)

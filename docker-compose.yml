@@ -1,0 +1,35 @@
+# Containerized rpcstream ingestion job.
+#
+# Equiv to manually running, from the repo root:
+#   source .venv/bin/activate
+#   pip install -e .
+#   rpcstream --from latest
+#
+# Usage:
+#   docker compose up -d --build     # first run builds the image
+#   docker compose logs -f rpcstream # follow job output
+#   docker compose logs -f --tail 100 rpcstream # Shows the most recent 100 lines first, then streams new ones
+#   docker compose down              # stop
+#
+# Notes:
+#   - network_mode: host lets the container reach clh001 (Kafka) and
+#     clv001 (eRPC, from pipeline.yaml) exactly as on the host.
+#   - The app auto-loads .env from its cwd (/app), so we only mount it.
+#   - KAFKA_CA_PATH points at a host path; mount that dir read-only.
+#   - Code is baked into the image; after editing rpcstream/, re-run
+#     `docker compose up -d --build`.
+
+services:
+  rpcstream:
+    build: .
+    container_name: rpcstream
+    network_mode: host
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      PIPELINE_CONFIG: /app/pipeline.yaml
+    volumes:
+      - ./pipeline.yaml:/app/pipeline.yaml:ro
+      - ./.env:/app/.env:ro
+      - /home/ubuntu/certs:/home/ubuntu/certs:ro
+    command: ["rpcstream", "--from", "latest"]
