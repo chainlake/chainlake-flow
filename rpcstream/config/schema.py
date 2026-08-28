@@ -116,6 +116,14 @@ class ErpcInflight(BaseModel):
     min_inflight: int = 1
     initial_inflight: int | None = None
     target_multiplier: float = 3.0
+    # Queue-wait budget (ms). The PRIMARY congestion signal is how long a request
+    # waits for an admission slot, not the raw rpc_latency of one (possibly heavy)
+    # request. 0 = adaptive (derived from the effective latency target).
+    queue_wait_target_ms: int = 0
+    # Contiguous windows a congestion/growth signal must persist before the
+    # adaptive window reacts, so a single heavy-request latency spike cannot
+    # collapse concurrency.
+    adjust_cooldown_windows: int = 3
     # Failure-aware circuit breaker: pause admission (and collapse concurrency)
     # when the upstream is unhealthy, so a temporary fault can't saturate CPU /
     # memory / disk. Safe defaults; only trips on real sustained failures.
@@ -153,6 +161,10 @@ class ErpcInflight(BaseModel):
             raise ValueError("erpc.inflight.backoff_max_sec must be >= backoff_base_sec")
         if self.probe_budget < 1:
             raise ValueError("erpc.inflight.probe_budget must be >= 1")
+        if self.queue_wait_target_ms < 0:
+            raise ValueError("erpc.inflight.queue_wait_target_ms must be >= 0")
+        if self.adjust_cooldown_windows < 1:
+            raise ValueError("erpc.inflight.adjust_cooldown_windows must be >= 1")
         return self
 
 

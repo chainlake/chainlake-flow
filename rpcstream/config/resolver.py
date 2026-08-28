@@ -48,6 +48,8 @@ class SchedulerRuntime:
     min_inflight: int
     latency_target_ms: int
     target_multiplier: float = 3.0
+    queue_wait_target_ms: int = 0
+    adjust_cooldown_windows: int = 3
     circuit_breaker_enabled: bool = True
     trip_consecutive_failures: int = 5
     trip_failure_rate: float = 0.5
@@ -138,6 +140,8 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
         min_inflight=cfg.erpc.inflight.min_inflight,
         latency_target_ms=cfg.erpc.inflight.latency_target_ms,
         target_multiplier=cfg.erpc.inflight.target_multiplier,
+        queue_wait_target_ms=cfg.erpc.inflight.queue_wait_target_ms,
+        adjust_cooldown_windows=cfg.erpc.inflight.adjust_cooldown_windows,
         circuit_breaker_enabled=cfg.erpc.inflight.circuit_breaker_enabled,
         trip_consecutive_failures=cfg.erpc.inflight.trip_consecutive_failures,
         trip_failure_rate=cfg.erpc.inflight.trip_failure_rate,

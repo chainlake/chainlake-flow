@@ -178,7 +178,46 @@ class AdaptiveRpcScheduler(BaseScheduler):
         # it is correct for any chain/provider without manual tuning. An optional
         # absolute latency_target_ms (if set) acts as an additional hard floor.
         target = self.effective_target_ms()
+        # Queue-wait budget: the REAL congestion signal. A single heavy request's
+        # rpc_latency being high is NOT congestion (e.g. receipt/log payloads on
+        # BSC are intrinsically ~1s even when the upstream is healthy).
+        queue_target = self.effective_queue_target_ms()
+        queue_wait = self.queue_wait_ema or 0.0
 
+        # ---- Decide the raw signal for THIS window ----
+        # Congestion is driven primarily by queue wait, not by a single request's
+        # latency. But a sustained breach of the adaptive latency *target* (not a
+        # 3x spike) is also real saturation — the target already incorporates a
+        # 3x multiplier over the learned floor, so "latency > target" means the
+        # upstream is roughly 3x slower than its healthy baseline. We keep this as
+        # a secondary signal (queue wait is primary) and debounce both so a single
+        # heavy-but-healthy request (BSC receipt/log ~1s) that merely sits near the
+        # target does NOT collapse the window.
+        # raw_congested: requests are piling up waiting for an admission slot.
+        # latency_over: observed latency has sustained above the adaptive target
+        #   (i.e. upstream materially slower than its healthy floor).
+        # raw_headroom: queue is (near) empty AND latency is comfortably under
+        #   target -> we can safely grow.
+        raw_congested = queue_wait > queue_target
+        latency_over = (self.latency_ema or 0.0) > target
+        raw_headroom = (not raw_congested) and (not latency_over) and (self.latency_ema or 0.0) <= target
+
+        # ---- Debounce SHRINK only ----
+        # A single heavy-request latency spike (or one transient blip) must not
+        # collapse the window, so congestion (queue wait OR 3x latency) must
+        # persist for `adjust_cooldown_windows` consecutive windows before we
+        # shrink. GROWTH is deliberately NOT debounced: when headroom is present
+        # it is safe to scale up every window, which lets us recover far faster
+        # than we shrink (recovery must outpace a transient saturation to keep
+        # ingestion_lag bounded).
+        if raw_congested or latency_over:
+            self._congested_windows += 1
+        else:
+            self._congested_windows = 0
+
+        congested = self._congested_windows >= self.adjust_cooldown_windows
+
+        # ---- Apply ----
         if not success:
             self._set_current_limit(
                 max(
@@ -187,35 +226,38 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 )
             )
             reason = "error"
+        elif congested and raw_congested:
+            # Upstream saturated: requests waiting too long for a slot. Shrink.
+            self._set_current_limit(
+                max(
+                    self.min_inflight,
+                    max(cur - 1, int(cur * mild_decrease_factor)),
+                )
+            )
+            reason = "queue_congested"
+        elif congested and latency_over:
+            # Sustained latency breach of the adaptive target (upstream materially
+            # slower than its healthy floor). Strong shrink.
+            self._set_current_limit(
+                max(
+                    self.min_inflight,
+                    int(cur * strong_decrease_factor),
+                )
+            )
+            reason = "high_latency_strong"
+        elif raw_headroom:
+            # Healthy with headroom: grow back quickly (recover faster than we
+            # shrink). Step scales with current size so we don't crawl back.
+            self._set_current_limit(
+                min(
+                    self.max_inflight,
+                    cur + max(increase_step, int(cur * 0.1)),
+                )
+            )
+            reason = "increase"
         else:
-            latency = self.latency_ema or target
-
-            if latency > target * 3:
-                self._set_current_limit(
-                    max(
-                        self.min_inflight,
-                        int(cur * strong_decrease_factor),
-                    )
-                )
-                reason = "high_latency_strong"
-
-            elif latency > target:
-                self._set_current_limit(
-                    max(
-                        self.min_inflight,
-                        max(cur - 1, int(cur * mild_decrease_factor)),
-                    )
-                )
-                reason = "high_latency_mild"
-
-            else:
-                self._set_current_limit(
-                    min(
-                        self.max_inflight,
-                        cur + increase_step,
-                    )
-                )
-                reason = "increase"
+            reason = "stable"
+            # no change this window
 
         # log only when changed
         if self.logger and self.current_limit != prev:
@@ -227,4 +269,6 @@ class AdaptiveRpcScheduler(BaseScheduler):
                 latency_ema_ms=round(self.latency_ema or 0, 2),
                 latency_floor_ms=round(self.latency_floor or 0, 2),
                 effective_target_ms=round(target, 2),
+                queue_wait_ema_ms=round(queue_wait, 2),
+                queue_target_ms=round(queue_target, 2),
             )

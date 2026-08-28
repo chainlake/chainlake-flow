@@ -16,12 +16,23 @@ entities:
 
 erpc:
   project_id: main
-  base_url: http://localhost:30041 # endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
+  base_url: http://clv001:30041 # endpoint: "http://erpc-service.erpc.svc:4000/main/evm/56"
   timeout_sec: 10
   max_retries: 1
   inflight:
     max_inflight: 20
-    latency_target_ms: 0 # (new default) → purely adaptive, no per-chain tuning.
+    # latency_target_ms: 0 → fully adaptive. The controller learns the provider's
+    # intrinsic (best-case) latency floor from observed traffic — cheap block/tx
+    # calls on BSC (~450ms) and tiny L2 RPCs (~50ms) alike — and derives the
+    # target from it, so heavy-but-healthy requests (BSC receipt/log ~1.2s) never
+    # collapse concurrency and NO per-chain constant is needed. Set this to a
+    # non-zero value only as an extra hard floor on top of the adaptive target.
+    latency_target_ms: 0
+    # Primary congestion signal is queue wait (how long a request waits for an
+    # admission slot), not single-request rpc_latency. Budget defaults to 15% of
+    # the adaptive target, so it scales with the environment automatically.
+    queue_wait_target_ms: 0
+    adjust_cooldown_windows: 3
 
 engine:
   # Cursor ingestion worker pool size.
@@ -43,7 +54,7 @@ kafka:
   # 1. PLAINTEXT — no auth, no TLS (local dev / internal trusted network)
   #
   connection:
-    bootstrap_servers: "localhost:8081"
+    bootstrap_servers: "clh001:8081"
   #
   # ───────────────────────────────────────────────────────────────────────────
   # 2. SASL_PLAINTEXT — SASL auth over plaintext (internal network with auth)

@@ -218,6 +218,8 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             min_inflight=runtime.scheduler.min_inflight,
             latency_target_ms=runtime.scheduler.latency_target_ms,
             target_multiplier=runtime.scheduler.target_multiplier,
+            queue_wait_target_ms=runtime.scheduler.queue_wait_target_ms,
+            adjust_cooldown_windows=runtime.scheduler.adjust_cooldown_windows,
             circuit_breaker_enabled=runtime.scheduler.circuit_breaker_enabled,
             trip_consecutive_failures=runtime.scheduler.trip_consecutive_failures,
             trip_failure_rate=runtime.scheduler.trip_failure_rate,

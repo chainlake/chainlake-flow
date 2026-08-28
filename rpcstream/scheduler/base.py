@@ -24,6 +24,17 @@ class BaseScheduler:
         initial_inflight=10,
         latency_target_ms=0,
         target_multiplier=3.0,
+        # Queue-wait budget (ms). The PRIMARY congestion signal is how long a
+        # request sits waiting for an admission slot (`_acquire_slot`), NOT the
+        # raw rpc_latency of a single (possibly heavy) request. When the observed
+        # queue wait stays under this budget the upstream is keeping up and we
+        # grow; when it exceeds the budget the upstream is saturated and we
+        # shrink. 0 (default) derives the budget from the effective latency
+        # target so heavy vs. light chains need no manual tuning.
+        queue_wait_target_ms=0,
+        # Contiguous windows a signal must persist before we act, so a single
+        # heavy-request latency spike or transient blip cannot shrink the window.
+        adjust_cooldown_windows=3,
         circuit_breaker_enabled=True,
         trip_consecutive_failures=5,
         trip_failure_rate=0.5,
@@ -45,6 +56,13 @@ class BaseScheduler:
         # Ratio applied to the learned latency floor to obtain the effective
         # target. Chain-independent, so it never needs per-environment tuning.
         self.target_multiplier = target_multiplier
+        # Optional absolute queue-wait budget (ms). 0 (default) means "adaptive
+        # only" — derived from the effective latency target. A non-zero value
+        # hard-caps the budget regardless of the learned latency.
+        self.queue_wait_target_ms = queue_wait_target_ms
+        # Number of contiguous windows a congestion/growth signal must persist
+        # before _adjust_window acts, to suppress single-blip over-reaction.
+        self.adjust_cooldown_windows = max(1, int(adjust_cooldown_windows))
 
         # hard cap only
         self.sem = asyncio.Semaphore(self.max_inflight)
@@ -62,6 +80,14 @@ class BaseScheduler:
         # inflation rather than on a provider that is merely slow by nature.
         self.latency_floor = None
         self.floor_alpha = 0.2
+        # Rolling observation of the provider's *best-case* (intrinsic) latency:
+        # the lowest latency we have ever seen, with only an extremely slow upward
+        # drift so the floor can follow a genuinely faster environment without
+        # being inflated by a transient congestion spike. This makes the adaptive
+        # target correct for ANY chain/provider (50ms L2 RPCs up to BSC's ~1.2s
+        # heavy requests) with latency_target_ms left at 0 — no per-chain tuning.
+        self._floor_min = None
+        self._floor_recovery = 1.0008  # ~0.08%/request slow upward drift
 
         # ---- Circuit breaker ----
         # When the upstream is unhealthy, firehosing RPCs only wastes CPU and
@@ -83,6 +109,14 @@ class BaseScheduler:
         self.cb_cooldown_until = 0.0
         self.cb_probes_remaining = 0
         self.cb_probe_success = 0
+
+        # Contiguous-window debounce state for _adjust_window. We only SHRINK
+        # once a congestion signal (queue wait OR 3x latency) has persisted for
+        # `adjust_cooldown_windows` consecutive windows, so a single heavy-request
+        # latency spike cannot collapse the inflight window. Growth is not
+        # debounced (see adaptive.py), so this counter is only ever used for
+        # shrink decisions.
+        self._congested_windows = 0
 
         self.start_ts = time.time()
 
@@ -242,26 +276,46 @@ class BaseScheduler:
         """Track the provider's intrinsic (best-case) latency.
 
         The floor is the latency a single in-flight request experiences with no
-        self-induced congestion, and is used as the basis for the adaptive
-        target. Two rules keep it honest:
+        self-induced congestion, and is the basis for the adaptive target. Two
+        rules keep it honest across *any* environment (50ms L2 RPCs up to BSC's
+        ~1.2s heavy requests), with no per-chain constant:
 
-        * When concurrency is at its minimum there is no self-congestion, so the
-          observed latency is the true idle latency — track it freely.
-        * Under load the floor may only IMPROVE (move down). A congestion spike
-          must never inflate the baseline, otherwise the controller would stop
-          protecting the upstream during a sustained slowdown.
+        * The floor is anchored to the **lowest latency ever observed**
+          (`_floor_min`), taken via `min` so a congestion/retry spike can NEVER
+          inflate it. A mixed workload (cheap block/tx calls + heavy receipt/log
+          calls) therefore keys the target off the cheap calls' intrinsic cost,
+          leaving the heavy calls' natural latency well under the target — so a
+          merely-slow request is never mistaken for saturation.
+        * A per-request slow upward drift (`_floor_recovery`) lets the floor
+          follow a genuinely faster environment (e.g. after a provider upgrade
+          or a move to a lower-latency RPC) without being stuck on a startup
+          outlier forever.
+        * When concurrency is at its minimum there is no self-congestion, so we
+          additionally EMA toward the raw observation to capture the true idle
+          latency precisely.
         """
+        # Rolling best-case floor (only ever moves down on observation, drifts up
+        # extremely slowly so a faster environment is reflected over time).
+        if self._floor_min is None:
+            self._floor_min = latency
+        else:
+            self._floor_min = min(self._floor_min, latency) * self._floor_recovery
+
         if self.latency_floor is None:
             self.latency_floor = latency
             return
         if self.current_limit <= self.min_inflight:
+            # No self-congestion: the observation is the true idle latency. Track
+            # it freely (EMA), but never let the slow-drift floor regress below it.
             self.latency_floor = (
                 self.floor_alpha * latency + (1 - self.floor_alpha) * self.latency_floor
             )
-        elif latency < self.latency_floor:
-            self.latency_floor = (
-                self.floor_alpha * latency + (1 - self.floor_alpha) * self.latency_floor
-            )
+            self.latency_floor = max(self.latency_floor, self._floor_min / self._floor_recovery)
+        else:
+            # Under load: only IMPROVE (the lower of the rolling min and current).
+            candidate = self._floor_min / self._floor_recovery
+            if candidate < self.latency_floor:
+                self.latency_floor = candidate
 
     def effective_target_ms(self):
         """Adaptive latency target, independent of any fixed per-chain value.
@@ -274,6 +328,24 @@ class BaseScheduler:
         if self.latency_target_ms and self.latency_target_ms > 0:
             return max(adaptive, float(self.latency_target_ms))
         return adaptive
+
+    def effective_queue_target_ms(self):
+        """Queue-wait budget: how long a request may wait for an admission slot
+        before we treat the upstream as saturated.
+
+        The queue wait is the REAL congestion signal (it reflects how many
+        requests are piled up behind the inflight window). The single-request
+        rpc_latency is NOT a congestion signal by itself — heavy requests
+        (e.g. receipt/log with large payloads) are intrinsically slow even when
+        the upstream is healthy.
+
+        Budget defaults to a fraction of the effective latency target so it
+        scales with chain/provider speed without per-chain tuning; a non-zero
+        `queue_wait_target_ms` hard-caps it.
+        """
+        if self.queue_wait_target_ms and self.queue_wait_target_ms > 0:
+            return float(self.queue_wait_target_ms)
+        return max(1.0, self.effective_target_ms() * 0.15)
 
     def _update_queue_wait(self, wait_ms):
         if self.queue_wait_ema is None:
