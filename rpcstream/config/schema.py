@@ -34,7 +34,14 @@ class KafkaProducer(BaseModel):
 class KafkaStreaming(BaseModel):
     batch_size: int = 100
     flush_interval_ms: int = 20
-    queue_maxsize: int = 100
+    # Sink buffer between the engine workers and the single sink worker. At
+    # ~9 enqueues/s the old 100-item cap was only ~11s of slack, so a short
+    # broker hiccup saturated it and every send started timing out.
+    queue_maxsize: int = 400
+    # How long a producer waits for room in the sink queue before the batch is
+    # reported as failed. Was hardcoded at 0.1s, which turned sub-second
+    # backpressure into failed cursors (-> sink cooldown -> circuit breaker trip).
+    enqueue_timeout_ms: int = 2000
 
 
 class KafkaSchemaRegistry(BaseModel):

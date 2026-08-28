@@ -109,6 +109,37 @@ def test_half_open_probe_failure_reopens():
     assert s.cb_attempt == attempt + 1  # backoff escalated
 
 
+def test_open_breaker_recovers_without_a_request():
+    """Regression: the engine stops pulling cursors while is_tripped() is True,
+    so the OPEN -> HALF_OPEN transition must not depend on a request arriving.
+    Otherwise one trip pauses ingestion forever (breaker waits for a request,
+    producer waits for the breaker).
+    """
+    s = make_sched(trip_consecutive_failures=1, probe_budget=3)
+    s._record_outcome(False)
+    assert s.cb_state == CB_OPEN
+    assert s.is_tripped() is True
+
+    # Cooldown elapses, and nothing calls _acquire_slot in between.
+    s.cb_cooldown_until = 0.0
+
+    assert s.is_tripped() is False
+    assert s.cb_state == CB_HALF_OPEN
+    assert s.cb_probes_remaining == s.cb_probe_budget
+
+
+def test_half_open_persists_until_probes_resolve():
+    """Once half-open, is_tripped() stays False so the engine keeps sending the
+    probe requests that will CLOSE (or re-OPEN) the breaker."""
+    s = make_sched(trip_consecutive_failures=1, probe_budget=3)
+    s._record_outcome(False)
+    s.cb_cooldown_until = 0.0
+
+    assert s.is_tripped() is False
+    assert s.is_tripped() is False
+    assert s.cb_state == CB_HALF_OPEN
+
+
 def test_open_admission_blocks_until_cooldown():
     s = make_sched(trip_consecutive_failures=1, probe_budget=3)
     s._record_outcome(False)

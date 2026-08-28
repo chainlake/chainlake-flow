@@ -98,7 +98,14 @@ kafka:
   streaming:
     batch_size: 100          # micro-batch size
     flush_interval_ms: 50    # max wait time
-    queue_maxsize: 100       # backpressure control
+    # Sink buffer between the engine workers and the single sink worker. 100
+    # was only ~11s of slack at ~9 enqueues/s, so a short broker hiccup
+    # saturated it and every send began timing out.
+    queue_maxsize: 400       # backpressure control
+    # How long a producer waits for room in that queue before the batch counts
+    # as failed. Was hardcoded at 0.1s, which turned sub-second backpressure
+    # into failed cursors (-> sink cooldown -> circuit breaker trip).
+    enqueue_timeout_ms: 2000
   schemaRegistry:
     enabled: true # false # if false, type and url will be discarded
     type: avro # or protobuf (default avro)

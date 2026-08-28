@@ -172,7 +172,7 @@ class BaseScheduler:
                 if now < self.cb_cooldown_until:
                     await asyncio.sleep(min(0.05, self.cb_cooldown_until - now))
                     continue
-                self._cb_half_open()
+            self._cb_refresh_state()
 
             if self.inflight >= self.current_limit:
                 await asyncio.sleep(0.001)
@@ -203,7 +203,25 @@ class BaseScheduler:
         """True when admission is paused (OPEN state). The engine uses this to
         stop pulling new cursors during an upstream outage. Half-open is NOT
         tripped so a few probe fetches are still allowed."""
-        return self.cb_enabled and self.cb_state == CB_OPEN
+        if not self.cb_enabled:
+            return False
+        self._cb_refresh_state()
+        return self.cb_state == CB_OPEN
+
+    def _cb_refresh_state(self) -> None:
+        """Advance OPEN -> HALF_OPEN once the cooldown has elapsed.
+
+        This must not depend on a request arriving. The engine stops pulling new
+        cursors while `is_tripped()` is True, so if the transition only happened
+        inside `_acquire_slot()` the breaker could never leave OPEN: the producer
+        waits for the breaker to close, the breaker waits for a request that the
+        paused producer never makes. Advancing on elapsed time breaks that cycle.
+        """
+        if self.cb_state != CB_OPEN:
+            return
+        if time.monotonic() < self.cb_cooldown_until:
+            return
+        self._cb_half_open()
 
     def _cb_trip(self):
         self.cb_state = CB_OPEN

@@ -41,6 +41,10 @@ class KafkaWriter:
         self.batch_size = config.batch_size
         self.flush_interval = config.flush_interval_ms / 1000
         self.queue_maxsize = config.queue_maxsize
+        # Bounded wait for queue space. A short timeout here turned any
+        # sub-second sink hiccup into a failed cursor, which then fed the
+        # sink-unhealthy cooldown and the scheduler circuit breaker.
+        self.enqueue_timeout_sec = getattr(config, "enqueue_timeout_ms", 2000) / 1000
         self.topic_maps = topic_maps
         self.schema_registry_type = schema_registry_type or (
             "protobuf" if protobuf_enabled else None
@@ -50,6 +54,9 @@ class KafkaWriter:
         self.eos_enabled = eos_enabled
         self.eos_init_timeout_sec = eos_init_timeout_sec
         self.protobuf_registry = None
+
+        # How often to log while librdkafka's local queue stays full.
+        self.buffer_full_log_interval_sec = 5.0
 
         self.queue = asyncio.Queue(maxsize=self.queue_maxsize)
         self._queue_depth = 0
@@ -217,9 +224,17 @@ class KafkaWriter:
                     queue_size=self.queue.qsize(),
                 )
 
+            # A dead sink worker means the queue will never drain again, so
+            # waiting out the full timeout only delays an inevitable failure.
+            # Fail immediately: the crash itself is already logged by
+            # _on_worker_done, and this makes the stall visible to the caller
+            # (engine -> Prefect) instead of looking like slow Kafka.
+            if self._worker_task is not None and self._worker_task.done():
+                raise RuntimeError("kafka sink worker is no longer running")
+
             await asyncio.wait_for(
                 self.queue.put((topic, rows, linked_span_context, delivery_tracker)),
-                timeout=0.1,
+                timeout=self.enqueue_timeout_sec,
             ) # batch enqueue, Apply backpressure to engine
             self._queue_depth += 1
             self.metrics.QUEUE_SIZE.add(1)
@@ -336,7 +351,12 @@ class KafkaWriter:
                         key=kafka_key,
                     )
 
-                retries = 0
+                # BufferError means librdkafka's local queue is full
+                # (queue.buffering.max.messages). That is ordinary backpressure
+                # (broker slower than producer), not a permanent failure, so we
+                # wait it out: raising here killed the sink worker, after which
+                # the queue was never drained again and every send timed out.
+                backpressure_since = None
                 while True:
                     try:
                         self.producer.produce(
@@ -346,19 +366,25 @@ class KafkaWriter:
                             callback=self._delivery_callback(delivery_tracker),
                         )
                         break
-                    
+
                     except BufferError:
                         self.metrics.BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
-                        retries += 1
-                        if retries > 10:
-                            self._fail_delivery_tracker(
-                                delivery_tracker,
-                                RuntimeError("Kafka producer stuck"),
-                            )
-                            raise RuntimeError("Kafka producer stuck")
-                        # backpressure from Kafka (avoid: BufferError: Local: Queue full)
+                        now = time.time()
+                        if backpressure_since is None:
+                            backpressure_since = now
+                        elif now - backpressure_since >= self.buffer_full_log_interval_sec:
+                            # Log periodically so sustained backpressure is
+                            # visible without flooding on every retry.
+                            backpressure_since = now
+                            if self.logger:
+                                self.logger.warn(
+                                    "kafka.producer_backpressure",
+                                    topic=topic,
+                                )
+                        # Free queued/delivered batches, then yield so the rest
+                        # of the event loop keeps running while we wait.
                         self.producer.poll(0.1)
-                        await asyncio.sleep(0.01)  # yield to event loop, prevents CPU spinning
+                        await asyncio.sleep(0.01)
 
             # trigger delivery callbacks
             self.producer.poll(0)
@@ -498,6 +524,25 @@ class KafkaWriter:
 
         self._running = True
         self._worker_task = asyncio.create_task(self._worker())
+        # asyncio only reports "Task exception was never retrieved" when the Task
+        # is garbage-collected. We keep a strong reference in self._worker_task,
+        # so a crashed worker would otherwise die completely silently and the
+        # sink would stop draining with no trace in the logs.
+        self._worker_task.add_done_callback(self._on_worker_done)
+
+    def _on_worker_done(self, task: asyncio.Task) -> None:
+        """Surface a crashed sink worker instead of letting it die silently."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        if self.logger:
+            self.logger.error(
+                "kafka.sink_worker_crashed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
     async def _init_transactions(self):
         attempts = 3

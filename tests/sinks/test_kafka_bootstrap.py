@@ -1,6 +1,8 @@
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from rpcstream.sinks.kafka.producer import KafkaWriter
 from rpcstream.sinks.kafka.bootstrap import bootstrap_kafka_resources
 from rpcstream.sinks.kafka.schema import (
@@ -445,3 +447,234 @@ def test_bootstrap_kafka_resources_skips_protected_schema_topic(monkeypatch):
     assert captured["ensure_topics"] == [["bsc.raw_block"], ["dlq.ingestion", "watermark-state"]]
     assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["registry_started"] is True
+
+
+class _RecordingLogger:
+    def __init__(self):
+        self.records = []
+
+    def _record(self, level, message, **kwargs):
+        self.records.append((level, message, kwargs))
+
+    def debug(self, message, **kwargs):
+        self._record("debug", message, **kwargs)
+
+    def info(self, message, **kwargs):
+        self._record("info", message, **kwargs)
+
+    def warn(self, message, **kwargs):
+        self._record("warn", message, **kwargs)
+
+    def error(self, message, **kwargs):
+        self._record("error", message, **kwargs)
+
+
+def _make_writer(producer, logger=None, **overrides):
+    kwargs = dict(
+        producer=producer,
+        id_calculator=SimpleNamespace(calculate_event_id=lambda row: row["id"]),
+        time_calculator=SimpleNamespace(
+            calculate_event_timestamp_ms=lambda _row: 1,
+            calculate_ingest_timestamp=lambda: 1,
+        ),
+        logger=logger,
+        config=SimpleNamespace(batch_size=10, flush_interval_ms=1, queue_maxsize=10),
+        producer_config={"bootstrap.servers": "localhost:9092"},
+        topic_maps=SimpleNamespace(main={"block": "topic-a"}, dlq="dlq.ingestion"),
+        protobuf_enabled=False,
+    )
+    kwargs.update(overrides)
+    return KafkaWriter(**kwargs)
+
+
+def test_kafka_writer_waits_out_producer_backpressure():
+    """BufferError is backpressure, not failure: more retries than the old
+    10-attempt cap must still succeed instead of killing the sink worker."""
+
+    class BackpressuredProducer:
+        def __init__(self, failures):
+            self.failures = failures
+            self.produced = []
+            self.polls = 0
+
+        def produce(self, **kwargs):
+            if self.failures > 0:
+                self.failures -= 1
+                raise BufferError("Local: Queue full")
+            self.produced.append(kwargs)
+
+        def poll(self, _timeout):
+            self.polls += 1
+            return 0
+
+    producer = BackpressuredProducer(failures=25)
+    writer = _make_writer(producer)
+
+    from opentelemetry import trace
+
+    async def run():
+        await writer._flush_batch(
+            [
+                (
+                    "topic-a",
+                    {"id": "evt-1"},
+                    trace.get_current_span().get_span_context(),
+                    None,
+                )
+            ]
+        )
+
+    asyncio.run(run())
+
+    assert len(producer.produced) == 1
+    assert producer.polls >= 25
+
+
+def test_kafka_writer_logs_sustained_backpressure():
+    class BackpressuredProducer:
+        def __init__(self):
+            self.polls = 0
+
+        def produce(self, **kwargs):
+            if self.polls < 3:
+                raise BufferError("Local: Queue full")
+
+        def poll(self, _timeout):
+            self.polls += 1
+            return 0
+
+    producer = BackpressuredProducer()
+    logger = _RecordingLogger()
+    writer = _make_writer(producer, logger=logger)
+    writer.buffer_full_log_interval_sec = 0.0
+
+    from opentelemetry import trace
+
+    async def run():
+        await writer._flush_batch(
+            [
+                (
+                    "topic-a",
+                    {"id": "evt-1"},
+                    trace.get_current_span().get_span_context(),
+                    None,
+                )
+            ]
+        )
+
+    asyncio.run(run())
+
+    warnings = [r for r in logger.records if r[1] == "kafka.producer_backpressure"]
+    assert warnings
+
+
+def test_kafka_sink_worker_crash_is_logged():
+    """A crashed sink worker used to die silently: the engine keeps a strong
+    reference to the task, so asyncio never prints 'Task exception was never
+    retrieved' and the sink stops draining with no trace in the logs."""
+
+    class ExplodingProducer:
+        def produce(self, **kwargs):
+            raise RuntimeError("boom")
+
+        def poll(self, _timeout):
+            return 0
+
+    logger = _RecordingLogger()
+    writer = _make_writer(ExplodingProducer(), logger=logger)
+
+    async def run():
+        await writer.start()
+        await writer.send("topic-a", [{"id": "evt-1"}])
+        for _ in range(100):
+            if writer._worker_task.done():
+                break
+            await asyncio.sleep(0.01)
+        # let the done callback run
+        await asyncio.sleep(0.05)
+
+    asyncio.run(run())
+
+    assert writer._worker_task.done()
+    crashes = [r for r in logger.records if r[1] == "kafka.sink_worker_crashed"]
+    assert crashes
+    level, _message, fields = crashes[0]
+    assert level == "error"
+    assert fields["error_type"] == "RuntimeError"
+    assert "boom" in fields["error"]
+
+
+def test_kafka_writer_enqueue_waits_longer_than_a_blip():
+    """The enqueue timeout used to be hardcoded at 0.1s, so sub-second sink
+    backpressure failed the batch (and the cursor) instead of waiting."""
+
+    class DummyProducer:
+        def produce(self, **kwargs):
+            return None
+
+        def poll(self, _timeout):
+            return 0
+
+    writer = _make_writer(
+        DummyProducer(),
+        config=SimpleNamespace(
+            batch_size=10,
+            flush_interval_ms=1,
+            queue_maxsize=1,
+            enqueue_timeout_ms=2000,
+        ),
+    )
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+
+    async def run():
+        # Fill the only slot so send() has to wait for room.
+        writer.queue.put_nowait(("topic-a", [{"id": "blocker"}], ctx, None))
+
+        async def free_slot_soon():
+            await asyncio.sleep(0.3)  # longer than the old 0.1s timeout
+            writer.queue.get_nowait()
+
+        free_task = asyncio.create_task(free_slot_soon())
+        await writer.send("topic-a", [{"id": "evt-1"}])
+        await free_task
+
+    asyncio.run(run())
+
+    assert writer.queue.qsize() == 1
+
+
+def test_kafka_writer_send_fails_fast_when_worker_is_dead():
+    """A dead worker never drains the queue, so waiting out the timeout would
+    just look like slow Kafka instead of reporting the real problem."""
+
+    class ExplodingProducer:
+        def produce(self, **kwargs):
+            raise RuntimeError("boom")
+
+        def poll(self, _timeout):
+            return 0
+
+    writer = _make_writer(ExplodingProducer())
+
+    async def run():
+        await writer.start()
+        await writer.send("topic-a", [{"id": "evt-1"}])
+        for _ in range(100):
+            if writer._worker_task.done():
+                break
+            await asyncio.sleep(0.01)
+        with pytest.raises(RuntimeError, match="sink worker is no longer running"):
+            await writer.send("topic-a", [{"id": "evt-2"}])
+
+    asyncio.run(run())
+
+
+def test_kafka_streaming_defaults_widen_the_sink_buffer():
+    from rpcstream.config.schema import KafkaStreaming
+
+    streaming = KafkaStreaming()
+    assert streaming.queue_maxsize > 100
+    assert streaming.enqueue_timeout_ms > 100
