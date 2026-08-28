@@ -41,6 +41,12 @@ class BaseScheduler:
         backoff_base_sec=1.0,
         backoff_max_sec=30.0,
         probe_budget=3,
+        # Upper bound for a half-open probe round. Probe outcomes are not always
+        # recorded (an "expected warning" failure is deliberately not fed to
+        # _record_outcome), so without a deadline the breaker can sit half-open
+        # forever with its probe budget spent, parking every caller in
+        # _acquire_slot and stalling ingestion silently.
+        half_open_timeout_sec=30.0,
     ):
         self.min_inflight = max(1, int(min_inflight))
         self.max_inflight = max(self.min_inflight, int(max_inflight))
@@ -109,6 +115,8 @@ class BaseScheduler:
         self.cb_cooldown_until = 0.0
         self.cb_probes_remaining = 0
         self.cb_probe_success = 0
+        self.cb_half_open_timeout_sec = max(1.0, float(half_open_timeout_sec))
+        self.cb_half_open_deadline = 0.0
 
         # Contiguous-window debounce state for _adjust_window. We only SHRINK
         # once a congestion signal (queue wait OR 3x latency) has persisted for
@@ -182,11 +190,15 @@ class BaseScheduler:
             # exhausted, wait for the in-flight probes to resolve (the outcome
             # handler will CLOSE or re-OPEN the breaker).
             if self.cb_enabled and self.cb_state == CB_HALF_OPEN:
+                if self._cb_half_open_expired():
+                    # Probe outcomes never arrived (e.g. every probe failed with
+                    # an "expected warning", which is not fed to
+                    # _record_outcome). Nothing else can move the state now, so
+                    # re-trip to restart the open/half-open cycle instead of
+                    # parking every caller here forever.
+                    self._cb_trip()
+                    continue
                 if self.cb_probes_remaining <= 0:
-                    if self.inflight == 0:
-                        # Probes finished but state unchanged: re-evaluate.
-                        await asyncio.sleep(0.01)
-                        continue
                     await asyncio.sleep(0.01)
                     continue
                 self.cb_probes_remaining -= 1
@@ -239,6 +251,15 @@ class BaseScheduler:
         self.cb_state = CB_HALF_OPEN
         self.cb_probes_remaining = self.cb_probe_budget
         self.cb_probe_success = 0
+        self.cb_half_open_deadline = (
+            time.monotonic() + self.cb_half_open_timeout_sec
+        )
+
+    def _cb_half_open_expired(self) -> bool:
+        return (
+            self.cb_state == CB_HALF_OPEN
+            and time.monotonic() >= self.cb_half_open_deadline
+        )
 
     def _cb_close(self):
         self.cb_state = CB_CLOSED

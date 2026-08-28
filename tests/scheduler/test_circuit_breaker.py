@@ -157,3 +157,55 @@ def test_open_admission_blocks_until_cooldown():
     asyncio.run(run())
     # is_tripped gates the engine producer loop
     assert s.is_tripped() is True
+
+
+def test_half_open_retrips_when_probes_never_report():
+    """Regression: probe outcomes are not always recorded (an 'expected warning'
+    failure is deliberately not fed to _record_outcome). With the budget spent
+    and nothing left in flight, the breaker used to stay half-open forever and
+    every caller parked in _acquire_slot, stalling ingestion silently."""
+    s = make_sched(
+        trip_consecutive_failures=1,
+        probe_budget=2,
+        half_open_timeout_sec=0.05,
+        backoff_base_sec=0.05,
+        backoff_max_sec=0.05,
+    )
+    s._record_outcome(False)
+    assert s.cb_state == CB_OPEN
+
+    # Cooldown elapsed -> half-open, both probes admitted without any outcome.
+    s.cb_cooldown_until = 0.0
+
+    async def run():
+        # Admit both probes without recording any outcome for them.
+        await s._acquire_slot()
+        s._release_slot()
+        await s._acquire_slot()
+        s._release_slot()
+        assert s.cb_state == CB_HALF_OPEN
+        assert s.cb_probes_remaining == 0
+
+        # Let the half-open deadline lapse, then ask for another slot.
+        await asyncio.sleep(0.06)
+        await s._acquire_slot()
+        s._release_slot()
+
+    asyncio.run(run())
+    # Re-tripped (backoff escalated) and started a fresh probe round instead of
+    # parking the caller in _acquire_slot forever.
+    assert s.cb_attempt == 2
+    assert s.cb_state == CB_HALF_OPEN
+    assert s.cb_probes_remaining == s.cb_probe_budget - 1
+
+
+def test_half_open_expiry_only_applies_to_half_open():
+    s = make_sched(half_open_timeout_sec=0.05)
+    s.cb_half_open_deadline = 0.0
+    assert s._cb_half_open_expired() is False
+    s._cb_half_open()
+    assert s._cb_half_open_expired() is False
+    s.cb_half_open_deadline = 0.0
+    assert s._cb_half_open_expired() is True
+    s._cb_close()
+    assert s._cb_half_open_expired() is False
