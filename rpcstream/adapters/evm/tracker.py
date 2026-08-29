@@ -186,10 +186,22 @@ class EvmChainHeadTracker:
             return
 
         reconnect_delay = max(float(self.websocket_reconnect_delay_sec), 0.5)
+        ws_connect_timeout_sec = 15.0
         while self._running:
             try:
                 session = await self._ensure_ws_session()
-                async with session.ws_connect(self.websocket_url, heartbeat=30) as ws:
+                # aiohttp's ClientSession-level ClientTimeout does not bound
+                # the ws_connect() handshake itself, so a stalled TCP/TLS
+                # handshake (e.g. a transient network blip during startup)
+                # hangs here forever: no exception is raised, so the
+                # reconnect loop below never runs and head tracking silently
+                # falls back to polling for the lifetime of the process.
+                # Bound it explicitly so a stall becomes a retryable error.
+                ws = await asyncio.wait_for(
+                    session.ws_connect(self.websocket_url, heartbeat=30),
+                    timeout=ws_connect_timeout_sec,
+                )
+                try:
                     if self.logger:
                         self.logger.info(
                             "block_tracker.ws_connected",
@@ -251,6 +263,8 @@ class EvmChainHeadTracker:
                             aiohttp.WSMsgType.ERROR,
                         }:
                             raise ConnectionError(f"websocket closed with type={msg.type!s}")
+                finally:
+                    await ws.close()
 
             except asyncio.CancelledError:
                 raise
