@@ -847,25 +847,29 @@ class IngestionEngine:
             error=error,
         )
         if self.eos_enabled:
-            delivery_future = await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
-            if delivery_future is not None:
-                try:
-                    await asyncio.wait_for(delivery_future, timeout=self.sink_failure_timeout_sec)
-                except Exception:
-                    # Sink down: best-effort only; ingestion is already paused.
-                    pass
-            return
-        checkpoint_future = await self.sink.send(
-            self.watermark_manager.state_topic,
-            [row],
-            wait_delivery=True,
-        )
-        if checkpoint_future is not None:
             try:
-                await asyncio.wait_for(checkpoint_future, timeout=self.sink_failure_timeout_sec)
+                delivery_future = await self.sink.send_transaction([(self.watermark_manager.state_topic, [row])])
+                if delivery_future is not None:
+                    await asyncio.wait_for(delivery_future, timeout=self.sink_failure_timeout_sec)
             except Exception:
-                # Sink down: best-effort only; ingestion is already paused.
+                # Sink down: best-effort only; ingestion is already paused. send()
+                # itself can raise (queue-full enqueue timeout, dead worker) just
+                # like the wait_for below it, so both need to land in this except.
                 pass
+            return
+        try:
+            checkpoint_future = await self.sink.send(
+                self.watermark_manager.state_topic,
+                [row],
+                wait_delivery=True,
+            )
+            if checkpoint_future is not None:
+                await asyncio.wait_for(checkpoint_future, timeout=self.sink_failure_timeout_sec)
+        except Exception:
+            # Sink down: best-effort only; ingestion is already paused. send()
+            # itself can raise (queue-full enqueue timeout, dead worker) just
+            # like the wait_for below it, so both need to land in this except.
+            pass
 
 
 
