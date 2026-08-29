@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: bsc-realtime-ingestion
+  namespace: ingestion
+data:
+  pipeline.yaml: |
+    logLevel: info
+
+    pipeline:
+      from: "checkpoint"
+
+    chain:
+      name: bsc
+      network: "mainnet"
+
+    entities:
+      - "block"
+      - "transaction"
+      - "token_transfer"
+
+    erpc:
+      # eRPC stays on clv001 (cloud VPS) because BSC RPC providers are
+      # unreachable from the home network and the RPC latency budget is too
+      # tight to absorb the cross-site tunnel. rpcstream reaches eRPC over the
+      # Phantun/WireGuard tunnel via the host's WG address (10.99.0.1).
+      project_id: main
+      base_url: http://10.99.0.1:30041
+      timeout_sec: 10
+      max_retries: 1
+      inflight:
+        max_inflight: 20
+        # Adaptive: target derived from observed provider latency floor — no
+        # per-chain constant needed. See docs/tuning.md.
+        latency_target_ms: 0
+        queue_wait_target_ms: 0
+        adjust_cooldown_windows: 3
+
+    engine:
+      concurrency: 0
+      # Local redpanda (k8s in-cluster): produce is sub-ms RTT, so the default
+      # 10s delivery window is plenty.
+      sink_failure_timeout_sec: 30
+      sink_cooldown_sec: 15
+
+    tracker:
+      poll_interval: 0.5
+      websocket_url: wss://bsc-rpc.publicnode.com
+
+    kafka:
+      connection:
+        # In-cluster service: sub-ms RTT to redpanda, no tunnel needed.
+        bootstrap_servers: "redpanda-0.redpanda.kafka.svc.cluster.local:9092"
+      common:
+        topic_template: "{namespace}.{kind}_{entity}"
+      producer:
+        linger_ms: 50
+        batch_size: 65536
+        compression_type: lz4
+      streaming:
+        batch_size: 100
+        flush_interval_ms: 50
+        queue_maxsize: 400
+        enqueue_timeout_ms: 2000
+      schemaRegistry:
+        enabled: true
+        type: avro
+        # Schema registry is published as NodePort 8084 -> 30081 from cln001.
+        # In-cluster, we reach it via the NodePort service ClusterIP on 8084.
+        url: "http://redpanda-schema-registry-external.kafka.svc.cluster.local:8084"
+      eos:
+        enabled: false
+        transactional_id_template: "{pipeline}.{entities}"
+        init_timeout_sec: 30
+        transaction_timeout_ms: 60000
+
+    telemetry:
+      tracing:
+        enabled: false
+        endpoint: "http://otel-collector.observability.svc.cluster.local:4317"
+        sampleRate: 0.1
+      metrics:
+        enabled: false
+        endpoint: "http://otel-collector.observability.svc.cluster.local:4317"
+        export_interval_ms: 5000
+      logs:
+        enabled: false
+        endpoint: "http://otel-collector.observability.svc.cluster.local:4317"

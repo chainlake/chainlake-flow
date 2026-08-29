@@ -42,6 +42,10 @@ engine:
   # 1   = serial: single worker, strict per-block order (matches eos_enabled).
   # N>1 = fixed: N long-lived workers, independent of scheduler dynamics.
   concurrency: 0
+  # Kafka produce travels over the clv001<->clh001 tunnel (~74ms RTT), so a
+  # 10s delivery window was too tight and flagged healthy cursors as failed.
+  sink_failure_timeout_sec: 30
+  sink_cooldown_sec: 15
 
 tracker:
   # ratio of the chain block interval used to poll head updates

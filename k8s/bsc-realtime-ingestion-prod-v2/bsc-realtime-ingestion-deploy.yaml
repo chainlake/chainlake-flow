@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bsc-realtime-ingestion
+  namespace: ingestion
+  labels:
+    chain: bsc
+    environment: prod
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      chain: bsc
+      environment: prod
+  template:
+    metadata:
+      labels:
+        chain: bsc
+        environment: prod
+    spec:
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 1
+      # Host network so we can reach eRPC at 10.99.0.1 (the WG tunnel endpoint)
+      # without extra hop. Kafka/SR use in-cluster DNS, so they don't care.
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+        - name: rpcstream
+          image: crpi-tzzdgvt2as7ll5cj.cn-shanghai.personal.cr.aliyuncs.com/chainlake/chainlake-flow:dev
+          imagePullPolicy: Always
+
+          env:
+            - name: PIPELINE_CONFIG
+              value: /config/pipeline.yaml
+
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+
+          resources:
+            # cln001 has plenty of headroom, but we still cap ingestion so
+            # eRPC source traffic doesn't burst and overwhelm the tunnel.
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "1Gi"
+
+          livenessProbe:
+            # Use a no-op exec since there's no HTTP port exposed; rely on
+            # exit code from `true` if the pod is healthy enough to schedule.
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 60
+            periodSeconds: 30
+
+      volumes:
+        - name: config-volume
+          configMap:
+            name: bsc-realtime-ingestion
