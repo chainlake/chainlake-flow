@@ -117,6 +117,11 @@ class BaseScheduler:
         self.cb_probe_success = 0
         self.cb_half_open_timeout_sec = max(1.0, float(half_open_timeout_sec))
         self.cb_half_open_deadline = 0.0
+        # Throttle for the "still waiting on the breaker" diagnostic log (see
+        # _log_breaker_wait) so a stuck OPEN/half-open cycle is visible in
+        # plain logs without spamming every poll of _acquire_slot.
+        self._last_breaker_log_ts = 0.0
+        self.breaker_log_interval_sec = 10.0
 
         # Contiguous-window debounce state for _adjust_window. We only SHRINK
         # once a congestion signal (queue wait OR 3x latency) has persisted for
@@ -178,6 +183,7 @@ class BaseScheduler:
             if self.cb_enabled and self.cb_state == CB_OPEN:
                 now = time.monotonic()
                 if now < self.cb_cooldown_until:
+                    self._log_breaker_wait(now)
                     await asyncio.sleep(min(0.05, self.cb_cooldown_until - now))
                     continue
             self._cb_refresh_state()
@@ -199,6 +205,7 @@ class BaseScheduler:
                     self._cb_trip()
                     continue
                 if self.cb_probes_remaining <= 0:
+                    self._log_breaker_wait(time.monotonic())
                     await asyncio.sleep(0.01)
                     continue
                 self.cb_probes_remaining -= 1
@@ -207,6 +214,31 @@ class BaseScheduler:
 
         await self.sem.acquire()
         self.inflight += 1
+
+    def _log_breaker_wait(self, now: float) -> None:
+        # Throttled so a stuck OPEN/half-open cycle is diagnosable from plain
+        # `docker compose logs` (no need to attach py-spy) without spamming
+        # every poll of this loop.
+        logger = getattr(self, "logger", None)
+        if not logger:
+            return
+        if now - self._last_breaker_log_ts < self.breaker_log_interval_sec:
+            return
+        self._last_breaker_log_ts = now
+        logger.warn(
+            "scheduler.breaker_wait",
+            state=self.cb_state,
+            attempt=self.cb_attempt,
+            cooldown_remaining_sec=round(max(self.cb_cooldown_until - now, 0.0), 1),
+            probes_remaining=self.cb_probes_remaining,
+            half_open_deadline_remaining_sec=(
+                round(max(self.cb_half_open_deadline - now, 0.0), 1)
+                if self.cb_state == CB_HALF_OPEN
+                else None
+            ),
+            inflight=self.inflight,
+            current_limit=self.current_limit,
+        )
 
     # ----------------------------
     # Circuit breaker

@@ -74,6 +74,11 @@ class IngestionEngine:
         # and checkpoint waits are bounded so we don't accumulate unbounded
         # failed work / memory. See _should_pause_ingestion / _finalize_checkpoint.
         self._sink_unhealthy_until = None
+        # Throttle for the "still paused" diagnostic log (see
+        # _should_pause_ingestion) so a stall is visible in plain
+        # `docker compose logs` without spamming every 0.2s poll.
+        self._last_pause_log_ts = 0.0
+        self.pause_log_interval_sec = 10.0
         self.semaphore = asyncio.Semaphore(concurrency)
         self.logger = logger
         self._latest_processed_block = 0
@@ -263,14 +268,49 @@ class IngestionEngine:
     def _should_pause_ingestion(self, shutdown_event: asyncio.Event | None) -> bool:
         if self._is_shutdown_requested(shutdown_event):
             return True
+        now = time.monotonic()
         # Source-side: scheduler circuit breaker is open (upstream unhealthy).
         scheduler = getattr(self.fetcher, "scheduler", None)
-        if scheduler is not None and scheduler.is_tripped():
-            return True
+        source_tripped = scheduler is not None and scheduler.is_tripped()
         # Sink-side: Kafka (or other sink) is unavailable; pause until cooldown.
-        if self._sink_unhealthy_until is not None and time.monotonic() < self._sink_unhealthy_until:
+        sink_unhealthy = (
+            self._sink_unhealthy_until is not None and now < self._sink_unhealthy_until
+        )
+        if source_tripped or sink_unhealthy:
+            self._log_ingestion_paused(
+                scheduler=scheduler,
+                source_tripped=source_tripped,
+                sink_unhealthy=sink_unhealthy,
+                now=now,
+            )
             return True
         return False
+
+    def _log_ingestion_paused(self, *, scheduler, source_tripped, sink_unhealthy, now):
+        # Throttled so a real stall is diagnosable from plain logs (no need to
+        # attach py-spy) without spamming every 0.2s producer poll.
+        if not self.logger:
+            return
+        if now - self._last_pause_log_ts < self.pause_log_interval_sec:
+            return
+        self._last_pause_log_ts = now
+        fields = {
+            "source_breaker_tripped": source_tripped,
+            "sink_unhealthy": sink_unhealthy,
+        }
+        if sink_unhealthy:
+            fields["sink_cooldown_remaining_sec"] = round(
+                self._sink_unhealthy_until - now, 1
+            )
+        if scheduler is not None:
+            fields["breaker_state"] = getattr(scheduler, "cb_state", None)
+            fields["breaker_attempt"] = getattr(scheduler, "cb_attempt", None)
+            cooldown_until = getattr(scheduler, "cb_cooldown_until", None)
+            if cooldown_until is not None:
+                fields["breaker_cooldown_remaining_sec"] = round(
+                    max(cooldown_until - now, 0.0), 1
+                )
+        self.logger.warn("engine.ingestion_paused", **fields)
 
     def _mark_sink_unhealthy(self):
         self._sink_unhealthy_until = time.monotonic() + self.sink_cooldown_sec
