@@ -26,6 +26,8 @@ spec:
       # without extra hop. Kafka/SR use in-cluster DNS, so they don't care.
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      imagePullSecrets:
+        - name: aliyun-creds
       containers:
         - name: rpcstream
           image: crpi-tzzdgvt2as7ll5cj.cn-shanghai.personal.cr.aliyuncs.com/chainlake/chainlake-flow:dev
