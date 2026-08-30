@@ -531,10 +531,12 @@ class IngestionEngine:
                                 self.metrics.BLOCK_LATENCY.record(latency, {"entity": entity})
                                 self.metrics.QUEUE_WAIT.record(queue_wait, {"entity": entity})
                                 emitted_rows = sum(len(rows) for rows in processed_data.values())
+                                ingestion_lag_ms = self._compute_ingestion_lag_ms(
+                                    parsed_bundle
+                                )
+                                if ingestion_lag_ms is not None:
+                                    self.metrics.INGESTION_LAG_MS.record(ingestion_lag_ms)
                                 if self.logger:
-                                    ingestion_lag_ms = self._compute_ingestion_lag_ms(
-                                        parsed_bundle
-                                    )
                                     self.logger.info(
                                         "engine.processed",
                                         cursor=cursor,

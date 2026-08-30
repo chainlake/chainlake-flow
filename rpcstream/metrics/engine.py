@@ -26,6 +26,7 @@ class EngineMetrics:
             self.ERROR_COUNTER = _NoOp()
             self.CHAIN_LAG = _NoOp()
             self.INGESTION_LAG = _NoOp()
+            self.INGESTION_LAG_MS = _NoOp()
             self.WORKER_COUNT = _NoOp()
             return
 
@@ -76,7 +77,13 @@ class EngineMetrics:
 
         self.INGESTION_LAG = meter.create_histogram(
             name="rpcstream_engine_ingestion_lag",
-            description="TRUE pipeline lag (monotonic)",
+            description="TRUE pipeline lag (monotonic), in blocks",
+        )
+
+        self.INGESTION_LAG_MS = meter.create_histogram(
+            name="rpcstream_engine_ingestion_lag_ms",
+            description="wall-clock lag between block timestamp and processing time",
+            unit="ms",
         )
 
         # Adaptive worker pool visibility — pairs with
