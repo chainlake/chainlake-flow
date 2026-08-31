@@ -223,11 +223,45 @@ class PassthroughProcessor:
         }
 
 
+def test_engine_sends_sink_delivery_failure_to_dlq_with_correct_entity():
+    """Live incident: a KafkaException (MSG_SIZE_TOO_LARGE) failed a "log"
+    entity's delivery and there was zero forensic trail -- sink-delivery
+    failures never reached the DLQ, only processor/rpc-stage ones did.
+    _finalize_checkpoint must now route a failed delivery future to the DLQ
+    tagged with the entity/topic it actually belongs to."""
+    sink = RecordingSink()
+    engine = build_success_engine(sink=sink, eos_enabled=False)
+
+    async def run():
+        failed_future = asyncio.get_running_loop().create_future()
+        failed_future.set_exception(RuntimeError("Message size too large"))
+        await engine._finalize_checkpoint(
+            123,
+            True,
+            [failed_future],
+            expected_watermark=None,
+            delivery_entities=[("log", "bsc.raw_log")],
+        )
+
+    asyncio.run(run())
+
+    assert len(sink.sent) == 1
+    topic, rows, wait_delivery = sink.sent[0]
+    assert topic == "dlq.ingestion"
+    assert wait_delivery is False
+    record = rows[0]
+    assert record["entity"] == "log"
+    assert record["cursor"] == 123
+    assert record["stage"] == "sink"
+    assert record["error_type"] == "RuntimeError"
+    assert record["error_message"] == "Message size too large"
+
+
 def test_engine_sends_trace_dlq_record_when_processor_fails():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=False)
 
-    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(95281318))
+    success, delivery_futures, expected_watermark, delivery_entities = asyncio.run(engine._run_one(95281318))
 
     assert success is False
     assert delivery_futures == []
@@ -250,7 +284,7 @@ def test_engine_sends_trace_dlq_via_transaction_when_eos_enabled():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=True)
 
-    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(95281318))
+    success, delivery_futures, expected_watermark, delivery_entities = asyncio.run(engine._run_one(95281318))
 
     assert success is False
     assert delivery_futures == []
@@ -269,7 +303,7 @@ def test_engine_sends_business_rows_via_transaction_when_eos_enabled_without_che
     sink = RecordingSink()
     engine = build_success_engine(sink=sink, eos_enabled=True)
 
-    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(95281318))
+    success, delivery_futures, expected_watermark, delivery_entities = asyncio.run(engine._run_one(95281318))
 
     assert success is True
     assert delivery_futures == []
@@ -326,7 +360,7 @@ def test_engine_retries_upstream_not_ready_before_success(monkeypatch):
         upstream_not_ready_max_attempts=3,
     )
 
-    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(103151849))
+    success, delivery_futures, expected_watermark, delivery_entities = asyncio.run(engine._run_one(103151849))
 
     assert success is True
     assert expected_watermark is None
@@ -387,7 +421,7 @@ def test_engine_sends_dlq_after_exhausting_upstream_not_ready_retries(monkeypatc
         upstream_not_ready_max_attempts=3,
     )
 
-    success, delivery_futures, expected_watermark = asyncio.run(engine._run_one(103151849))
+    success, delivery_futures, expected_watermark, delivery_entities = asyncio.run(engine._run_one(103151849))
 
     assert success is False
     assert expected_watermark is None
@@ -445,7 +479,7 @@ def test_engine_backfill_shutdown_stops_before_draining_entire_range():
         processed.append(cursor)
         started.set()
         await release.wait()
-        return True, [], None
+        return True, [], None, []
 
     engine._run_one = run_one
 
@@ -498,7 +532,7 @@ def test_engine_eos_checkpoint_uses_contiguous_watermark():
         await watermark_manager.mark_emitted(100)
         await watermark_manager.mark_emitted(101)
 
-        success_101, delivery_futures_101, expected_101 = await engine._run_one(101)
+        success_101, delivery_futures_101, expected_101, delivery_entities_101 = await engine._run_one(101)
         await engine._finalize_checkpoint(
             101,
             success_101,
@@ -506,7 +540,7 @@ def test_engine_eos_checkpoint_uses_contiguous_watermark():
             expected_watermark=expected_101,
         )
 
-        success_100, delivery_futures_100, expected_100 = await engine._run_one(100)
+        success_100, delivery_futures_100, expected_100, delivery_entities_100 = await engine._run_one(100)
         await engine._finalize_checkpoint(
             100,
             success_100,
@@ -578,7 +612,7 @@ def test_engine_eos_sequential_success_does_not_write_cursor_state():
 
     async def run():
         await watermark_manager.mark_emitted(100)
-        success, delivery_futures, expected_watermark = await engine._run_one(100)
+        success, delivery_futures, expected_watermark, delivery_entities = await engine._run_one(100)
         await engine._finalize_checkpoint(
             100,
             success,

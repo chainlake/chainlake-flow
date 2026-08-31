@@ -172,7 +172,7 @@ class IngestionEngine:
                 cursor = await self._queue_get_or_shutdown(queue, shutdown_event)
                 if cursor is None:
                     break
-                success, delivery_futures, expected_watermark = await self._run_one(cursor)
+                success, delivery_futures, expected_watermark, delivery_entities = await self._run_one(cursor)
                 if self.watermark_manager is not None:
                     task = asyncio.create_task(
                         self._finalize_checkpoint(
@@ -180,6 +180,7 @@ class IngestionEngine:
                             success,
                             delivery_futures,
                             expected_watermark=expected_watermark,
+                            delivery_entities=delivery_entities,
                         )
                     )
                     self._checkpoint_tasks.add(task)
@@ -405,6 +406,7 @@ class IngestionEngine:
         current_entity = "unknown"
         success = True
         delivery_futures = []
+        delivery_entities = []
         expected_watermark = None
         transactional_topic_rows = []
         parsed_bundle = {}
@@ -434,6 +436,7 @@ class IngestionEngine:
                     success = True
                     parsed_bundle = {}
                     delivery_futures = []
+                    delivery_entities = []
                     expected_watermark = None
                     transactional_topic_rows = []
                     retry_requested = False
@@ -493,7 +496,7 @@ class IngestionEngine:
                                     },
                                 )
                                 success = False
-                                return False, delivery_futures, expected_watermark
+                                return False, delivery_futures, expected_watermark, delivery_entities
 
                             try:
                                 value, meta = rpc_result
@@ -559,7 +562,7 @@ class IngestionEngine:
                                     },
                                 )
                                 success = False
-                                return False, delivery_futures, expected_watermark
+                                return False, delivery_futures, expected_watermark, delivery_entities
 
                         if retry_requested:
                             retry_delay = self._upstream_not_ready_retry_delay_seconds(attempt)
@@ -622,6 +625,7 @@ class IngestionEngine:
                                     )
                                     if delivery_future is not None:
                                         delivery_futures.append(delivery_future)
+                                        delivery_entities.append((entity, topic))
                                 phase_timings["sink_enqueue_ms"] += (time.perf_counter() - sink_started) * 1000
                             receipt_rows = (
                                 len(final_bundle.get("receipt", []))
@@ -657,7 +661,7 @@ class IngestionEngine:
                             context={},
                         )
                         success = False
-                        return False, delivery_futures, expected_watermark
+                        return False, delivery_futures, expected_watermark, delivery_entities
 
                     if success:
                         break
@@ -681,7 +685,7 @@ class IngestionEngine:
                                 "retry_attempts": attempt,
                             },
                         )
-                    return False, delivery_futures, expected_watermark
+                    return False, delivery_futures, expected_watermark, delivery_entities
 
                 if success and self.eos_enabled:
                     should_persist_cursor_state = False
@@ -719,7 +723,8 @@ class IngestionEngine:
                     delivery_future = await self.sink.send_transaction(transactional_topic_rows)
                     if delivery_future is not None:
                         delivery_futures.append(delivery_future)
-                return success, delivery_futures, expected_watermark
+                        delivery_entities.append(("transaction", None))
+                return success, delivery_futures, expected_watermark, delivery_entities
         finally:
             rpc_requests = max(int(phase_timings.get("rpc_requests", 0)), 0)
             if rpc_requests > 0:
@@ -781,6 +786,7 @@ class IngestionEngine:
         delivery_futures,
         *,
         expected_watermark=None,
+        delivery_entities=None,
     ):
         if not success:
             await self._record_failed_watermark_state(cursor)
@@ -809,6 +815,19 @@ class IngestionEngine:
                             cursor=cursor,
                             timed_out=delivery_results is None,
                         )
+                    # Sink-delivery failures never used to reach the DLQ --
+                    # only processor/rpc-stage failures did -- so a cursor
+                    # that failed here left zero forensic trail (no payload,
+                    # no error detail) beyond a bare "failed" watermark
+                    # state entry. Live incident: a KafkaException
+                    # (MSG_SIZE_TOO_LARGE) killed the sink worker and we had
+                    # no record of which entity/topic actually produced the
+                    # oversized message.
+                    await self._send_sink_failure_dlq(
+                        cursor,
+                        delivery_entities or [],
+                        delivery_results,
+                    )
                     await self._record_failed_watermark_state(cursor)
                     return
                 delivery_summary = self._aggregate_delivery_summaries(delivery_results)
@@ -877,6 +896,35 @@ class IngestionEngine:
         except Exception as exc:
             await self._record_failed_watermark_state(cursor, error=str(exc))
             return
+
+    async def _send_sink_failure_dlq(self, cursor, delivery_entities, delivery_results):
+        """Best-effort: the sink may already be dead (that's exactly why
+        we're here), so a failure to write the DLQ record itself must not
+        raise and mask the original failure."""
+        if not delivery_entities:
+            return
+        timed_out = delivery_results is None
+        for i, (entity, topic) in enumerate(delivery_entities):
+            result = None if timed_out else delivery_results[i] if i < len(delivery_results) else None
+            if not timed_out and not isinstance(result, Exception):
+                continue
+            error = (
+                TimeoutError(f"sink delivery timed out after {self.sink_failure_timeout_sec}s")
+                if timed_out
+                else result
+            )
+            try:
+                await self._send_dlq(
+                    entity=entity,
+                    cursor=cursor,
+                    stage="sink",
+                    error_type=type(error).__name__,
+                    error_message=str(error),
+                    payload=None,
+                    context={"topic": topic},
+                )
+            except Exception:
+                pass
 
     async def _record_failed_watermark_state(self, cursor, error: str | None = None):
         if self.watermark_manager is None:
@@ -989,13 +1037,14 @@ class IngestionEngine:
         previous = self._active_dlq_record
         self._active_dlq_record = record
         try:
-            success, delivery_futures, expected_watermark = await self._run_one(record.get("cursor"))
+            success, delivery_futures, expected_watermark, delivery_entities = await self._run_one(record.get("cursor"))
             if self.watermark_manager is not None:
                 await self._finalize_checkpoint(
                     record.get("cursor"),
                     success,
                     delivery_futures,
                     expected_watermark=expected_watermark,
+                    delivery_entities=delivery_entities,
                 )
             self.metrics.DLQ_RETRY_COUNTER.add(
                 1,
