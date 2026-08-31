@@ -34,7 +34,6 @@ dependencies = [
   "pytest>=9.0.3",
   "protobuf>=6.33.0",
   "fastavro>=1.10.0",
-  "prefect>=3.0.0",
 ]
 
 [project.optional-dependencies]
