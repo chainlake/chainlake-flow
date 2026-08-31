@@ -1,0 +1,27 @@
+# Deploys rpcstream_dlq_replay as a scheduled Prefect Cloud flow, run as a
+# Kubernetes Job by the chainlake-dlq-replay work pool (see
+# chainlake-infra/apps/prefect/README.md for the one-time pool setup).
+#
+# To (re)deploy after changing this file or the flow:
+#   PREFECT_API_URL=... PREFECT_API_KEY=... prefect deploy --all
+name: rpcstream
+prefect-version: "3.0"
+
+deployments:
+  - name: dlq-replay-hourly
+    entrypoint: rpcstream/prefect_flows/dlq_replay_flow.py:dlq_replay_flow
+    schedules:
+      - cron: "0 * * * *"
+        timezone: UTC
+        active: true
+    parameters:
+      status: failed
+    work_pool:
+      name: chainlake-dlq-replay
+      work_queue_name: default
+      job_variables:
+        image: "crpi-tzzdgvt2as7ll5cj.cn-shanghai.personal.cr.aliyuncs.com/chainlake/chainlake-rpcstream:latest"
+        namespace: ingestion
+        service_account_name: prefect-worker
+        env:
+          PIPELINE_CONFIG: /app/pipeline.yaml
