@@ -568,6 +568,50 @@ def test_kafka_writer_logs_sustained_backpressure():
     assert warnings
 
 
+def test_kafka_writer_isolates_oversized_message_from_sink_worker():
+    """A KafkaException like MSG_SIZE_TOO_LARGE is specific to one message,
+    not the worker or the broker connection: it must fail just that row's
+    delivery and let the rest of the batch through, not permanently kill
+    the sink the way a bare BufferError used to. This happened live -- a
+    single oversized "log" entity row killed the worker and ingestion
+    stayed paused until the pod was manually restarted."""
+    from confluent_kafka import KafkaError, KafkaException
+
+    class OneOversizedMessageProducer:
+        def __init__(self):
+            self.produced = []
+
+        def produce(self, **kwargs):
+            if kwargs["key"] == "too-big":
+                raise KafkaException(KafkaError(KafkaError.MSG_SIZE_TOO_LARGE))
+            self.produced.append(kwargs)
+
+        def poll(self, _timeout):
+            return 0
+
+    logger = _RecordingLogger()
+    writer = _make_writer(OneOversizedMessageProducer(), logger=logger)
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+
+    async def run():
+        await writer._flush_batch(
+            [
+                ("topic-a", {"id": "too-big"}, ctx, None),
+                ("topic-a", {"id": "evt-2"}, ctx, None),
+            ]
+        )
+
+    asyncio.run(run())
+
+    assert [p["key"] for p in writer.producer.produced] == ["evt-2"]
+    failures = [r for r in logger.records if r[1] == "kafka.produce_failed"]
+    assert failures
+    assert failures[0][2]["error_type"] == "KafkaException"
+
+
 def test_kafka_sink_worker_crash_is_logged():
     """A crashed sink worker used to die silently: the engine keeps a strong
     reference to the task, so asyncio never prints 'Task exception was never

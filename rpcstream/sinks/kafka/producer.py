@@ -3,6 +3,7 @@ import time
 import asyncio
 from collections import defaultdict
 
+from confluent_kafka import KafkaException
 from opentelemetry import trace
 from opentelemetry.trace import Link
 
@@ -279,7 +280,7 @@ class KafkaWriter:
                 await self._flush_buffer(buffer)
                 buffer.clear()
                 last_flush = now
-            
+
             # Ensure that the producer is regularly polled to send messages
             self.producer.poll(0) # Poll frequently to send any messages in the buffer
 
@@ -356,35 +357,62 @@ class KafkaWriter:
                 # (broker slower than producer), not a permanent failure, so we
                 # wait it out: raising here killed the sink worker, after which
                 # the queue was never drained again and every send timed out.
-                backpressure_since = None
-                while True:
-                    try:
-                        self.producer.produce(
-                            topic=topic,
-                            key=kafka_key,
-                            value=payload,
-                            callback=self._delivery_callback(delivery_tracker),
-                        )
-                        break
+                #
+                # A KafkaException here (e.g. MSG_SIZE_TOO_LARGE, which
+                # produce() raises synchronously when librdkafka can tell
+                # up front a single message won't fit) is specific to this
+                # one row, not the worker or the broker connection -- fail
+                # just its delivery tracker and move on to the rest of the
+                # batch, the same "one bad message must not kill the whole
+                # sink forever" fix as the BufferError case above (an
+                # oversized "log" entity row hit this live and took down
+                # ingestion until the pod was restarted). Deliberately
+                # narrower than a bare `except Exception`: a non-Kafka
+                # error here means something we didn't anticipate, and
+                # test_kafka_sink_worker_crash_is_logged /
+                # test_kafka_writer_send_fails_fast_when_worker_is_dead
+                # depend on that case still crashing the worker loudly
+                # rather than silently swallowing an unknown failure mode.
+                try:
+                    backpressure_since = None
+                    while True:
+                        try:
+                            self.producer.produce(
+                                topic=topic,
+                                key=kafka_key,
+                                value=payload,
+                                callback=self._delivery_callback(delivery_tracker),
+                            )
+                            break
 
-                    except BufferError:
-                        self.metrics.BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
-                        now = time.time()
-                        if backpressure_since is None:
-                            backpressure_since = now
-                        elif now - backpressure_since >= self.buffer_full_log_interval_sec:
-                            # Log periodically so sustained backpressure is
-                            # visible without flooding on every retry.
-                            backpressure_since = now
-                            if self.logger:
-                                self.logger.warn(
-                                    "kafka.producer_backpressure",
-                                    topic=topic,
-                                )
-                        # Free queued/delivered batches, then yield so the rest
-                        # of the event loop keeps running while we wait.
-                        self.producer.poll(0.1)
-                        await asyncio.sleep(0.01)
+                        except BufferError:
+                            self.metrics.BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
+                            now = time.time()
+                            if backpressure_since is None:
+                                backpressure_since = now
+                            elif now - backpressure_since >= self.buffer_full_log_interval_sec:
+                                # Log periodically so sustained backpressure is
+                                # visible without flooding on every retry.
+                                backpressure_since = now
+                                if self.logger:
+                                    self.logger.warn(
+                                        "kafka.producer_backpressure",
+                                        topic=topic,
+                                    )
+                            # Free queued/delivered batches, then yield so the rest
+                            # of the event loop keeps running while we wait.
+                            self.producer.poll(0.1)
+                            await asyncio.sleep(0.01)
+                except KafkaException as exc:
+                    self._fail_delivery_tracker(delivery_tracker, exc)
+                    if self.logger:
+                        self.logger.error(
+                            "kafka.produce_failed",
+                            topic=topic,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
+                    continue
 
             # trigger delivery callbacks
             self.producer.poll(0)
