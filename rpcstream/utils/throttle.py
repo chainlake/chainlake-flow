@@ -31,12 +31,16 @@ class ThrottledLogger:
 
         last_emit, suppressed, last_summary = bucket
         if suppressed > 0 and now - last_summary >= self._summary_interval:
-            # Bypass throttling for the summary line itself.
+            # Bypass throttling for the summary line itself. `level`/`message`
+            # would collide with _log's own positional params of the same
+            # name (TypeError: got multiple values for argument 'message'),
+            # so the throttled entry's own level/message are passed under
+            # different keys.
             self._wrapped._log(
                 "warn",
                 "log.throttled_summary",
-                message=message,
-                level=level,
+                throttled_level=level,
+                throttled_message=message,
                 suppressed=suppressed,
             )
             bucket[1] = 0
