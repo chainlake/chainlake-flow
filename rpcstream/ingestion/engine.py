@@ -997,6 +997,10 @@ class IngestionEngine:
                     delivery_futures,
                     expected_watermark=expected_watermark,
                 )
+            self.metrics.DLQ_RETRY_COUNTER.add(
+                1,
+                {"entity": record.get("entity") or "unknown", "outcome": "success" if success else "failed"},
+            )
             return success
         finally:
             self._active_dlq_record = previous
@@ -1004,6 +1008,7 @@ class IngestionEngine:
     async def mark_dlq_resolved(self, record: dict) -> None:
         if not self.dlq_topic:
             return
+        self.metrics.DLQ_RESOLVED_COUNTER.add(1, {"entity": record.get("entity") or "unknown"})
         resolved_record = build_resolved_record(record)
         if self.eos_enabled:
             delivery_future = await self.sink.send_transaction([(self.dlq_topic, [resolved_record])])

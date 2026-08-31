@@ -19,6 +19,8 @@ class EngineMetrics:
             self.BLOCK_COUNTER = _NoOp()
             self.ROW_COUNTER = _NoOp()
             self.DLQ_COUNTER = _NoOp()
+            self.DLQ_RETRY_COUNTER = _NoOp()
+            self.DLQ_RESOLVED_COUNTER = _NoOp()
             self.BLOCK_LATENCY = _NoOp()
             self.QUEUE_WAIT = _NoOp()
             self.TOTAL_TIME = _NoOp()
@@ -41,6 +43,18 @@ class EngineMetrics:
 
         self.DLQ_COUNTER = meter.create_counter(
             "rpcstream_engine_dlq_total",
+        )
+
+        # DLQ retry worker outcomes (retry_dlq_record / mark_dlq_resolved).
+        # Labeled by outcome=success|failed so a single counter covers both;
+        # only ever incremented by the rpcstream-dlq-retry process, never the
+        # main engine, since only that process calls retry_dlq_record.
+        self.DLQ_RETRY_COUNTER = meter.create_counter(
+            "rpcstream_engine_dlq_retry_total",
+        )
+
+        self.DLQ_RESOLVED_COUNTER = meter.create_counter(
+            "rpcstream_engine_dlq_resolved_total",
         )
 
         # Latency
