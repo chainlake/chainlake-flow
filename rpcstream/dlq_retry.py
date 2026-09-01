@@ -37,10 +37,27 @@ async def run_dlq_retry(
     await stack.engine.sink.start()
     client.subscribe()
 
+    # With ingestion sharded by entity (separate rpcstream Deployments each
+    # configured with a disjoint entities: subset, isolated via
+    # CheckpointIdentity's entities-tuple key), this retry worker's own
+    # pipeline.yaml carries the same subset as the shard it belongs to. A
+    # DLQ record's `entity` field is always drawn from a single shard's
+    # engine (see engine._send_sink_failure_dlq), so it is always either a
+    # subset of this worker's own entities, or entirely disjoint from them
+    # (belongs to a different shard's retry worker instead). Reprocessing a
+    # foreign-shard record here would resink entities this worker's engine
+    # was never given data for, and -- worse -- complete it against this
+    # worker's own watermark identity, which the *other* shard never reads,
+    # leaving that shard's cursor stuck "failed" forever even though a
+    # (wrong-identity) retry "succeeded". Skip and leave it for the shard
+    # that actually owns it.
+    own_entities = set(stack.runtime.entities)
+
     stack.logger.info(
         "dlq.retry_worker_started",
         topic=stack.runtime.topic_map.dlq,
         group_id=group_id,
+        own_entities=sorted(own_entities),
     )
 
     # A cursor can have multiple DLQ records (one per entity that failed --
@@ -62,6 +79,11 @@ async def run_dlq_retry(
 
             record = message.value
             if not should_retry_record(record):
+                client.commit(message)
+                continue
+
+            record_entities = {e for e in (record.get("entity") or "").split(",") if e}
+            if not record_entities <= own_entities:
                 client.commit(message)
                 continue
 
