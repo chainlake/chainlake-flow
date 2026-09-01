@@ -2,6 +2,7 @@ import json
 import time
 import asyncio
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from confluent_kafka import KafkaException
 from opentelemetry import trace
@@ -65,6 +66,22 @@ class KafkaWriter:
         self._running = False
         self._worker_task = None
         self._last_delivery_summary = None
+
+        # Dedicated, small, bounded pool for _prepare_message's synchronous
+        # Avro/schema-registry serialization -- NOT asyncio's shared default
+        # executor. A prior fix used run_in_executor(None, ...), which put
+        # this on the same pool as WatermarkManager's periodic
+        # asyncio.to_thread(state_reader.load()) call (a slow, unbounded
+        # cursor_state topic reload). Under this pod's 2-core CPU limit, the
+        # combined thread count from both users exceeded the CFS quota and
+        # caused a full livelock in production -- high CPU, zero forward
+        # progress -- confirmed live via py-spy. _flush_batch only ever has
+        # one item in flight here at a time (its per-item loop awaits each
+        # one before starting the next), so max_workers=2 is already slack,
+        # not a throughput target.
+        self._serialize_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="kafka-serialize"
+        )
 
         if self.schema_registry_enabled:
             if not schema_registry_url:
@@ -331,10 +348,22 @@ class KafkaWriter:
                 
             start = time.time()
             self.metrics.BATCH_COUNTER.add(1)
-            
+            loop = asyncio.get_running_loop()
+
             for topic, r, _, delivery_tracker in items:
                 try:
-                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = self._prepare_message(topic, r)
+                    # Avro/schema-registry serialization is synchronous and
+                    # CPU-bound; calling it inline blocked every other
+                    # coroutine (all "concurrent" RPC-fetch workers included)
+                    # for the duration of the whole batch. Offloaded to a
+                    # small dedicated pool -- NOT asyncio's shared default
+                    # executor, see self._serialize_executor's docstring at
+                    # __init__ for why that distinction matters.
+                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = (
+                        await loop.run_in_executor(
+                            self._serialize_executor, self._prepare_message, topic, r
+                        )
+                    )
                 except Exception as exc:
                     self._fail_delivery_tracker(delivery_tracker, exc)
                     raise
@@ -629,6 +658,8 @@ class KafkaWriter:
 
         # FORCE FINAL FLUSH
         self.producer.flush()
+
+        self._serialize_executor.shutdown(wait=True)
 
     def _serialize(self, topic, row):
         if self.protobuf_registry is not None:
