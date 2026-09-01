@@ -422,6 +422,11 @@ def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monke
         def assign(self, *_args, **_kwargs):
             return None
 
+        def position(self, partitions):
+            # -1001 == confluent_kafka.OFFSET_INVALID: no fetch has happened
+            # on this partition yet (this reader's first-ever call).
+            return [SimpleNamespace(offset=-1001) for _ in partitions]
+
         def poll(self, *_args, **_kwargs):
             if self._polled:
                 return None
@@ -458,3 +463,129 @@ def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monke
 
     assert reader.load() == {}
     assert reader.schema_missing is True
+
+
+def test_kafka_watermark_state_reader_load_is_incremental(monkeypatch):
+    """load() used to create a brand-new Consumer and re-scan the whole
+    topic from `auto.offset.reset: earliest` on every call -- with
+    `enable.auto.commit: False` and no seek, there was no persisted
+    position to resume from, so every refresh (roughly once a second,
+    forever) re-read and re-decoded the entire history. Live, this topic
+    held ~207k raw messages for ~13k distinct cursor keys (it's compacted,
+    but compaction only runs over closed segments and lags real time), so
+    every refresh was re-decoding ~15x more records than useful, took 30+
+    seconds, and kept getting slower as the topic grew -- the actual driver
+    behind rpcstream falling behind, not Kafka message serialization. The
+    reader must keep its Consumer alive across calls and only poll for
+    messages appended since the previous call, merging them into what it
+    already knows instead of rebuilding from scratch."""
+    import json
+
+    class FakeMessage:
+        def __init__(self, partition, offset, key, value):
+            self._partition = partition
+            self._offset = offset
+            self._key = key
+            self._value = value
+
+        def error(self):
+            return None
+
+        def partition(self):
+            return self._partition
+
+        def offset(self):
+            return self._offset
+
+        def key(self):
+            return self._key
+
+        def value(self):
+            return self._value
+
+    class FakeTopicMeta:
+        error = None
+
+        def __init__(self):
+            self.partitions = {0: object()}
+
+    class FakeMetadata:
+        def __init__(self):
+            self.topics = {"bsc.cursor_state": FakeTopicMeta()}
+
+    topic_log: list = []  # shared "broker" state: append-only
+    construction_count = 0
+
+    class FakeConsumer:
+        def __init__(self, *_args, **_kwargs):
+            nonlocal construction_count
+            construction_count += 1
+            self._next_offset = 0
+
+        def list_topics(self, *_args, **_kwargs):
+            return FakeMetadata()
+
+        def get_watermark_offsets(self, *_args, **_kwargs):
+            return (0, len(topic_log))
+
+        def assign(self, *_args, **_kwargs):
+            return None
+
+        def position(self, partitions):
+            offset = -1001 if self._next_offset == 0 else self._next_offset
+            return [SimpleNamespace(offset=offset) for _ in partitions]
+
+        def poll(self, *_args, **_kwargs):
+            if self._next_offset >= len(topic_log):
+                return None
+            message = topic_log[self._next_offset]
+            self._next_offset += 1
+            return message
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("confluent_kafka.Consumer", FakeConsumer)
+
+    identity = CheckpointIdentity(
+        pipeline="pipe",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="realtime",
+        primary_unit="block",
+        entities=("block",),
+    )
+    reader = KafkaWatermarkStateReader(
+        topic="bsc.cursor_state",
+        producer_config={"bootstrap.servers": "localhost:9092"},
+        identity=identity,
+        schema_registry_url=None,  # falls back to plain JSON decode
+    )
+
+    topic_log.append(
+        FakeMessage(
+            0, 0, b"pipeline=pipe|entities=block|cursor=1",
+            json.dumps({"cursor": 1, "status": "failed"}).encode(),
+        )
+    )
+
+    first = reader.load()
+    assert set(first) == {1}
+    assert construction_count == 1
+
+    # A new record gets appended to the topic between refresh cycles.
+    topic_log.append(
+        FakeMessage(
+            0, 1, b"pipeline=pipe|entities=block|cursor=2",
+            json.dumps({"cursor": 2, "status": "completed"}).encode(),
+        )
+    )
+
+    second = reader.load()
+    assert set(second) == {1, 2}
+    # Still the same Consumer: no second construction, and the fake's
+    # internal position only advances forward -- if load() had re-scanned
+    # from the start, poll() would have to be called for offset 0 again,
+    # which this fake can't do without resetting _next_offset itself.
+    assert construction_count == 1

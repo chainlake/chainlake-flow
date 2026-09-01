@@ -344,6 +344,32 @@ class KafkaWatermarkStateReader:
         self._deserializer = None
         self.schema_missing = False
 
+        # `load()` is called repeatedly for the life of the process (the
+        # WatermarkManager refresh loop polls it roughly every second). A
+        # brand-new Consumer + a from-`auto.offset.reset=earliest` scan on
+        # every call re-reads and re-decodes the ENTIRE topic from scratch
+        # each time -- with `enable.auto.commit: False` and no seek, there's
+        # no persisted position to resume from. This topic is compacted but
+        # compaction lags real time (only runs over closed segments), so the
+        # raw record count grows far faster than the deduplicated state
+        # actually needed: live, this topic held ~207k raw messages for
+        # ~13k distinct cursor keys, so every refresh was re-decoding ~15x
+        # more Avro records than useful, taking 30+ seconds and getting
+        # slower as the topic grew -- the real driver behind rpcstream
+        # falling behind, not Kafka message serialization.
+        #
+        # Keeping the Consumer object alive across calls (instead of a new
+        # one each time) makes subsequent polls resume from wherever the
+        # previous call's polling left off for free -- confluent_kafka
+        # tracks the next-fetch position per assigned partition internally
+        # regardless of whether offsets are committed. Committing only
+        # affects externally-visible position for group rebalancing, not
+        # this in-process fetch cursor, so this needs no offset-commit
+        # changes at all.
+        self._consumer = None
+        self._assigned_partitions = None
+        self._records_by_key: dict[str, WatermarkStateRecord] = {}
+
         if self.schema_registry_url:
             self._serializer_registry = SchemaRegistrySerializerRegistry(
                 schema_registry_url=self.schema_registry_url,
@@ -357,14 +383,16 @@ class KafkaWatermarkStateReader:
             self._deserializer = self._serializer_registry.build_deserializer(self.topic)
 
     def load(self) -> dict[int, WatermarkStateRecord]:
-        from confluent_kafka import Consumer, KafkaError, TopicPartition
+        from confluent_kafka import KafkaError, TopicPartition
 
-        consumer = Consumer(self._consumer_config())
-        records_by_key: dict[str, WatermarkStateRecord] = {}
-        try:
+        if self._consumer is None:
+            from confluent_kafka import Consumer
+
+            consumer = Consumer(self._consumer_config())
             metadata = consumer.list_topics(self.topic, timeout=10)
             topic_meta = metadata.topics.get(self.topic)
             if topic_meta is None or topic_meta.error is not None:
+                consumer.close()
                 return {}
 
             partitions = [
@@ -372,69 +400,79 @@ class KafkaWatermarkStateReader:
                 for partition in topic_meta.partitions
             ]
             if not partitions:
-                return {}
-
-            low_high = {}
-            seen_eof = set()
-            for tp in partitions:
-                low, high = consumer.get_watermark_offsets(tp, timeout=10)
-                low_high[tp.partition] = (low, high)
-                if high <= low:
-                    seen_eof.add(tp.partition)
-
-            if len(seen_eof) == len(partitions):
+                consumer.close()
                 return {}
 
             consumer.assign(partitions)
-            prefix = f"{self.identity.cursor_state_key_prefix}|cursor="
+            self._consumer = consumer
+            self._assigned_partitions = partitions
 
-            while len(seen_eof) < len(partitions):
-                message = consumer.poll(1.0)
-                if message is None:
-                    continue
-                if message.error():
-                    if message.error().code() == KafkaError._PARTITION_EOF:
-                        seen_eof.add(message.partition())
-                        continue
-                    raise RuntimeError(message.error())
+        consumer = self._consumer
+        prefix = f"{self.identity.cursor_state_key_prefix}|cursor="
 
-                high = low_high.get(message.partition(), (0, 0))[1]
-                if message.offset() >= high - 1:
+        low_high = {}
+        seen_eof = set()
+        for tp in self._assigned_partitions:
+            low, high = consumer.get_watermark_offsets(tp, timeout=10, cached=False)
+            low_high[tp.partition] = (low, high)
+            position = consumer.position([tp])[0].offset
+            # No fetch has happened yet on this partition (position unset,
+            # a negative sentinel) -- there's nothing to compare against
+            # `high` yet, so just check whether the topic is empty outright.
+            if position < 0:
+                if high <= low:
+                    seen_eof.add(tp.partition)
+            elif position >= high:
+                seen_eof.add(tp.partition)
+
+        while len(seen_eof) < len(self._assigned_partitions):
+            message = consumer.poll(1.0)
+            if message is None:
+                continue
+            if message.error():
+                if message.error().code() == KafkaError._PARTITION_EOF:
                     seen_eof.add(message.partition())
-
-                if message.key() is None or message.value() is None:
                     continue
+                raise RuntimeError(message.error())
 
-                key = message.key().decode("utf-8")
-                if not key.startswith(prefix):
-                    continue
+            high = low_high.get(message.partition(), (0, 0))[1]
+            if message.offset() >= high - 1:
+                seen_eof.add(message.partition())
 
-                try:
-                    value = self._decode_record(message.value())
-                except Exception as exc:
-                    if _is_missing_schema_error(exc):
-                        self.schema_missing = True
-                        if self.logger:
-                            self.logger.warn(
-                                "watermark.schema_missing",
-                                topic=self.topic,
-                                key=self.identity.key,
-                                error=str(exc),
-                            )
-                        return {}
-                    raise
-                record = WatermarkStateRecord(
-                    cursor=int(value["cursor"]),
-                    status=value.get("status", ""),
-                    updated_at_ms=int(value.get("updated_at_ms", 0)),
-                    identity=self.identity,
-                    error=value.get("error"),
-                )
-                records_by_key[key] = record
-        finally:
-            consumer.close()
+            if message.key() is None or message.value() is None:
+                continue
 
-        records = {record.cursor: record for record in records_by_key.values()}
+            key = message.key().decode("utf-8")
+            if not key.startswith(prefix):
+                continue
+
+            try:
+                value = self._decode_record(message.value())
+            except Exception as exc:
+                if _is_missing_schema_error(exc):
+                    self.schema_missing = True
+                    if self.logger:
+                        self.logger.warn(
+                            "watermark.schema_missing",
+                            topic=self.topic,
+                            key=self.identity.key,
+                            error=str(exc),
+                        )
+                    return {
+                        record.cursor: record
+                        for record in self._records_by_key.values()
+                    }
+                raise
+            record = WatermarkStateRecord(
+                cursor=int(value["cursor"]),
+                status=value.get("status", ""),
+                updated_at_ms=int(value.get("updated_at_ms", 0)),
+                identity=self.identity,
+                error=value.get("error"),
+            )
+            self._records_by_key[key] = record
+
+        records = {record.cursor: record for record in self._records_by_key.values()}
         if records and self.logger:
                 self.logger.info(
                     "watermark.external_state_loaded",
@@ -443,6 +481,11 @@ class KafkaWatermarkStateReader:
                     cursor_count=len(records),
                 )
         return records
+
+    def close(self) -> None:
+        if self._consumer is not None:
+            self._consumer.close()
+            self._consumer = None
 
     def _decode_record(self, payload: bytes) -> dict[str, Any]:
         if self._deserializer is None:
@@ -561,6 +604,8 @@ class WatermarkManager:
                 await asyncio.wait_for(self._refresh_task, timeout=0.1)
         if self.flush_on_advance:
             await self.flush(status=status, force=True)
+        if self.state_reader is not None and hasattr(self.state_reader, "close"):
+            await asyncio.to_thread(self.state_reader.close)
 
     async def mark_completed(self, cursor: int) -> int | None:
         async with self._lock:
