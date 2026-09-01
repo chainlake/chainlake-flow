@@ -634,6 +634,46 @@ def test_kafka_writer_flush_batch_yields_between_items():
     assert other_task_completed_at < 0.22
 
 
+def test_kafka_writer_flush_batch_polls_after_every_item():
+    """Delivery callbacks (what resolves a row's delivery_tracker future)
+    only get serviced inside a producer.poll() call. With poll() previously
+    called once at the end of the whole batch, callbacks for early items in
+    a large/slow batch could sit unprocessed long enough that
+    _finalize_checkpoint's 10s sink_failure_timeout_sec fired even though
+    the broker had already acked them -- observed live as a flood of
+    spurious "sink delivery timed out" DLQ entries under load, with the
+    Kafka broker itself idle and healthy. poll(0) must run after every
+    item, not just once per batch."""
+
+    class DummyProducer:
+        def __init__(self):
+            self.produced = []
+            self.poll_calls = 0
+
+        def produce(self, **kwargs):
+            self.produced.append(kwargs)
+
+        def poll(self, _timeout):
+            self.poll_calls += 1
+            return 0
+
+    writer = _make_writer(DummyProducer())
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+
+    async def run():
+        items = [("topic-a", {"id": f"evt-{i}"}, ctx, None) for i in range(5)]
+        await writer._flush_batch(items)
+
+    asyncio.run(run())
+
+    assert len(writer.producer.produced) == 5
+    # One poll() per item plus the final trigger-delivery-callbacks call.
+    assert writer.producer.poll_calls >= 5
+
+
 def test_kafka_writer_isolates_oversized_message_from_sink_worker():
     """A KafkaException like MSG_SIZE_TOO_LARGE is specific to one message,
     not the worker or the broker connection: it must fail just that row's

@@ -414,20 +414,33 @@ class KafkaWriter:
                         )
                     continue
 
-                # Yield after every item, not just at the end of the whole
-                # batch. _prepare_message's Avro/schema-registry
-                # serialization is synchronous and CPU-bound; looping
-                # through up to batch_size (100) items without ever
-                # returning to the event loop held it hostage for the whole
-                # batch's total serialization time -- confirmed live via
-                # py-spy: rpcstream_engine_inflight never exceeded 1 despite
-                # the scheduler's 20-worker window being fully open, because
-                # no RPC-fetch coroutine ever got a turn to run in between.
-                # This trades some throughput (bounded work still runs
-                # inline, unlike a thread-pool offload) for something that
-                # can't deadlock: no cross-thread calls into confluent_kafka
-                # or the schema registry client, which is what a genuine
-                # executor-based fix hit three times in a row in production.
+                # Poll after every item, not just once at the end of the
+                # whole batch. Delivery callbacks (the thing that resolves
+                # each row's delivery_tracker future) only ever get serviced
+                # inside a poll() call -- with poll() called once per up-to-
+                # batch_size (100) items, callbacks for early items in a
+                # large/slow batch could sit unprocessed long enough that
+                # _finalize_checkpoint's 10s sink_failure_timeout_sec fired
+                # even though the broker had already acked them, producing
+                # a flood of spurious "sink delivery timed out" DLQ entries
+                # under load. poll(0) is non-blocking and safe to call this
+                # often.
+                #
+                # Also yield to the event loop after every item.
+                # _prepare_message's Avro/schema-registry serialization is
+                # synchronous and CPU-bound; looping through the whole batch
+                # without ever returning to the event loop held it hostage
+                # for the batch's total serialization time -- confirmed live
+                # via py-spy: rpcstream_engine_inflight never exceeded 1
+                # despite the scheduler's 20-worker window being fully open,
+                # because no RPC-fetch coroutine ever got a turn to run in
+                # between. This trades some throughput (bounded work still
+                # runs inline, unlike a thread-pool offload) for something
+                # that can't deadlock: no cross-thread calls into
+                # confluent_kafka or the schema registry client, which is
+                # what a genuine executor-based fix hit three times in a row
+                # in production.
+                self.producer.poll(0)
                 await asyncio.sleep(0)
 
             # trigger delivery callbacks
