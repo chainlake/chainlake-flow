@@ -25,6 +25,31 @@ def business_topics(topic_maps) -> list[str]:
     return list(topic_maps.main.values())
 
 
+# Sized from live BSC mainnet volume (retained-message counts observed on a
+# single-node cluster): token_transfer's decoded-event fan-out is by far the
+# heaviest (~6x enriched_transaction, ~3x raw_log), raw_log next, then
+# enriched_transaction, then raw_block (one row per block, negligible
+# volume). Redpanda is thread-per-core, so more partitions only actually
+# parallelizes broker-side writes if the broker also has that many cores
+# (see redpanda-values.yaml's resources.cpu.cores). An entity not listed
+# here (e.g. a future `trace`) falls through to the broker's default
+# partition count.
+DEFAULT_ENTITY_PARTITIONS = {
+    "token_transfer": 6,
+    "log": 4,
+    "transaction": 3,
+    "block": 2,
+}
+
+
+def business_topic_partitions(topic_maps) -> dict[str, int]:
+    return {
+        topic: DEFAULT_ENTITY_PARTITIONS[entity]
+        for entity, topic in topic_maps.main.items()
+        if entity in DEFAULT_ENTITY_PARTITIONS
+    }
+
+
 def system_topics(topic_maps) -> list[str]:
     topics = []
     if topic_maps.dlq:
@@ -51,7 +76,10 @@ def bootstrap_kafka_resources(runtime, adapter=None, logger=None) -> None:
         logger=logger,
     )
 
-    topic_manager.ensure_topics(business_topics(runtime.topic_map))
+    topic_manager.ensure_topics(
+        business_topics(runtime.topic_map),
+        partitions=business_topic_partitions(runtime.topic_map),
+    )
     topic_manager.ensure_topics(system_topics(runtime.topic_map))
     topic_manager.ensure_compacted_topics(
         [runtime.checkpoint.topic, runtime.checkpoint.watermark_state_topic]

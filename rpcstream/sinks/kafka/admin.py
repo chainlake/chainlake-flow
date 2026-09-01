@@ -15,10 +15,15 @@ class KafkaTopicManager:
         self.producer_config = producer_config
         self.logger = logger
 
-    def ensure_topics(self, topics: Iterable[str]) -> None:
+    def ensure_topics(
+        self,
+        topics: Iterable[str],
+        partitions: dict[str, int] | None = None,
+    ) -> None:
         self._ensure_topics(
             topics,
             config={TOPIC_TIMESTAMP_CONFIG: TOPIC_TIMESTAMP_VALUE},
+            partitions=partitions,
         )
         self._wait_for_topics(topics)
 
@@ -55,19 +60,25 @@ class KafkaTopicManager:
                     continue
                 raise
 
-    def _ensure_topics(self, topics: Iterable[str], config: dict[str, str]) -> None:
+    def _ensure_topics(
+        self,
+        topics: Iterable[str],
+        config: dict[str, str],
+        partitions: dict[str, int] | None = None,
+    ) -> None:
         from confluent_kafka.admin import NewTopic
 
         admin = self._admin_client()
         unique_topics = sorted({topic for topic in topics if topic})
         if not unique_topics:
             return
+        partitions = partitions or {}
 
         futures = admin.create_topics(
             [
                 NewTopic(
                     topic=topic,
-                    num_partitions=-1,
+                    num_partitions=partitions.get(topic, -1),
                     replication_factor=-1,
                     config=config,
                 )
@@ -90,6 +101,44 @@ class KafkaTopicManager:
                 raise
 
         self._ensure_log_append_time(admin, unique_topics)
+        # Topic creation above is a no-op for topics that already exist
+        # (TOPIC_ALREADY_EXISTS is swallowed), so this is also how an
+        # under-provisioned *existing* topic picks up a higher target
+        # partition count on a later deploy -- partitions can only be
+        # increased, never decreased, which create_partitions enforces.
+        if partitions:
+            self._ensure_partition_counts(admin, partitions)
+
+    def _ensure_partition_counts(self, admin, partitions: dict[str, int]) -> None:
+        from confluent_kafka.admin import NewPartitions
+
+        metadata = admin.list_topics(timeout=10)
+        increases = []
+        for topic, target in partitions.items():
+            topic_meta = metadata.topics.get(topic)
+            if topic_meta is None or topic_meta.error is not None:
+                continue
+            current = len(topic_meta.partitions)
+            if current < target:
+                increases.append(NewPartitions(topic, target))
+
+        if not increases:
+            return
+
+        futures = admin.create_partitions(increases)
+        for topic, future in futures.items():
+            try:
+                future.result()
+                if self.logger:
+                    self.logger.info(
+                        "kafka.topic_partitions_increased",
+                        topic=topic,
+                        target=partitions[topic],
+                    )
+            except Exception as exc:
+                if "INVALID_PARTITIONS" in str(exc) or "already has" in str(exc).lower():
+                    continue
+                raise
 
     def _ensure_compaction(self, topics: Iterable[str]) -> None:
         from confluent_kafka.admin import (

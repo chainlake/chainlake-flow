@@ -17,6 +17,7 @@ class _AdminStub:
         self.incremental_updates = []
         self.deleted_topics = []
         self.list_topics_results = []
+        self.create_partitions_calls = []
 
     def describe_configs(self, resources):
         return {
@@ -31,6 +32,10 @@ class _AdminStub:
     def delete_topics(self, topics):
         self.deleted_topics = list(topics)
         return {topic: _Future(None) for topic in topics}
+
+    def create_partitions(self, new_partitions):
+        self.create_partitions_calls = list(new_partitions)
+        return {np.topic: _Future(None) for np in new_partitions}
 
     def list_topics(self, timeout=None):
         if self.list_topics_results:
@@ -117,3 +122,34 @@ def test_delete_topics_uses_admin_delete_topics():
     manager.delete_topics(["checkpoint-topic", "cursor-state-topic"])
 
     assert admin.deleted_topics == ["checkpoint-topic", "cursor-state-topic"]
+
+
+def test_ensure_partition_counts_only_increases_under_provisioned_topics():
+    """Topic creation (NewTopic) is a no-op for topics that already exist,
+    so an existing, under-provisioned topic (e.g. from before a per-entity
+    partition target was configured) would otherwise never pick up a higher
+    partition count on a later deploy. Partitions can only be increased,
+    never decreased -- a topic already at or above target must be left
+    alone (create_partitions errors on that)."""
+    manager = KafkaTopicManager(producer_config={})
+    admin = _AdminStub()
+
+    admin.list_topics_results = [
+        SimpleNamespace(
+            topics={
+                "bsc.token_transfer": SimpleNamespace(error=None, partitions={0: object()}),
+                "bsc.raw_block": SimpleNamespace(
+                    error=None, partitions={0: object(), 1: object()}
+                ),
+            }
+        )
+    ]
+
+    manager._ensure_partition_counts(
+        admin, {"bsc.token_transfer": 6, "bsc.raw_block": 2}
+    )
+
+    assert len(admin.create_partitions_calls) == 1
+    call = admin.create_partitions_calls[0]
+    assert call.topic == "bsc.token_transfer"
+    assert call.new_total_count == 6

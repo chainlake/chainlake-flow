@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from rpcstream.sinks.kafka.producer import KafkaWriter
-from rpcstream.sinks.kafka.bootstrap import bootstrap_kafka_resources
+from rpcstream.sinks.kafka.bootstrap import bootstrap_kafka_resources, business_topic_partitions
 from rpcstream.sinks.kafka.schema import (
     EntitySchema,
     FieldSchema,
@@ -323,6 +323,36 @@ def test_kafka_writer_send_checkpoint_uses_common_message_envelope():
     ]
 
 
+def test_business_topic_partitions_sizes_by_measured_bsc_volume():
+    """Sized from live BSC mainnet retained-message counts: token_transfer's
+    decoded-event fan-out is by far the heaviest, then raw_log, then
+    enriched_transaction, then raw_block (~1 row/block). An entity with no
+    configured target (e.g. a future `trace`) must fall through untouched
+    so it gets the broker's default partition count, not silently 0/None."""
+    topic_maps = SimpleNamespace(
+        main={
+            "block": "bsc.raw_block",
+            "transaction": "bsc.enriched_transaction",
+            "log": "bsc.raw_log",
+            "token_transfer": "bsc.token_transfer",
+            "trace": "bsc.raw_trace",
+        }
+    )
+
+    partitions = business_topic_partitions(topic_maps)
+
+    assert partitions == {
+        "bsc.raw_block": 2,
+        "bsc.enriched_transaction": 3,
+        "bsc.raw_log": 4,
+        "bsc.token_transfer": 6,
+    }
+    assert "bsc.raw_trace" not in partitions
+    assert partitions["bsc.token_transfer"] > partitions["bsc.raw_log"] > partitions[
+        "bsc.enriched_transaction"
+    ] > partitions["bsc.raw_block"]
+
+
 def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch):
     captured = {}
 
@@ -331,8 +361,9 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
             captured["producer_config"] = producer_config
             captured["logger"] = logger
 
-        def ensure_topics(self, topics):
+        def ensure_topics(self, topics, partitions=None):
             captured.setdefault("ensure_topics", []).append(list(topics))
+            captured.setdefault("ensure_topics_partitions", []).append(partitions)
 
         def ensure_compacted_topics(self, topics):
             captured.setdefault("ensure_compacted_topics", []).append(list(topics))
@@ -381,6 +412,10 @@ def test_bootstrap_kafka_resources_provisions_schema_registry_topic(monkeypatch)
         ["bsc.raw_block"],
         ["dlq.ingestion", "watermark-state"],
     ]
+    # business_topics call gets a per-entity partition target; the system
+    # topics call (dlq/watermark_state) doesn't -- those aren't sized by
+    # chain data volume.
+    assert captured["ensure_topics_partitions"] == [{"bsc.raw_block": 2}, None]
     assert captured["ensure_compacted_topics"] == [["checkpoint-topic", "watermark-state"], ["_schemas"]]
     assert captured["schema_registry_url"] == "http://registry:8081"
     assert captured["registry_started"] is True
@@ -394,8 +429,9 @@ def test_bootstrap_kafka_resources_skips_protected_schema_topic(monkeypatch):
             captured["producer_config"] = producer_config
             captured["logger"] = logger
 
-        def ensure_topics(self, topics):
+        def ensure_topics(self, topics, partitions=None):
             captured.setdefault("ensure_topics", []).append(list(topics))
+            captured.setdefault("ensure_topics_partitions", []).append(partitions)
 
         def ensure_compacted_topics(self, topics):
             topic_list = list(topics)
