@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -566,6 +567,151 @@ def test_kafka_writer_logs_sustained_backpressure():
 
     warnings = [r for r in logger.records if r[1] == "kafka.producer_backpressure"]
     assert warnings
+
+
+def test_kafka_writer_flush_batch_does_not_block_event_loop():
+    """_prepare_message does synchronous Avro/schema-registry serialization.
+    Calling it inline on the event loop stalled every other coroutine --
+    including all 20 "concurrent" RPC-fetch workers -- for the duration of
+    the whole batch. Confirmed live via py-spy: after enabling the "log"
+    entity pushed per-block message counts into the hundreds, ingestion
+    throughput collapsed to near-serial despite an open scheduler window.
+    A slow _prepare_message must not stop another coroutine from making
+    progress concurrently."""
+    import time
+
+    class DummyProducer:
+        def __init__(self):
+            self.produced = []
+
+        def produce(self, **kwargs):
+            self.produced.append(kwargs)
+
+        def poll(self, _timeout):
+            return 0
+
+    writer = _make_writer(DummyProducer())
+
+    def slow_prepare_message(topic, row):
+        time.sleep(0.2)
+        return row["id"], b"{}", 1, 1
+
+    writer._prepare_message = slow_prepare_message
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+    other_task_completed_at = None
+
+    async def other_task(start):
+        nonlocal other_task_completed_at
+        await asyncio.sleep(0.01)
+        other_task_completed_at = asyncio.get_running_loop().time() - start
+
+    async def run():
+        start = asyncio.get_running_loop().time()
+        task = asyncio.create_task(other_task(start))
+        await writer._flush_batch([("topic-a", {"id": "evt-1"}, ctx, None)])
+        await task
+
+    asyncio.run(run())
+
+    assert writer.producer.produced
+    assert other_task_completed_at is not None
+    # The blocking sleep is 0.2s; if the event loop were stalled on it, the
+    # other coroutine's 0.01s sleep couldn't finish until after it. Give a
+    # generous margin (0.1s) so this isn't flaky under CI scheduling jitter.
+    assert other_task_completed_at < 0.1
+
+
+def test_kafka_writer_serialize_executor_is_dedicated_not_shared():
+    """The first attempt at this fix used run_in_executor(None, ...) --
+    asyncio's shared default executor -- which put message serialization on
+    the same thread pool as WatermarkManager's periodic
+    asyncio.to_thread(state_reader.load()) call. Under this pod's 2-core CPU
+    limit the combined thread count exceeded the CFS quota and caused a full
+    production livelock (high CPU, zero forward progress), confirmed live
+    via py-spy. Serialization must use its own small dedicated pool that
+    asyncio.to_thread can never touch."""
+    writer = _make_writer(_DummyProducerNoop())
+
+    assert writer._serialize_executor is not None
+    assert writer._serialize_executor._max_workers <= 4
+
+    default_executor_threads = set()
+
+    async def capture_default_executor_thread():
+        default_executor_threads.add(
+            (await asyncio.get_running_loop().run_in_executor(None, threading.get_ident))
+        )
+
+    serialize_executor_threads = set()
+
+    def capture_serialize_thread(topic, row):
+        serialize_executor_threads.add(threading.get_ident())
+        return row["id"], b"{}", 1, 1
+
+    writer._prepare_message = capture_serialize_thread
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+
+    async def run():
+        await capture_default_executor_thread()
+        await writer._flush_batch([("topic-a", {"id": "evt-1"}, ctx, None)])
+
+    asyncio.run(run())
+
+    assert serialize_executor_threads
+    assert serialize_executor_threads.isdisjoint(default_executor_threads)
+
+
+def test_kafka_writer_serialization_unaffected_by_busy_default_executor():
+    """Reproduces the actual production incident: a slow asyncio.to_thread()
+    call (WatermarkManager's periodic state_reader.load(), reloading a
+    13,000+ record cursor_state topic) occupying the shared default executor
+    must not delay Kafka message serialization. That's exactly what happened
+    when the first fix attempt used run_in_executor(None, ...) and shared
+    the pool with that call: under the pod's 2-core CPU limit, both users'
+    combined thread count exceeded the CFS quota and the whole pipeline
+    livelocked."""
+    import time
+
+    writer = _make_writer(_DummyProducerNoop())
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+
+    def slow_default_executor_job():
+        time.sleep(0.3)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        # Saturate the *default* executor the same way asyncio.to_thread does.
+        # run_in_executor submits to the pool immediately (it returns a
+        # Future, already running), so no create_task is needed here.
+        busy_future = loop.run_in_executor(None, slow_default_executor_job)
+        await asyncio.sleep(0.05)  # let the busy job actually start
+
+        start = loop.time()
+        await writer._flush_batch([("topic-a", {"id": "evt-1"}, ctx, None)])
+        elapsed = loop.time() - start
+
+        await busy_future
+        return elapsed
+
+    elapsed = asyncio.run(run())
+    assert elapsed < 0.2
+
+
+class _DummyProducerNoop:
+    def produce(self, **kwargs):
+        pass
+
+    def poll(self, _timeout):
+        return 0
 
 
 def test_kafka_writer_isolates_oversized_message_from_sink_worker():
