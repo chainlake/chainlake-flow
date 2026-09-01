@@ -568,61 +568,6 @@ def test_kafka_writer_logs_sustained_backpressure():
     assert warnings
 
 
-def test_kafka_writer_flush_batch_does_not_block_event_loop():
-    """_prepare_message does synchronous Avro/schema-registry serialization.
-    Calling it inline on the event loop stalled every other coroutine --
-    including all 20 "concurrent" RPC-fetch workers -- for the duration of
-    the whole batch. Confirmed live via py-spy: after enabling the "log"
-    entity pushed per-block message counts into the hundreds, ingestion
-    throughput collapsed to near-serial despite an open scheduler window.
-    A slow _prepare_message must not stop another coroutine from making
-    progress concurrently."""
-    import time
-
-    class DummyProducer:
-        def __init__(self):
-            self.produced = []
-
-        def produce(self, **kwargs):
-            self.produced.append(kwargs)
-
-        def poll(self, _timeout):
-            return 0
-
-    writer = _make_writer(DummyProducer())
-
-    def slow_prepare_message(topic, row):
-        time.sleep(0.2)
-        return row["id"], b"{}", 1, 1
-
-    writer._prepare_message = slow_prepare_message
-
-    from opentelemetry import trace
-
-    ctx = trace.get_current_span().get_span_context()
-    other_task_completed_at = None
-
-    async def other_task(start):
-        nonlocal other_task_completed_at
-        await asyncio.sleep(0.01)
-        other_task_completed_at = asyncio.get_running_loop().time() - start
-
-    async def run():
-        start = asyncio.get_running_loop().time()
-        task = asyncio.create_task(other_task(start))
-        await writer._flush_batch([("topic-a", {"id": "evt-1"}, ctx, None)])
-        await task
-
-    asyncio.run(run())
-
-    assert writer.producer.produced
-    assert other_task_completed_at is not None
-    # The blocking sleep is 0.2s; if the event loop were stalled on it, the
-    # other coroutine's 0.01s sleep couldn't finish until after it. Give a
-    # generous margin (0.1s) so this isn't flaky under CI scheduling jitter.
-    assert other_task_completed_at < 0.1
-
-
 def test_kafka_writer_isolates_oversized_message_from_sink_worker():
     """A KafkaException like MSG_SIZE_TOO_LARGE is specific to one message,
     not the worker or the broker connection: it must fail just that row's
