@@ -156,7 +156,13 @@ def test_run_pipeline_passes_sink_timeout_config_to_engine(monkeypatch):
         async def shutdown(self):
             return None
 
-    monkeypatch.setattr(main_mod, "build_observability", lambda *_a, **_k: DummyObservability())
+    observability_kwargs = {}
+
+    def fake_build_observability(*args, **kwargs):
+        observability_kwargs.update(kwargs)
+        return DummyObservability()
+
+    monkeypatch.setattr(main_mod, "build_observability", fake_build_observability)
 
     class DummyTracker:
         async def start(self):
@@ -211,6 +217,7 @@ def test_run_pipeline_passes_sink_timeout_config_to_engine(monkeypatch):
 
     assert captured["sink_failure_timeout_sec"] == 30.0
     assert captured["sink_cooldown_sec"] == 20.0
+    assert observability_kwargs["resource_attributes"] == {"entities": "trace"}
 
 
 def test_configure_local_proxy_bypass_adds_exact_runtime_hosts(monkeypatch):

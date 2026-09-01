@@ -4,8 +4,18 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from rpcstream.runtime.observability.context import ObservabilityContext
 
 
-def build_observability(config, service_name: str) -> ObservabilityContext:
-    resource = Resource.create({"service.name": service_name})
+def build_observability(config, service_name: str, resource_attributes: dict | None = None) -> ObservabilityContext:
+    # Every entity-sharded process (rpcstream-core/log/token-transfer and
+    # their matching rpcstream-dlq-retry-* workers) shares the same
+    # service_name (runtime.pipeline.name is derived from chain/network/
+    # mode/from, none of which differ across shards), so exported_job alone
+    # can no longer tell shards apart on a dashboard -- only the random
+    # per-restart exported_instance UUID could, which isn't a usable label
+    # to group or filter by. Callers pass resource_attributes (e.g.
+    # {"entities": "block,transaction"}) to add a stable, human-readable
+    # attribute that survives restarts, exported by the OTel Prometheus
+    # pipeline as its own label alongside exported_job/exported_instance.
+    resource = Resource.create({"service.name": service_name, **(resource_attributes or {})})
 
     tracer_provider = None
     meter_provider = None

@@ -68,7 +68,11 @@ def build_runtime_stack(
         "schema_registry_type",
         "protobuf" if getattr(runtime.kafka, "protobuf_enabled", False) else None,
     )
-    observability = build_observability(runtime.observability.config, runtime.pipeline.name)
+    observability = build_observability(
+        runtime.observability.config,
+        runtime.pipeline.name,
+        resource_attributes={"entities": ",".join(sorted(runtime.entities))},
+    )
     logger = JsonLogger(
         level=config.logLevel,
         logger_provider=observability.get_logger_provider(),

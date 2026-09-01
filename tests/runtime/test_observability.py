@@ -122,6 +122,31 @@ def test_build_observability_requires_endpoint_when_enabled():
         build_observability(config.observability, "test-service")
 
 
+def test_build_observability_merges_resource_attributes():
+    """Every entity-sharded process (rpcstream-core/log/token-transfer and
+    their retry counterparts) shares the same service_name
+    (runtime.pipeline.name doesn't vary by entities), so exported_job alone
+    can no longer distinguish shards on a dashboard -- only the random
+    per-restart exported_instance UUID could. resource_attributes lets
+    callers (main.py/app_runtime.py) tag each process with a stable,
+    human-readable attribute (its entities:) that shows up as its own
+    Prometheus label."""
+    config_path = Path(__file__).resolve().parents[2] / "pipeline.yaml"
+    config = load_pipeline_config(str(config_path))
+    config.observability.tracing.enabled = True
+    config.observability.tracing.endpoint = "http://localhost:4317"
+
+    context = build_observability(
+        config.observability,
+        "test-service",
+        resource_attributes={"entities": "block,transaction"},
+    )
+
+    resource = context._tracer_provider.resource
+    assert resource.attributes["service.name"] == "test-service"
+    assert resource.attributes["entities"] == "block,transaction"
+
+
 def test_build_observability_uses_tracing_sample_rate():
     config_path = Path(__file__).resolve().parents[2] / "pipeline.yaml"
     config = load_pipeline_config(str(config_path))
