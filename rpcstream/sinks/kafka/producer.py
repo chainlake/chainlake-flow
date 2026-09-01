@@ -331,10 +331,22 @@ class KafkaWriter:
                 
             start = time.time()
             self.metrics.BATCH_COUNTER.add(1)
-            
+            loop = asyncio.get_running_loop()
+
             for topic, r, _, delivery_tracker in items:
                 try:
-                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = self._prepare_message(topic, r)
+                    # _prepare_message does Avro/schema-registry serialization,
+                    # which is synchronous and CPU-bound. Calling it inline on
+                    # the event loop blocked every other coroutine (all 20
+                    # "concurrent" RPC-fetch workers included) for the
+                    # duration of the whole batch -- confirmed live via py-spy
+                    # after enabling the "log" entity pushed per-block message
+                    # counts into the hundreds. Offloading to the default
+                    # executor lets the loop interleave other work between
+                    # items instead of stalling on the batch as a unit.
+                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = (
+                        await loop.run_in_executor(None, self._prepare_message, topic, r)
+                    )
                 except Exception as exc:
                     self._fail_delivery_tracker(delivery_tracker, exc)
                     raise
