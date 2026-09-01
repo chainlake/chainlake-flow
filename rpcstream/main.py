@@ -362,6 +362,8 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             max_retry=runtime.client.max_retries,
             concurrency=runtime.engine.concurrency,
                     max_inflight=runtime.engine.max_inflight,
+                    sink_failure_timeout_sec=runtime.engine.sink_failure_timeout_sec,
+                    sink_cooldown_sec=runtime.engine.sink_cooldown_sec,
                     logger=logger,
             observability=observability,
             watermark_manager=watermark_manager,
