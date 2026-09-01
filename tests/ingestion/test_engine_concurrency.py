@@ -227,6 +227,28 @@ def test_engine_metrics_worker_count_with_real_otel_sdk():
     assert by_name["rpcstream_engine_worker_count"] == 7.0
 
 
+def test_engine_metrics_heartbeat_gauges_report_engine_timestamps():
+    """Live incident: rpcstream-log's producer()/worker() loops went
+    genuinely idle for 5+ minutes with no crash, no error, and no
+    ingestion_paused log; two py-spy dumps minutes apart were identical and
+    the exact stuck coroutine couldn't be pinpointed. These gauges turn a
+    silent stall into a `time() - heartbeat` staleness value a dashboard
+    can show without needing a debug pod + py-spy to even notice."""
+    engine = _build_engine(concurrency=0, max_inflight=5)
+    engine._producer_heartbeat_ts = 111.0
+    engine._worker_heartbeat_ts = 222.0
+
+    metrics = EngineMetrics()  # meter=None → all NoOp
+    metrics.bind(engine)
+
+    assert hasattr(metrics, "PRODUCER_HEARTBEAT_TS")
+    assert hasattr(metrics, "WORKER_HEARTBEAT_TS")
+    producer_obs = list(metrics._observe_producer_heartbeat_ts(None))
+    worker_obs = list(metrics._observe_worker_heartbeat_ts(None))
+    assert producer_obs[0].value == 111.0
+    assert worker_obs[0].value == 222.0
+
+
 def test_engine_metrics_sink_failure_timeout_gauge_reports_configured_value():
     """sink_delivery_failed only means something in light of the timeout
     it's measured against, and that timeout is tuned per shard (log's

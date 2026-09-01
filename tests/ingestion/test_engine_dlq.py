@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 from rpcstream.client.models import RpcErrorResult, RpcTaskMeta
@@ -770,3 +771,34 @@ def test_engine_shutdown_waits_for_checkpoint_tasks_before_closing_sink():
 
     assert sink.closed is True
     assert sink.close_started.is_set() is True
+
+
+def test_run_stream_updates_producer_and_worker_heartbeats():
+    """Live incident: rpcstream-log's producer()/worker() loops went
+    genuinely idle for 5+ minutes with no crash, no error, and no
+    ingestion_paused log -- two py-spy dumps minutes apart were identical
+    and the exact stuck coroutine couldn't be pinpointed. These timestamps
+    (exported as gauges, see EngineMetrics) turn a silent stall into a
+    `time() - heartbeat` staleness value a dashboard can show without
+    needing a debug pod + py-spy to even notice."""
+    sink = RecordingSink()
+    engine = build_success_engine(sink=sink, eos_enabled=False)
+    assert engine._producer_heartbeat_ts == 0.0
+    assert engine._worker_heartbeat_ts == 0.0
+
+    class OneShotCursorSource:
+        def __init__(self):
+            self.emitted = False
+
+        async def next_cursor(self):
+            if self.emitted:
+                return None
+            self.emitted = True
+            return 100
+
+    before = time.time()
+    asyncio.run(asyncio.wait_for(engine.run_stream(OneShotCursorSource()), timeout=1.0))
+    after = time.time()
+
+    assert before <= engine._producer_heartbeat_ts <= after
+    assert before <= engine._worker_heartbeat_ts <= after

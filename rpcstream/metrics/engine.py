@@ -32,6 +32,8 @@ class EngineMetrics:
             self.WORKER_COUNT = _NoOp()
             self.SINK_FAILURE_TIMEOUT_SEC = _NoOp()
             self.SINK_DELIVERY_WAIT = _NoOp()
+            self.PRODUCER_HEARTBEAT_TS = _NoOp()
+            self.WORKER_HEARTBEAT_TS = _NoOp()
             return
 
         # Throughput
@@ -145,6 +147,29 @@ class EngineMetrics:
             description="Wall-clock time _finalize_checkpoint waited for a cursor's Kafka delivery futures, by outcome.",
         )
 
+        # Live incident: rpcstream-log's producer()/worker() loops went
+        # genuinely idle for 5+ minutes -- no crash, no error, no
+        # ingestion_paused log (which fires for the known sink-cooldown
+        # pause), and two py-spy dumps minutes apart were identical with no
+        # way to pinpoint the stuck coroutine. Unix timestamp of each
+        # loop's last iteration, so a dashboard query of
+        # `time() - this_gauge` turns a silent stall into an immediately
+        # visible, alertable staleness value instead of requiring a debug
+        # pod + py-spy to even notice something's wrong.
+        self.PRODUCER_HEARTBEAT_TS = meter.create_observable_gauge(
+            "rpcstream_engine_producer_heartbeat_timestamp_sec",
+            unit="s",
+            description="Unix timestamp of the last run_stream() producer() loop iteration.",
+            callbacks=[self._observe_producer_heartbeat_ts],
+        )
+
+        self.WORKER_HEARTBEAT_TS = meter.create_observable_gauge(
+            "rpcstream_engine_worker_heartbeat_timestamp_sec",
+            unit="s",
+            description="Unix timestamp of the last run_stream() worker() loop iteration, across all workers.",
+            callbacks=[self._observe_worker_heartbeat_ts],
+        )
+
     def bind(self, engine):
         """Attach the engine instance so WORKER_COUNT can read its live
         _active_worker_count. Optional — the constructor accepts it too."""
@@ -161,3 +186,13 @@ class EngineMetrics:
         if self._engine is None:
             return
         yield Observation(value=float(getattr(self._engine, "sink_failure_timeout_sec", 0)))
+
+    def _observe_producer_heartbeat_ts(self, options):
+        if self._engine is None:
+            return
+        yield Observation(value=float(getattr(self._engine, "_producer_heartbeat_ts", 0.0)))
+
+    def _observe_worker_heartbeat_ts(self, options):
+        if self._engine is None:
+            return
+        yield Observation(value=float(getattr(self._engine, "_worker_heartbeat_ts", 0.0)))

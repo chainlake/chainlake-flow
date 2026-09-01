@@ -68,6 +68,17 @@ class IngestionEngine:
         # Populated when run_stream spawns the workers.
         self._active_worker_count = 0
         self._worker_exit_flags: list[asyncio.Event] = []
+        # Wall-clock time of the last producer()/worker() loop iteration.
+        # Live incident: rpcstream-log's event loop went genuinely idle for
+        # 5+ minutes with no crash, no error, no ingestion_paused log (which
+        # would have fired if this were the known sink-cooldown pause) --
+        # two py-spy dumps minutes apart were identical, and the exact
+        # stuck coroutine couldn't be pinpointed. These timestamps, exported
+        # as gauges (see EngineMetrics), turn "time() - heartbeat" into a
+        # dashboardable staleness signal so a repeat doesn't need a debug
+        # pod + py-spy to even notice, let alone diagnose.
+        self._producer_heartbeat_ts = 0.0
+        self._worker_heartbeat_ts = 0.0
         self.sink_failure_timeout_sec = sink_failure_timeout_sec
         self.sink_cooldown_sec = sink_cooldown_sec
         # When the sink (Kafka) is unavailable, pulling new cursors is paused
@@ -137,6 +148,7 @@ class IngestionEngine:
         async def producer():
             try:
                 while not self._is_shutdown_requested(shutdown_event):
+                    self._producer_heartbeat_ts = time.time()
                     # Backpressure: if the source (circuit breaker tripped) or
                     # the sink (Kafka down) is unhealthy, stop pulling new
                     # cursors so we don't generate a flood of doomed work that
@@ -169,6 +181,7 @@ class IngestionEngine:
             # this worker exits cleanly after its current cursor (no mid-RPC
             # cancellation).
             while not worker_exit_flags[idx].is_set():
+                self._worker_heartbeat_ts = time.time()
                 cursor = await self._queue_get_or_shutdown(queue, shutdown_event)
                 if cursor is None:
                     break
