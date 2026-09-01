@@ -124,13 +124,16 @@ def _dummy_fetcher(scheduler):
     return SimpleNamespace(scheduler=scheduler)
 
 
-def _build_engine(*, concurrency, max_inflight, scheduler=None):
+def _build_engine(*, concurrency, max_inflight, scheduler=None, sink_failure_timeout_sec=None):
     """Build an IngestionEngine that never actually runs.
 
     `run_stream` is the only consumer of `self.fetcher`, so we point it at a
     SimpleNamespace carrying `.scheduler`. Everything else is None; the
     constructor tolerates that.
     """
+    kwargs = {}
+    if sink_failure_timeout_sec is not None:
+        kwargs["sink_failure_timeout_sec"] = sink_failure_timeout_sec
     return IngestionEngine(
         fetcher=_dummy_fetcher(scheduler) if scheduler else SimpleNamespace(),
         processors={},
@@ -148,6 +151,7 @@ def _build_engine(*, concurrency, max_inflight, scheduler=None):
         watermark_manager=None,
         checkpoint_reader=None,
         eos_enabled=False,
+        **kwargs,
     )
 
 
@@ -221,6 +225,50 @@ def test_engine_metrics_worker_count_with_real_otel_sdk():
 
     assert "rpcstream_engine_worker_count" in by_name
     assert by_name["rpcstream_engine_worker_count"] == 7.0
+
+
+def test_engine_metrics_sink_failure_timeout_gauge_reports_configured_value():
+    """sink_delivery_failed only means something in light of the timeout
+    it's measured against, and that timeout is tuned per shard (log's
+    bursty blocks need a longer budget than block/transaction's -- see
+    rpcstream-config-log.yaml). Surface it as a gauge so a dashboard can
+    show it next to the failure rate."""
+    engine = _build_engine(concurrency=0, max_inflight=5, sink_failure_timeout_sec=30.0)
+
+    metrics = EngineMetrics()  # meter=None → all NoOp
+    metrics.bind(engine)
+
+    assert hasattr(metrics, "SINK_FAILURE_TIMEOUT_SEC")
+    obs = list(metrics._observe_sink_failure_timeout_sec(None))
+    assert len(obs) == 1
+    assert obs[0].value == 30.0
+
+
+def test_engine_metrics_sink_failure_timeout_with_real_otel_sdk():
+    """Verify the gauge is registered with the SDK and returns the
+    configured value on scrape."""
+    from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    engine = _build_engine(concurrency=0, max_inflight=5, sink_failure_timeout_sec=20.0)
+
+    reader = InMemoryMetricReader()
+    provider = SDKMeterProvider(metric_readers=[reader])
+    meter = provider.get_meter("rpcstream.engine")
+
+    EngineMetrics(meter=meter, engine=engine)
+    reader.collect()
+    data = reader.get_metrics_data()
+
+    by_name = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m_obj in sm.metrics:
+                dp = next(iter(m_obj.data.data_points), None)
+                if dp is not None and hasattr(dp, "value"):
+                    by_name[m_obj.name] = dp.value
+
+    assert by_name["rpcstream_engine_sink_failure_timeout_sec"] == 20.0
 
 
 def test_set_current_limit_replaces_admission_semaphore():

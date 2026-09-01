@@ -30,6 +30,7 @@ class EngineMetrics:
             self.INGESTION_LAG = _NoOp()
             self.INGESTION_LAG_MS = _NoOp()
             self.WORKER_COUNT = _NoOp()
+            self.SINK_FAILURE_TIMEOUT_SEC = _NoOp()
             return
 
         # Throughput
@@ -114,6 +115,19 @@ class EngineMetrics:
             callbacks=[self._observe_worker_count],
         )
 
+        # Static per-process config surfaced as a gauge so a dashboard can
+        # show "how much slack does this shard have" next to the sink
+        # delivery failure rate -- sink_delivery_failed only means something
+        # in light of the timeout it's measured against, and that timeout is
+        # deliberately tuned per shard (see rpcstream-config-log.yaml: log's
+        # bursty blocks need a longer budget than block/transaction's).
+        self.SINK_FAILURE_TIMEOUT_SEC = meter.create_observable_gauge(
+            "rpcstream_engine_sink_failure_timeout_sec",
+            unit="s",
+            description="Configured engine.sink_failure_timeout_sec for this process.",
+            callbacks=[self._observe_sink_failure_timeout_sec],
+        )
+
     def bind(self, engine):
         """Attach the engine instance so WORKER_COUNT can read its live
         _active_worker_count. Optional — the constructor accepts it too."""
@@ -125,3 +139,8 @@ class EngineMetrics:
         # Report 0 before run_stream() spawns workers and after it ends so
         # the gauge never publishes a stale "active" reading between runs.
         yield Observation(value=float(getattr(self._engine, "_active_worker_count", 0)))
+
+    def _observe_sink_failure_timeout_sec(self, options):
+        if self._engine is None:
+            return
+        yield Observation(value=float(getattr(self._engine, "sink_failure_timeout_sec", 0)))
