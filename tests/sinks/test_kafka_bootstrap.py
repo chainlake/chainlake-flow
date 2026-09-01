@@ -568,6 +568,72 @@ def test_kafka_writer_logs_sustained_backpressure():
     assert warnings
 
 
+def test_kafka_writer_flush_batch_yields_between_items():
+    """_prepare_message's Avro/schema-registry serialization is synchronous
+    and CPU-bound. Looping through a whole batch (up to batch_size, 100)
+    without ever returning to the event loop held it hostage for the
+    batch's total serialization time -- confirmed live via py-spy:
+    rpcstream_engine_inflight never exceeded 1 despite the scheduler's
+    20-worker window being fully open, because no RPC-fetch coroutine ever
+    got a turn to run. Three separate attempts to fix this by moving
+    serialization to a thread pool (shared default executor, then a
+    dedicated one, tried twice under different CPU limits) each caused a
+    production livelock -- something in confluent_kafka's schema registry
+    client does not tolerate being called from a worker thread. The safe
+    fix stays single-threaded: yield after every item so the loop can
+    interleave other coroutines between them, at the cost of some
+    throughput headroom versus true multithreading."""
+    import time
+
+    class DummyProducer:
+        def __init__(self):
+            self.produced = []
+
+        def produce(self, **kwargs):
+            self.produced.append(kwargs)
+
+        def poll(self, _timeout):
+            return 0
+
+    writer = _make_writer(DummyProducer())
+
+    def slow_prepare_message(topic, row):
+        time.sleep(0.05)
+        return row["id"], b"{}", 1, 1
+
+    writer._prepare_message = slow_prepare_message
+
+    from opentelemetry import trace
+
+    ctx = trace.get_current_span().get_span_context()
+    other_task_completed_at = None
+
+    async def other_task(start):
+        nonlocal other_task_completed_at
+        await asyncio.sleep(0.01)
+        other_task_completed_at = asyncio.get_running_loop().time() - start
+
+    async def run():
+        start = asyncio.get_running_loop().time()
+        task = asyncio.create_task(other_task(start))
+        items = [("topic-a", {"id": f"evt-{i}"}, ctx, None) for i in range(5)]
+        await writer._flush_batch(items)
+        await task
+
+    asyncio.run(run())
+
+    assert len(writer.producer.produced) == 5
+    assert other_task_completed_at is not None
+    # 5 items * 0.05s = 0.25s if the batch blocks as one unit (measured
+    # ~0.26s without the yield). asyncio.sleep(0) doesn't guarantee a
+    # competing task wins the very next iteration -- measured ~0.20s with
+    # the yield in place (both under 3.11 and 3.14) -- but it reliably
+    # finishes before the batch's last item, proving real interleaving
+    # rather than only-after-the-whole-batch. Threshold set with margin
+    # below the unfixed value, not at an idealized "immediate" number.
+    assert other_task_completed_at < 0.22
+
+
 def test_kafka_writer_isolates_oversized_message_from_sink_worker():
     """A KafkaException like MSG_SIZE_TOO_LARGE is specific to one message,
     not the worker or the broker connection: it must fail just that row's

@@ -414,6 +414,22 @@ class KafkaWriter:
                         )
                     continue
 
+                # Yield after every item, not just at the end of the whole
+                # batch. _prepare_message's Avro/schema-registry
+                # serialization is synchronous and CPU-bound; looping
+                # through up to batch_size (100) items without ever
+                # returning to the event loop held it hostage for the whole
+                # batch's total serialization time -- confirmed live via
+                # py-spy: rpcstream_engine_inflight never exceeded 1 despite
+                # the scheduler's 20-worker window being fully open, because
+                # no RPC-fetch coroutine ever got a turn to run in between.
+                # This trades some throughput (bounded work still runs
+                # inline, unlike a thread-pool offload) for something that
+                # can't deadlock: no cross-thread calls into confluent_kafka
+                # or the schema registry client, which is what a genuine
+                # executor-based fix hit three times in a row in production.
+                await asyncio.sleep(0)
+
             # trigger delivery callbacks
             self.producer.poll(0)
             latency = (time.time() - start) * 1000
