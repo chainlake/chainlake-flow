@@ -43,6 +43,16 @@ async def run_dlq_retry(
         group_id=group_id,
     )
 
+    # A cursor can have multiple DLQ records (one per entity that failed --
+    # see engine._send_sink_failure_dlq's history) queued back when a single
+    # sink hiccup timed out several entities' deliveries at once. Each record
+    # independently triggers a full cursor reprocess+resink on retry, so
+    # replaying every one of them for an already-succeeded cursor would keep
+    # producing duplicate Kafka messages for as long as the backlog takes to
+    # drain. Once a cursor has succeeded in this process, later records for
+    # the same cursor are resolved without reprocessing.
+    resolved_cursors: set[int] = set()
+
     try:
         while True:
             message = await asyncio.to_thread(client.poll, 1.0)
@@ -55,12 +65,24 @@ async def run_dlq_retry(
                 client.commit(message)
                 continue
 
+            cursor = record.get("cursor")
+            if cursor in resolved_cursors:
+                await stack.engine.mark_dlq_resolved(record)
+                stack.logger.info(
+                    "dlq.retry_skipped_already_resolved",
+                    entity=record.get("entity"),
+                    cursor=cursor,
+                )
+                client.commit(message)
+                continue
+
             delay_ms = retry_delay_ms(record)
             if delay_ms > 0:
                 await asyncio.sleep(delay_ms / 1000.0)
 
             success = await stack.engine.retry_dlq_record(record)
             if success:
+                resolved_cursors.add(cursor)
                 await stack.engine.mark_dlq_resolved(record)
                 stack.logger.info(
                     "dlq.retry_succeeded",

@@ -900,10 +900,23 @@ class IngestionEngine:
     async def _send_sink_failure_dlq(self, cursor, delivery_entities, delivery_results):
         """Best-effort: the sink may already be dead (that's exactly why
         we're here), so a failure to write the DLQ record itself must not
-        raise and mask the original failure."""
+        raise and mask the original failure.
+
+        One DLQ record per cursor, never one per failed entity: retry
+        (retry_dlq_record/_run_one) always reprocesses and resinks the
+        *whole* cursor, not just the entity named in the record it was
+        handed. A cursor whose entities all time out together (e.g. every
+        delivery stalling under producer backpressure) used to get one DLQ
+        record per entity, so retrying each of those N records replayed the
+        full cursor N times -- live incident: a 4-entity cursor produced 4
+        duplicate rows in every one of its Kafka topics, including
+        bsc.raw_block. All failed entities/topics are preserved in
+        `context.failures` for the same forensic detail as before.
+        """
         if not delivery_entities:
             return
         timed_out = delivery_results is None
+        failures = []
         for i, (entity, topic) in enumerate(delivery_entities):
             result = None if timed_out else delivery_results[i] if i < len(delivery_results) else None
             if not timed_out and not isinstance(result, Exception):
@@ -913,18 +926,23 @@ class IngestionEngine:
                 if timed_out
                 else result
             )
-            try:
-                await self._send_dlq(
-                    entity=entity,
-                    cursor=cursor,
-                    stage="sink",
-                    error_type=type(error).__name__,
-                    error_message=str(error),
-                    payload=None,
-                    context={"topic": topic},
-                )
-            except Exception:
-                pass
+            failures.append({"entity": entity, "topic": topic, "error_type": type(error).__name__, "error_message": str(error)})
+
+        if not failures:
+            return
+
+        try:
+            await self._send_dlq(
+                entity=",".join(failure["entity"] for failure in failures),
+                cursor=cursor,
+                stage="sink",
+                error_type=failures[0]["error_type"],
+                error_message="; ".join(f"{f['entity']}: {f['error_message']}" for f in failures),
+                payload=None,
+                context={"failures": failures},
+            )
+        except Exception:
+            pass
 
     async def _record_failed_watermark_state(self, cursor, error: str | None = None):
         if self.watermark_manager is None:

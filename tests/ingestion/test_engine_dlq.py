@@ -254,7 +254,45 @@ def test_engine_sends_sink_delivery_failure_to_dlq_with_correct_entity():
     assert record["cursor"] == 123
     assert record["stage"] == "sink"
     assert record["error_type"] == "RuntimeError"
-    assert record["error_message"] == "Message size too large"
+    assert record["error_message"] == "log: Message size too large"
+
+
+def test_engine_sends_one_dlq_record_per_cursor_when_multiple_entities_fail():
+    """Live incident: a cursor whose 4 entities all timed out delivery
+    together (producer backpressure) got 4 separate per-entity DLQ records.
+    retry_dlq_record/_run_one always reprocesses and resinks the *whole*
+    cursor regardless of which entity a DLQ record names, so retrying each
+    of those 4 records replayed the full cursor 4 times -- duplicating
+    every entity's row (including bsc.raw_block, which has nothing to do
+    with the entity that actually failed) up to 4x. Must collapse to
+    exactly one DLQ record per cursor, carrying all failures in context."""
+    sink = RecordingSink()
+    engine = build_success_engine(sink=sink, eos_enabled=False)
+
+    async def run():
+        block_future = asyncio.get_running_loop().create_future()
+        block_future.set_exception(RuntimeError("timed out"))
+        log_future = asyncio.get_running_loop().create_future()
+        log_future.set_exception(RuntimeError("timed out"))
+        await engine._finalize_checkpoint(
+            123,
+            True,
+            [block_future, log_future],
+            expected_watermark=None,
+            delivery_entities=[("block", "bsc.raw_block"), ("log", "bsc.raw_log")],
+        )
+
+    asyncio.run(run())
+
+    assert len(sink.sent) == 1
+    topic, rows, wait_delivery = sink.sent[0]
+    assert topic == "dlq.ingestion"
+    record = rows[0]
+    assert record["cursor"] == 123
+    assert record["stage"] == "sink"
+    failures = record["context"]["failures"]
+    assert [f["entity"] for f in failures] == ["block", "log"]
+    assert [f["topic"] for f in failures] == ["bsc.raw_block", "bsc.raw_log"]
 
 
 def test_engine_sends_trace_dlq_record_when_processor_fails():
