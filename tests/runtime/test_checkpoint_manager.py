@@ -280,6 +280,57 @@ def test_watermark_manager_metrics_snapshot_tracks_cursor_gaps_and_delay():
     assert snapshot["commit_delay"] == 7
 
 
+def test_watermark_manager_mark_failed_increments_cursor_failed_counter():
+    """rpcstream_watermark_gap_count is a point-in-time gauge (current size
+    of the unresolved-cursor set) -- it nets new failures against retries
+    resolving old ones, so it can sit flat while watermark.cursor_failed
+    events are actively firing underneath it. rpcstream_watermark_cursor_
+    failed_total is the missing rate-of-new-failures signal, needed to
+    show this event on a Grafana dashboard at all (previously log-only)."""
+    from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    async def run():
+        sink = MemoryStore()
+        identity = CheckpointIdentity(
+            pipeline="pipe",
+            chain_uid="evm:56",
+            chain_type="evm",
+            network="mainnet",
+            mode="realtime",
+            primary_unit="block",
+            entities=("block",),
+        )
+        reader = InMemoryMetricReader()
+        provider = SDKMeterProvider(metric_readers=[reader])
+        meter = provider.get_meter("rpcstream.watermark")
+
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=identity,
+            initial_cursor=99,
+            flush_on_advance=False,
+            meter=meter,
+        )
+
+        await manager.mark_failed(100, "boom")
+        await manager.mark_failed(101, "boom again")
+
+        reader.collect()
+        data = reader.get_metrics_data()
+        for rm in data.resource_metrics:
+            for sm in rm.scope_metrics:
+                for m_obj in sm.metrics:
+                    if m_obj.name == "rpcstream_watermark_cursor_failed_total":
+                        return sum(dp.value for dp in m_obj.data.data_points)
+        return None
+
+    total = asyncio.run(run())
+    assert total == 2
+
+
 def test_kafka_checkpoint_reader_consumer_config_enables_partition_eof():
     identity = CheckpointIdentity(
         pipeline="pipe",

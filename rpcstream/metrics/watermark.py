@@ -6,6 +6,11 @@ from opentelemetry.metrics import Observation
 _UNSET = object()
 
 
+class _NoOpCounter:
+    def add(self, *args, **kwargs):
+        pass
+
+
 class WatermarkMetrics:
     def __init__(self, meter=None, *, attributes: dict[str, str] | None = None):
         self._attributes = dict(attributes or {})
@@ -13,6 +18,7 @@ class WatermarkMetrics:
         self._gap_count = 0
         self._oldest_gap = None
         self._commit_delay = None
+        self._cursor_failed_counter = _NoOpCounter()
 
         if meter is None:
             return
@@ -38,6 +44,18 @@ class WatermarkMetrics:
             description="Distance from the current commit watermark to chainhead or backfill target.",
         )
 
+        # rpcstream_watermark_gap_count is a point-in-time gauge (current
+        # size of the unresolved-cursor set) -- it nets new failures against
+        # retries resolving old ones, so it can sit flat while failures are
+        # actively happening underneath it. This counter is the missing
+        # "rate of new watermark.cursor_failed events" signal, incremented
+        # once per mark_failed() call regardless of whether the cursor was
+        # already in the failed set.
+        self._cursor_failed_counter = meter.create_counter(
+            "rpcstream_watermark_cursor_failed_total",
+            description="Count of mark_failed() calls (watermark.cursor_failed log events).",
+        )
+
     def update(
         self,
         *,
@@ -54,6 +72,9 @@ class WatermarkMetrics:
             self._oldest_gap = oldest_gap
         if commit_delay is not _UNSET:
             self._commit_delay = commit_delay
+
+    def record_cursor_failed(self) -> None:
+        self._cursor_failed_counter.add(1, self._attributes)
 
     def snapshot(self) -> dict[str, int | None]:
         return {

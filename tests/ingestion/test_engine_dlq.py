@@ -295,6 +295,72 @@ def test_engine_sends_one_dlq_record_per_cursor_when_multiple_entities_fail():
     assert [f["topic"] for f in failures] == ["bsc.raw_block", "bsc.raw_log"]
 
 
+def test_finalize_checkpoint_records_sink_delivery_wait_by_outcome():
+    """Answers "is sink_failure_timeout_sec enough?": a histogram of how
+    long delivery actually took, labeled success vs timeout, so a
+    dashboard can plot p95/p99 next to the SINK_FAILURE_TIMEOUT_SEC gauge
+    (rpcstream_engine_sink_failure_timeout_sec) and see whether the real
+    distribution is closing in on the configured ceiling. Previously this
+    wait time wasn't tracked as a metric at all."""
+    from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+    from rpcstream.runtime.observability.context import ObservabilityContext
+
+    reader = InMemoryMetricReader()
+    provider = SDKMeterProvider(metric_readers=[reader])
+    observability = ObservabilityContext(service_name="test", meter_provider=provider)
+
+    sink = RecordingSink()
+    engine = IngestionEngine(
+        fetcher=DummyFetcher(value=[]),
+        processors={"trace": SuccessfulTraceProcessor()},
+        enricher=EvmEnricher(),
+        sink=sink,
+        topics={"trace": "bsc.raw_trace"},
+        dlq_topic="dlq.ingestion",
+        chain=SimpleNamespace(type="evm", network_label="bsc-mainnet"),
+        pipeline=SimpleNamespace(name="bsc_mainnet_realtime_checkpoint"),
+        max_retry=1,
+        concurrency=1,
+        logger=None,
+        observability=observability,
+        watermark_manager=None,
+        checkpoint_reader=None,
+        eos_enabled=False,
+        sink_failure_timeout_sec=0.05,
+    )
+
+    async def run():
+        succeeding = asyncio.get_running_loop().create_future()
+        succeeding.set_result({"message_count": 1})
+        await engine._finalize_checkpoint(
+            1, True, [succeeding], expected_watermark=None, delivery_entities=[("trace", "bsc.raw_trace")]
+        )
+
+        never_resolves = asyncio.get_running_loop().create_future()
+        await engine._finalize_checkpoint(
+            2, True, [never_resolves], expected_watermark=None, delivery_entities=[("trace", "bsc.raw_trace")]
+        )
+
+    asyncio.run(run())
+
+    reader.collect()
+    data = reader.get_metrics_data()
+    points_by_outcome = {}
+    for rm in data.resource_metrics:
+        for sm in rm.scope_metrics:
+            for m_obj in sm.metrics:
+                if m_obj.name == "rpcstream_engine_sink_delivery_wait_ms":
+                    for dp in m_obj.data.data_points:
+                        points_by_outcome[dp.attributes["outcome"]] = dp
+
+    assert "success" in points_by_outcome
+    assert "timeout" in points_by_outcome
+    # The timed-out wait must reflect the configured timeout (~50ms), not
+    # some unrelated/zero value.
+    assert points_by_outcome["timeout"].sum >= 40
+
+
 def test_engine_sends_trace_dlq_record_when_processor_fails():
     sink = RecordingSink()
     engine = build_engine(sink=sink, eos_enabled=False)

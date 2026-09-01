@@ -794,6 +794,7 @@ class IngestionEngine:
         try:
             delivery_results = []
             if delivery_futures:
+                wait_started = time.perf_counter()
                 try:
                     delivery_results = await asyncio.wait_for(
                         asyncio.gather(*delivery_futures, return_exceptions=True),
@@ -801,6 +802,10 @@ class IngestionEngine:
                     )
                 except asyncio.TimeoutError:
                     delivery_results = None
+                self.metrics.SINK_DELIVERY_WAIT.record(
+                    (time.perf_counter() - wait_started) * 1000,
+                    {"outcome": "timeout" if delivery_results is None else "success"},
+                )
                 sink_failed = delivery_results is None or any(
                     isinstance(r, Exception) for r in (delivery_results or [])
                 )

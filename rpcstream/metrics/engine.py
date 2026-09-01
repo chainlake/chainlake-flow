@@ -31,6 +31,7 @@ class EngineMetrics:
             self.INGESTION_LAG_MS = _NoOp()
             self.WORKER_COUNT = _NoOp()
             self.SINK_FAILURE_TIMEOUT_SEC = _NoOp()
+            self.SINK_DELIVERY_WAIT = _NoOp()
             return
 
         # Throughput
@@ -126,6 +127,22 @@ class EngineMetrics:
             unit="s",
             description="Configured engine.sink_failure_timeout_sec for this process.",
             callbacks=[self._observe_sink_failure_timeout_sec],
+        )
+
+        # How long _finalize_checkpoint's asyncio.wait_for(delivery_futures,
+        # timeout=sink_failure_timeout_sec) actually took, labeled by
+        # outcome=success|timeout. Plotted as p95/p99 next to the
+        # SINK_FAILURE_TIMEOUT_SEC gauge, this answers "is the configured
+        # timeout enough" directly: if p99 is safely under the gauge's
+        # value there's margin, if it's converging on it the timeout is
+        # about to start producing failures (or already is). A timed-out
+        # sample's value is the timeout itself (asyncio.wait_for cancels at
+        # that point), which is exactly the "hit the ceiling" signal you
+        # want on the same chart as the successful-delivery distribution.
+        self.SINK_DELIVERY_WAIT = meter.create_histogram(
+            "rpcstream_engine_sink_delivery_wait_ms",
+            unit="ms",
+            description="Wall-clock time _finalize_checkpoint waited for a cursor's Kafka delivery futures, by outcome.",
         )
 
     def bind(self, engine):

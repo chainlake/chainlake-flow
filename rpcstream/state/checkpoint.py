@@ -698,6 +698,7 @@ class WatermarkManager:
                 return
             self._failed.add(cursor)
             self._refresh_metrics()
+        self.metrics.record_cursor_failed()
         if self.logger:
             self.logger.warn(
                 "watermark.cursor_failed",
