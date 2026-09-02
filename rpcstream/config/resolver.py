@@ -66,6 +66,7 @@ class EngineRuntime:
     max_inflight: int = 1
     sink_failure_timeout_sec: float = 10.0
     sink_cooldown_sec: float = 15.0
+    sink_inflight_cursors: int = 2
 
 @dataclass
 class TrackerRuntime:
@@ -155,6 +156,7 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
         max_inflight=cfg.erpc.inflight.max_inflight,
         sink_failure_timeout_sec=cfg.engine.sink_failure_timeout_sec,
         sink_cooldown_sec=cfg.engine.sink_cooldown_sec,
+        sink_inflight_cursors=cfg.engine.sink_inflight_cursors,
     )
 
     pipeline = PipelineRuntime(

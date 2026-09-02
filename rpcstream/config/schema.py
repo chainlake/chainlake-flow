@@ -257,6 +257,11 @@ class EngineConfig(BaseModel):
     # so we don't generate unbounded failed work. Bounds checkpoint-task growth.
     sink_failure_timeout_sec: float = 10.0
     sink_cooldown_sec: float = 15.0
+    # Max cursors concurrently in the sink pipeline (enqueued but not yet
+    # delivery-confirmed). Bounds sink-queue depth so a slow-but-alive sink is
+    # backpressured at the cursor boundary instead of filling the queue and
+    # timing every queued delivery out at sink_failure_timeout_sec.
+    sink_inflight_cursors: int = 2
 
     @model_validator(mode="after")
     def validate_concurrency(self):
@@ -266,6 +271,8 @@ class EngineConfig(BaseModel):
             raise ValueError("engine.sink_failure_timeout_sec must be > 0")
         if self.sink_cooldown_sec <= 0:
             raise ValueError("engine.sink_cooldown_sec must be > 0")
+        if self.sink_inflight_cursors < 1:
+            raise ValueError("engine.sink_inflight_cursors must be >= 1")
         return self
 
 

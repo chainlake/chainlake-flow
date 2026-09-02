@@ -35,6 +35,7 @@ class IngestionEngine:
         max_inflight: int = 1,
         sink_failure_timeout_sec: float = 10.0,
         sink_cooldown_sec: float = 15.0,
+        sink_inflight_cursors: int = 2,
         logger=None,
         observability: ObservabilityContext | None = None,
         decoder=None,
@@ -81,6 +82,16 @@ class IngestionEngine:
         self._worker_heartbeat_ts = 0.0
         self.sink_failure_timeout_sec = sink_failure_timeout_sec
         self.sink_cooldown_sec = sink_cooldown_sec
+        # Max cursors concurrently inside the sink pipeline (sent to the sink
+        # but not yet delivery-confirmed). This is the real backpressure
+        # boundary between the engine and Kafka: each cursor enqueues its whole
+        # row-set as batches, so unbounded in-flight cursors fill the sink queue
+        # and make every delivery future wait behind a huge backlog -- timing
+        # out at sink_failure_timeout_sec even though the sink is healthy and
+        # draining. Limiting in-flight cursors bounds sink-queue depth, so a
+        # slow sink backpressures at the cursor boundary and a busy-but-alive
+        # sink is never mistaken for a failed one.
+        self.sink_inflight_cursors = max(1, int(sink_inflight_cursors))
         # When the sink (Kafka) is unavailable, pulling new cursors is paused
         # and checkpoint waits are bounded so we don't accumulate unbounded
         # failed work / memory. See _should_pause_ingestion / _finalize_checkpoint.
@@ -125,6 +136,12 @@ class IngestionEngine:
             checkpoint_started = True
 
         queue = asyncio.Queue(maxsize=1 if self.eos_enabled else 1000)
+        # Cap how many cursors may be simultaneously in the sink pipeline
+        # (fully enqueued, delivery not yet confirmed). See __init__ comment.
+        # EOS mode is strict-serial anyway; use the configured limit otherwise.
+        sink_gate = asyncio.Semaphore(
+            1 if self.eos_enabled else self.sink_inflight_cursors
+        )
         # Worker pool sizing:
         #   - eos_enabled: 1 worker, single permit, strict serial.
         #   - concurrency == 0 (adaptive): spawn max_inflight workers, register
@@ -185,32 +202,48 @@ class IngestionEngine:
                 cursor = await self._queue_get_or_shutdown(queue, shutdown_event)
                 if cursor is None:
                     break
+                # Sink backpressure at the cursor boundary: acquire a permit
+                # before touching the sink so at most sink_inflight_cursors
+                # cursors are ever enqueued-but-not-delivery-confirmed. When
+                # Kafka drains slower than the engine fetches, workers block
+                # here, the engine queue fills, and the producer stalls -- the
+                # sink's real capacity throttles the pipeline. Without this,
+                # unbounded in-flight cursors saturate the sink queue and every
+                # queued delivery times out at sink_failure_timeout_sec even
+                # though the sink is healthy (live incident: persistent
+                # engine.sink_delivery_failed storms while the sink drained at
+                # full speed).
+                await sink_gate.acquire()
+                gate_held = True
                 try:
-                    success, delivery_futures, expected_watermark, delivery_entities = await self._run_one(cursor)
-                except Exception as exc:
-                    # A worker must never die from a single cursor's failure
-                    # path. Live incident: when the sink queue was saturated,
-                    # an uncaught enqueue TimeoutError from _send_dlq escaped
-                    # _run_one and killed every worker; with no consumer left,
-                    # the engine cursor queue filled and producer() hung on
-                    # queue.put forever -- a silent deadlock (only the
-                    # watermark refresh loop kept logging). Log it, then let
-                    # _finalize_checkpoint below record the cursor as failed
-                    # (it already guards all of its own sink writes).
-                    success = False
-                    delivery_futures = []
-                    expected_watermark = None
-                    delivery_entities = []
-                    if self.logger:
-                        self.logger.error(
-                            "engine.worker_cursor_error",
-                            cursor=cursor,
-                            error=repr(exc),
-                            error_type=type(exc).__name__,
-                        )
-                if self.watermark_manager is not None:
+                    try:
+                        success, delivery_futures, expected_watermark, delivery_entities = await self._run_one(cursor)
+                    except Exception as exc:
+                        # A worker must never die from a single cursor's failure
+                        # path. Live incident: when the sink queue was saturated,
+                        # an uncaught enqueue TimeoutError from _send_dlq escaped
+                        # _run_one and killed every worker; with no consumer left,
+                        # the engine cursor queue filled and producer() hung on
+                        # queue.put forever -- a silent deadlock (only the
+                        # watermark refresh loop kept logging). Log it, then let
+                        # _finalize_checkpoint below record the cursor as failed
+                        # (it already guards all of its own sink writes).
+                        success = False
+                        delivery_futures = []
+                        expected_watermark = None
+                        delivery_entities = []
+                        if self.logger:
+                            self.logger.error(
+                                "engine.worker_cursor_error",
+                                cursor=cursor,
+                                error=repr(exc),
+                                error_type=type(exc).__name__,
+                            )
+                    # Finalize runs as a task (it waits for delivery) and owns
+                    # the sink permit: it releases the gate when done.
                     task = asyncio.create_task(
-                        self._finalize_checkpoint(
+                        self._finalize_and_release_gate(
+                            sink_gate,
                             cursor,
                             success,
                             delivery_futures,
@@ -220,6 +253,10 @@ class IngestionEngine:
                     )
                     self._checkpoint_tasks.add(task)
                     task.add_done_callback(self._checkpoint_tasks.discard)
+                    gate_held = False
+                finally:
+                    if gate_held:
+                        sink_gate.release()
 
         listener = None
         try:
@@ -840,6 +877,32 @@ class IngestionEngine:
                 pass
 
         return 1.0
+
+    async def _finalize_and_release_gate(
+        self,
+        gate: asyncio.Semaphore,
+        cursor,
+        success,
+        delivery_futures,
+        *,
+        expected_watermark=None,
+        delivery_entities=None,
+    ):
+        """Run _finalize_checkpoint (including its delivery wait) and release
+        the sink in-flight permit afterwards -- the permit must outlive the
+        whole delivery window so the sink gate actually bounds cursors that
+        are still enqueued-but-unconfirmed."""
+        try:
+            if self.watermark_manager is not None:
+                await self._finalize_checkpoint(
+                    cursor,
+                    success,
+                    delivery_futures,
+                    expected_watermark=expected_watermark,
+                    delivery_entities=delivery_entities,
+                )
+        finally:
+            gate.release()
 
     async def _finalize_checkpoint(
         self,
