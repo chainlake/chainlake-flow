@@ -1,5 +1,6 @@
 import json
 import asyncio
+import os
 from contextlib import suppress
 import time
 
@@ -124,6 +125,7 @@ class IngestionEngine:
         self._cursor_phase_timings = {}
         self._cursor_observations = {}
         self._cursor_delivery_summaries = {}
+        self._progress_last_ts = 0.0
 
     async def run_stream(self, cursor_source, shutdown_event: asyncio.Event | None = None):
         sink_started = False
@@ -1342,6 +1344,57 @@ class IngestionEngine:
         return ingestion_timestamp_ms - block_timestamp_ms
         
     
+    # ------------------------------------------------------------------
+    # Argo Workflows progress. When a bounded-backfill pod runs under Argo
+    # v3.3+, the executor injects ARGO_PROGRESS_FILE (shared /var/run/argo)
+    # into the main container and reads its "N/M" content every ~3s, patching
+    # the workflow node's progress (UI bar/% on the node and workflow) about
+    # once a minute. Real-time processes never have ARGO_PROGRESS_FILE set,
+    # so this is a strict no-op for them. Writes are throttled and atomic
+    # (tmp + rename) so the executor never reads a partial line, and any
+    # filesystem error is swallowed -- progress reporting must never break
+    # ingestion. N is derived from the committed contiguous watermark, so it
+    # matches the backfill_start/target gauges Grafana plots and is correct
+    # across checkpoint resumes.
+    # ------------------------------------------------------------------
+    _PROGRESS_WRITE_INTERVAL_S = 5.0
+
+    def _write_argo_progress_file(self, done: int, total: int) -> None:
+        path = os.environ.get("ARGO_PROGRESS_FILE")
+        if not path:
+            return
+        try:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(f"{int(done)}/{int(total)}\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except OSError:
+            return
+
+    def _report_backfill_progress(self) -> None:
+        if not os.environ.get("ARGO_PROGRESS_FILE"):
+            return
+        if self.watermark_manager is None or self.watermark_manager.cursor is None:
+            return
+        try:
+            start = int(getattr(self.pipeline, "start_cursor", None) or 0)
+            target = int(getattr(self.pipeline, "end_cursor", None) or 0)
+        except (TypeError, ValueError):
+            return
+        if target <= start:
+            return
+        committed = int(self.watermark_manager.cursor)
+        if committed < start or committed > target:
+            return
+        total = target - start + 1
+        done = committed - start + 1
+        now = time.monotonic()
+        if done >= total or (now - self._progress_last_ts) >= self._PROGRESS_WRITE_INTERVAL_S:
+            self._progress_last_ts = now
+            self._write_argo_progress_file(done, total)
+
     async def _compute_lag(self, cursor):
         head_cursor = None
         head_lag = None
@@ -1370,6 +1423,7 @@ class IngestionEngine:
                     )
                 elif self.watermark_manager is not None:
                     self.watermark_manager.update_commit_delay(None)
+                self._report_backfill_progress()
             return head_cursor, head_lag, ingestion_lag
 
         tracker = getattr(self.fetcher, "tracker", None)
