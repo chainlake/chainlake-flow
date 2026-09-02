@@ -1351,6 +1351,18 @@ class IngestionEngine:
         if pipeline_mode == "backfill":
             end_cursor = getattr(self.pipeline, "end_cursor", None)
             if end_cursor is not None:
+                # Publish this segment's configured [start, target] bounds as
+                # per-instance gauges so dashboards can plot progress % and
+                # ETA generically (no hardcoded ranges). Idempotent -- values
+                # are static for the run.
+                if self.watermark_manager is not None and getattr(
+                    self.watermark_manager, "set_backfill_range", None
+                ) is not None:
+                    start = getattr(self.pipeline, "start_cursor", None)
+                    self.watermark_manager.set_backfill_range(
+                        start=None if start is None else int(start),
+                        target=int(end_cursor),
+                    )
                 ingestion_lag = max(int(end_cursor) - int(cursor), 0)
                 if self.watermark_manager is not None and self.watermark_manager.cursor is not None:
                     self.watermark_manager.update_commit_delay(

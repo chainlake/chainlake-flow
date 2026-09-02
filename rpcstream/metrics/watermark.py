@@ -18,6 +18,8 @@ class WatermarkMetrics:
         self._gap_count = 0
         self._oldest_gap = None
         self._commit_delay = None
+        self._backfill_start = None
+        self._backfill_target = None
         self._cursor_failed_counter = _NoOpCounter()
 
         if meter is None:
@@ -43,6 +45,24 @@ class WatermarkMetrics:
             callbacks=[self._observe_commit_delay],
             description="Distance from the current commit watermark to chainhead or backfill target.",
         )
+        # Bounded-backfill segment bounds, exported per instance ONLY when the
+        # process is running a bounded backfill (pipeline.from/to numeric).
+        # Real-time processes never call update(start_cursor=..., ...) so no
+        # series is exported for them. They carry the exact same attribute set
+        # as rpcstream_watermark_commit_cursor, so a PromQL expression like
+        # (cursor - start) / (target - start) joins 1:1 per instance without
+        # hardcoding ranges -- dashboards stay correct as segment splits and
+        # the number of parallel instances change.
+        meter.create_observable_gauge(
+            "rpcstream_watermark_backfill_start",
+            callbacks=[self._observe_backfill_start],
+            description="Configured segment start cursor (pipeline.from) for this bounded backfill process.",
+        )
+        meter.create_observable_gauge(
+            "rpcstream_watermark_backfill_target",
+            callbacks=[self._observe_backfill_target],
+            description="Configured segment end cursor (pipeline.to) for this bounded backfill process.",
+        )
 
         # rpcstream_watermark_gap_count is a point-in-time gauge (current
         # size of the unresolved-cursor set) -- it nets new failures against
@@ -63,6 +83,8 @@ class WatermarkMetrics:
         gap_count: int | None = None,
         oldest_gap: int | None | object = _UNSET,
         commit_delay: int | None | object = _UNSET,
+        start_cursor: int | None | object = _UNSET,
+        target_cursor: int | None | object = _UNSET,
     ) -> None:
         if commit_cursor is not _UNSET:
             self._commit_cursor = commit_cursor
@@ -72,6 +94,10 @@ class WatermarkMetrics:
             self._oldest_gap = oldest_gap
         if commit_delay is not _UNSET:
             self._commit_delay = commit_delay
+        if start_cursor is not _UNSET:
+            self._backfill_start = start_cursor
+        if target_cursor is not _UNSET:
+            self._backfill_target = target_cursor
 
     def record_cursor_failed(self) -> None:
         self._cursor_failed_counter.add(1, self._attributes)
@@ -82,6 +108,8 @@ class WatermarkMetrics:
             "gap_count": self._gap_count,
             "oldest_gap": self._oldest_gap,
             "commit_delay": self._commit_delay,
+            "backfill_start": self._backfill_start,
+            "backfill_target": self._backfill_target,
         }
 
     def _observe_commit_cursor(self, _options):
@@ -101,3 +129,13 @@ class WatermarkMetrics:
         if self._commit_delay is None:
             return []
         return [Observation(self._commit_delay, self._attributes)]
+
+    def _observe_backfill_start(self, _options):
+        if self._backfill_start is None:
+            return []
+        return [Observation(self._backfill_start, self._attributes)]
+
+    def _observe_backfill_target(self, _options):
+        if self._backfill_target is None:
+            return []
+        return [Observation(self._backfill_target, self._attributes)]

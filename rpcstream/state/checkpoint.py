@@ -734,6 +734,15 @@ class WatermarkManager:
     def update_commit_delay(self, delay: int | None) -> None:
         self.metrics.update(commit_delay=delay)
 
+    def set_backfill_range(self, start: int | None, target: int | None) -> None:
+        """Publish this bounded backfill's segment bounds (pipeline.from/to)
+        as per-instance gauges. Called by the engine once it knows it is in
+        backfill mode; realtime processes never call this, so no backfill
+        gauge series is exported for them. Values are static for the run --
+        the segment's configured range does not change under checkpoint
+        resume (resuming still belongs to the same segment)."""
+        self.metrics.update(start_cursor=start, target_cursor=target)
+
     def get_metrics_snapshot(self) -> dict[str, int | None]:
         return self.metrics.snapshot()
 
