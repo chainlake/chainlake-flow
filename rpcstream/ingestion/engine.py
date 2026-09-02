@@ -185,7 +185,29 @@ class IngestionEngine:
                 cursor = await self._queue_get_or_shutdown(queue, shutdown_event)
                 if cursor is None:
                     break
-                success, delivery_futures, expected_watermark, delivery_entities = await self._run_one(cursor)
+                try:
+                    success, delivery_futures, expected_watermark, delivery_entities = await self._run_one(cursor)
+                except Exception as exc:
+                    # A worker must never die from a single cursor's failure
+                    # path. Live incident: when the sink queue was saturated,
+                    # an uncaught enqueue TimeoutError from _send_dlq escaped
+                    # _run_one and killed every worker; with no consumer left,
+                    # the engine cursor queue filled and producer() hung on
+                    # queue.put forever -- a silent deadlock (only the
+                    # watermark refresh loop kept logging). Log it, then let
+                    # _finalize_checkpoint below record the cursor as failed
+                    # (it already guards all of its own sink writes).
+                    success = False
+                    delivery_futures = []
+                    expected_watermark = None
+                    delivery_entities = []
+                    if self.logger:
+                        self.logger.error(
+                            "engine.worker_cursor_error",
+                            cursor=cursor,
+                            error=repr(exc),
+                            error_type=type(exc).__name__,
+                        )
                 if self.watermark_manager is not None:
                     task = asyncio.create_task(
                         self._finalize_checkpoint(
@@ -1077,14 +1099,29 @@ class IngestionEngine:
             )
 
         if self.eos_enabled:
-            delivery_future = await self.sink.send_transaction([(topic, [record])])
+            try:
+                delivery_future = await self.sink.send_transaction([(topic, [record])])
+            except Exception:
+                # Sink down / queue saturated: best-effort only, same rationale
+                # as the non-EOS branch below.
+                return
             if delivery_future is not None:
                 try:
                     await asyncio.wait_for(delivery_future, timeout=self.sink_failure_timeout_sec)
                 except (asyncio.TimeoutError, Exception):
                     pass
         else:
-            delivery_future = await self.sink.send(topic, [record])
+            try:
+                delivery_future = await self.sink.send(topic, [record])
+            except Exception:
+                # Best-effort: DLQ is already a fallback path. send() itself can
+                # raise (queue-full enqueue timeout, dead worker) just like the
+                # wait_for below it, so it must land in the same catch or the
+                # exception escapes _run_one and silently kills the worker task
+                # -- live incident: with the sink queue saturated, every worker
+                # died on this path and the engine deadlocked (cursor queue
+                # full, producer blocked on queue.put forever).
+                return
             if delivery_future is not None:
                 # Best-effort: DLQ is already a fallback path; cap the wait so
                 # a stuck delivery future (sink worker crash after enqueue) can't
