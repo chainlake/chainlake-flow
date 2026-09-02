@@ -9,7 +9,9 @@ def parse_receipts(receipts: list):
     receipt_rows = []
     log_rows = []
 
-    for r in receipts:
+    # eth_getBlockReceipts returns null (not []) for blocks without
+    # transactions on some upstreams; never iterate None.
+    for r in (receipts or []):
         block_number = hex_to_dec(r["blockNumber"])
         block_hash = r["blockHash"]
 

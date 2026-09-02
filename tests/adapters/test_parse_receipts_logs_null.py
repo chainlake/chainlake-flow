@@ -29,3 +29,11 @@ def test_parse_receipts_missing_logs_key():
     receipt_rows, log_rows = parse_receipts([receipt])
     assert len(receipt_rows) == 1
     assert log_rows == []
+
+
+def test_parse_receipts_null_block_receipts():
+    """eth_getBlockReceipts can return null (not []) for blocks without
+    transactions; parse_receipts must yield an empty result, not crash."""
+    receipt_rows, log_rows = parse_receipts(None)
+    assert receipt_rows == []
+    assert log_rows == []
