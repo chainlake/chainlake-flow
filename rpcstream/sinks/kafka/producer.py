@@ -233,10 +233,27 @@ class KafkaWriter:
             if self._worker_task is not None and self._worker_task.done():
                 raise RuntimeError("kafka sink worker is no longer running")
 
-            await asyncio.wait_for(
-                self.queue.put((topic, rows, linked_span_context, delivery_tracker)),
-                timeout=self.enqueue_timeout_sec,
-            ) # batch enqueue, Apply backpressure to engine
+            # Batch enqueue with real backpressure. The sink queue is the
+            # coupling point between the engine's fetch rate and the single
+            # sink worker's produce rate: when the worker is slower than the
+            # producers, the queue fills and senders must WAIT for a free slot,
+            # not time out and fail. Live incident: a 13h-backlog catch-up made
+            # the engine fetch far faster than the sink could drain; the old
+            # hard enqueue timeout then marked every queued cursor failed,
+            # which amplified into DLQ/state-write storms against the same
+            # saturated queue. Loop the put until it lands; only a genuinely
+            # dead sink worker (checked above each round) is a hard error.
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        self.queue.put((topic, rows, linked_span_context, delivery_tracker)),
+                        timeout=self.enqueue_timeout_sec,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    if self._worker_task is not None and self._worker_task.done():
+                        raise RuntimeError("kafka sink worker is no longer running")
+                    continue
             self._queue_depth += 1
             self.metrics.QUEUE_SIZE.add(1)
             span.set_attribute("queue_size_after_enqueue", self._queue_depth)
