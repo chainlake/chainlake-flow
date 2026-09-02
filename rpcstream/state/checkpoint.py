@@ -767,7 +767,16 @@ class WatermarkManager:
             wait_delivery=True,
         )
         if delivery_future is not None:
-            await delivery_future
+            # Bound the wait: a permanently unresolvable future (sink worker
+            # crashed between enqueue and produce, no callback registered)
+            # would otherwise block stop() → run_stream's finally block
+            # indefinitely. 30s matches sink_failure_timeout_sec on the engine
+            # side; the checkpoint write is low-priority compared to not hanging.
+            try:
+                await asyncio.wait_for(delivery_future, timeout=30.0)
+            except (asyncio.TimeoutError, Exception):
+                if self.logger:
+                    self.logger.warn("watermark.checkpoint_flush_timeout", cursor=cursor)
         self.last_delivery_wait_ms = round((time.perf_counter() - started_at) * 1000, 2)
 
     async def _flush_loop(self) -> None:

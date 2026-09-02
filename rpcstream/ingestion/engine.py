@@ -269,10 +269,37 @@ class IngestionEngine:
                 if scheduler is not None:
                     scheduler.remove_window_change_listener(listener)
             if self._checkpoint_tasks:
-                await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
+                # Belt-and-suspenders: individual checkpoint tasks bound their
+                # own waits, but if any delivery future is permanently
+                # unresolvable (sink worker crash after enqueue but before
+                # produce(), no-timeout await), the gather hangs forever.
+                # 120s covers sink_failure_timeout_sec (30s) × several retries
+                # plus the DLQ/state write attempts.
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*self._checkpoint_tasks, return_exceptions=True),
+                        timeout=120.0,
+                    )
+                except asyncio.TimeoutError:
+                    if self.logger:
+                        self.logger.warn(
+                            "engine.checkpoint_gather_timeout",
+                            pending=sum(1 for t in self._checkpoint_tasks if not t.done()),
+                        )
+                    for task in self._checkpoint_tasks:
+                        task.cancel()
+                    with suppress(asyncio.CancelledError, Exception):
+                        await asyncio.gather(*self._checkpoint_tasks, return_exceptions=True)
             if self.watermark_manager is not None and checkpoint_started:
                 status = "completed" if getattr(self.pipeline, "mode", None) == "backfill" else "running"
-                await self.watermark_manager.stop(status=status)
+                try:
+                    await asyncio.wait_for(
+                        self.watermark_manager.stop(status=status),
+                        timeout=60.0,
+                    )
+                except asyncio.TimeoutError:
+                    if self.logger:
+                        self.logger.warn("engine.watermark_stop_timeout")
             if sink_started:
                 await self.sink.close()
 
@@ -888,7 +915,9 @@ class IngestionEngine:
                     wait_delivery=True,
                 )
                 if checkpoint_future is not None:
-                    checkpoint_result = await checkpoint_future
+                    checkpoint_result = await asyncio.wait_for(
+                        checkpoint_future, timeout=self.sink_failure_timeout_sec
+                    )
                     if isinstance(checkpoint_result, dict):
                         self._last_cursor_observation["checkpoint_delivery_summary"] = checkpoint_result
                         self._last_cursor_observation["checkpoint_delivery_wait_ms"] = checkpoint_result.get(
@@ -1050,11 +1079,20 @@ class IngestionEngine:
         if self.eos_enabled:
             delivery_future = await self.sink.send_transaction([(topic, [record])])
             if delivery_future is not None:
-                await delivery_future
+                try:
+                    await asyncio.wait_for(delivery_future, timeout=self.sink_failure_timeout_sec)
+                except (asyncio.TimeoutError, Exception):
+                    pass
         else:
             delivery_future = await self.sink.send(topic, [record])
             if delivery_future is not None:
-                await delivery_future
+                # Best-effort: DLQ is already a fallback path; cap the wait so
+                # a stuck delivery future (sink worker crash after enqueue) can't
+                # block _finalize_checkpoint or _run_one indefinitely.
+                try:
+                    await asyncio.wait_for(delivery_future, timeout=self.sink_failure_timeout_sec)
+                except (asyncio.TimeoutError, Exception):
+                    pass
 
         if self.logger:
             self.logger.warn(
