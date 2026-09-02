@@ -3,6 +3,7 @@
 > 状态：草案，待评审
 > 范围：消除多 shard 对同一区块的重复上游 RPC；为 `block/transaction/log/token_transfer`
 > 建立“一次规范拉取 → Kafka 原始数据 → 各下游消费派生”的形态
+> 决策 v2：推荐 **Kafka(raw) + Flink(derived)** 派生链路（见 §8），**不引入 Fluss**
 > 关联：`apps/rpcstream` 与 `apps/rpcstream-backfill`（chainlake-infra）
 
 ---
@@ -168,6 +169,86 @@ bsc.raw_receipt / bsc.raw_log`；`token_transfer` 重建后可写
 5. **schema 演进**：raw 信封用 JSON/avro byte 包裹（演进成本最低）还是严格 schema。
 6. **与 erpc 层短期优化的取舍**：若 erpc 支持按 `method+params` 的结果缓存，可先通过缓存
    消除同一 receipts 的重复请求作为 M0 前的最小改动；本方案是缓存不可行/不够时的结构化解法。
+
+---
+
+## 8. 推荐实现链路：Kafka(raw) → Flink → derived → ClickHouse（不引入 Fluss）
+
+在 §2 的分层基础上，派生层采用 **Flink**，raw 层继续用 Kafka（现有 redpanda），
+不引入 Fluss：
+
+```
+rpc fetcher (python, canonical, 每块 2 请求)
+   │  写信封或规范化行到 raw topic
+   ▼
+Kafka raw (redpanda, 现有)         ← 保留现有 watermark/DLQ/producer 语义
+   │
+   ▼
+Flink (SQL 或 PyFlink UDF；Java 重写为可选项)
+   │  解析/轻派生 + 乱序收敛（§8.2）
+   ▼
+derived Kafka topic（如 bsc.enriched_transaction / bsc.raw_token_transfer / …）
+   │
+   ├─(推荐) ClickHouse Kafka Engine 表直接消费，或
+   └─ Flink sink 写 ClickHouse
+```
+
+### 8.1 为什么不用 Fluss（本阶段）
+
+- 集群已有 redpanda(Kafka)、Flink、ClickHouse，rpcstream 的 producer/watermark/DLQ 语义
+  都建立在 Kafka 上；Fluss 是新常驻有状态系统，且本轮目标只是“消除重复 RPC +
+  一次拉取多派生”，Kafka 已足够。
+- 单节点 `cln001` 资源已接近满载；Fluss server + 配套 Flink job 会显著增加常住资源。
+- Fluss 生态仍在快速演进，Python 侧写入（官方 client / Kafka 兼容层）成熟度需 POC 验证。
+- Fluss 的价值主要在“同一份数据同时给流派生 + OLAP/湖直接读”的实时湖仓场景；若未来
+  确有此需求，可作为独立 POC（小流量镜像 raw 层验证），不与本次 RPC 收敛绑定。
+
+### 8.2 raw → derived 的解析归属（工作量决策，按推荐序）
+
+| 方案 | raw 内容 | Flink 里做什么 | 评价 |
+|---|---|---|---|
+| **A（推荐起步）** | 规范化行（`raw_block/raw_receipt/raw_log`…） | 只做**轻量 SQL**：filter/project/join/聚合/事件时间 | 简单可靠；但要避免回退到“单 producer 行级扇出”瓶颈（可由多 partition + 多 writer 规避，见 §3 决策） |
+| **B1** | 信封（blockFull+receipts JSON） | **PyFlink UDF** 复用现有 `parse_*`/decoder | 复用 Python parser、改动小；需把 python 解析依赖打包进 Flink job，吞吐受 UDF 性能限制 |
+| **B2（长期可选）** | 信封 | **Flink Java 重写** EVM 解析 | 最正统、性能最好，但需把现有 EVM decoder（topics/data、ERC20/721/1155、tx+receipt 合并）全部翻写为 Java，工作量最大 |
+
+> 建议：A 或 B1 先跑通并量化吞吐；B2 只有在确认长期 Flink 化且吞吐要求时才投入。
+
+### 8.3 乱序到达处理（四层，自下而上可选叠加）
+
+BSC 按 block 单调，同一块信封内天然有序；乱序只会出现在**块级**（重试重放、backfill 与
+realtime 同 key 并存、多分区、producer 重发）。按成本从低到高：
+
+1. **L0 源头保序**：canonical fetch 以 block 号为 partition key 顺序写同一 partition，
+   同一 block 永远只写一次（生产者幂等/去重）；raw 层几乎不乱序。
+2. **L1 事件时间容忍**：Flink 以 block 时间戳为事件时间 + watermark，允许小窗口内的
+   迟到/乱序（`allowedLateness` 一小段），主流数据在此即收敛。
+3. **L2 连续水位发射（推荐，决定正确性）**：Flink 内用 block 号 keyed state（RocksDB）
+   + 定时器实现 **gap-buffer**：收到的块先入缓存，只有连续无缺口的一段才发射到 derived；
+   重复块按号幂等丢弃。本质是复用 rpcstream `WatermarkManager` 的“连续水位 + gap”语义。
+   该层让 backfill/重放天然安全。
+4. **L3 迟到超窗兜底**：超出 watermark 允许范围的迟到数据进入侧输出流（对应现有
+   `dlq.ingestion` 思路），由低优先级 job/回填任务补齐到 derived，保证最终一致且不阻塞主链路。
+
+ClickHouse 侧（如用 Kafka Engine 表）是追加语义，建议：
+- Flink 保证“每 block 只发一次、块级有序”；
+- CH 表用 `ReplacingMergeTree`/以 `block_number`（或 `chain+entity+block`）为幂等键兜底
+  重复/迟到覆盖。
+
+### 8.4 与现有 Flink 资产整合
+
+Argo 已有 `flink-operator`/`flink-session-cluster` 以及
+`flink-bsc-realtime-enrichment/metrics` 两个作业。落地前先确认：
+- 现有 enrichment/metrics 作业是否已经消费 `bsc.raw_*` 并写 ClickHouse/derived；
+- 若是，新的 derived（log/token_transfer 等）优先**复用同一 Flink session/作业框架**，
+  只加 SQL 作业，避免再起一套集群。
+
+### 8.5 与本方案其余章节的关系
+
+- raw 消息粒度（信封 vs 行）见 §3；L2 gap-buffer 与该粒度无关，可叠加。
+- 水位/一致性/DLQ 通用语义见 §4，L2 只是把这些语义搬到 Flink 侧。
+- 迁移阶段仍遵循 §5 的 M0–M3；M2 的目标形态按本节的“Kafka(raw)→Flink→derived→CH”落地，
+  而不是 §2 的“Python 派生 consumer”形态（后者作为 Flink 尚未就绪时的过渡可保留）。
+- **erpc 缓存（§7 决策 6）仍是先做的最小改动**，与本节链路不冲突、可并行推进。
 
 ---
 
