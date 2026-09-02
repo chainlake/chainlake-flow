@@ -38,8 +38,10 @@ def parse_receipts(receipts: list):
             )
         )
 
-        # logs flatten
-        for log in r.get("logs", []):
+        # logs flatten -- some receipts (e.g. legacy/early blocks) carry
+        # "logs": null instead of an empty array; treat null as no logs
+        # rather than failing the whole cursor.
+        for log in (r.get("logs") or []):
             log_rows.append(
                 asdict(
                     Log(
