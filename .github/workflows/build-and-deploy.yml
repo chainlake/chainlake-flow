@@ -50,21 +50,20 @@ jobs:
         run: |
           curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/v3.4.3/argocd-linux-amd64
           chmod +x /usr/local/bin/argocd
-          argocd app set rpcstream \
-            --server argocd.chainlake.io \
-            --grpc-web \
-            --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
-            --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
-            --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
+          ARGOCD_COMMON=(
+            --server argocd.chainlake.io
+            --grpc-web
+            --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}"
+            --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
+            --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}"
+          )
+          argocd app set rpcstream "${ARGOCD_COMMON[@]}" \
             --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
+          argocd app sync rpcstream "${ARGOCD_COMMON[@]}" --async
           # rpcstream-dlq-replay (Argo Workflows CronWorkflow, apps/rpcstream-dlq-replay
           # in chainlake-infra) is a separate ArgoCD Application from `rpcstream`, so it
           # needs its own image override -- otherwise it stays pinned to the
           # unpublished `:latest` tag in git and every run ErrImagePulls.
-          argocd app set rpcstream-dlq-replay \
-            --server argocd.chainlake.io \
-            --grpc-web \
-            --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
-            --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
-            --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
+          argocd app set rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" \
             --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
+          argocd app sync rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" --async
