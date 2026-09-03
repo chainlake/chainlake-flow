@@ -42,6 +42,14 @@ class KafkaStreaming(BaseModel):
     # reported as failed. Was hardcoded at 0.1s, which turned sub-second
     # backpressure into failed cursors (-> sink cooldown -> circuit breaker trip).
     enqueue_timeout_ms: int = 2000
+    # Number of asyncio worker coroutines draining the sink queue. Each worker
+    # offloads Avro encoding to a dedicated thread in a shared ThreadPoolExecutor
+    # (n_sink_workers threads total), so up to N cursors encode in parallel while
+    # produce() and poll() stay on the event-loop thread (no callback livelock).
+    # Default 1 = single worker, backward-compatible. Set to 4 for the log shard
+    # where the serial single-worker bottleneck previously capped throughput below
+    # chain rate regardless of upstream concurrency.
+    n_sink_workers: int = 1
 
 
 class KafkaSchemaRegistry(BaseModel):

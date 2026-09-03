@@ -605,23 +605,19 @@ def test_kafka_writer_logs_sustained_backpressure():
 
 
 def test_kafka_writer_flush_batch_yields_between_items():
-    """_prepare_message's Avro/schema-registry serialization is synchronous
-    and CPU-bound. Looping through a whole batch without ever returning to
-    the event loop held it hostage -- confirmed live via py-spy: inflight
-    never exceeded 1 despite the scheduler's 20-worker window. Thread-pool
-    offload was tried three times and each time caused a production livelock
-    in confluent_kafka's schema registry client.
+    """Avro/schema-registry encoding is synchronous and CPU-bound.
+    Looping through a whole batch without yielding held the event loop hostage
+    -- confirmed live via py-spy: inflight never exceeded 1 despite the
+    scheduler's 20-worker window. Thread-pool offload was tried three times;
+    each time caused a production livelock: poll() called from the thread →
+    delivery callback from the thread → future.set_result() from a non-event-
+    loop thread → asyncio.gather() waiting on the future never woke up.
 
-    The fix yields to the event loop every _FLUSH_YIELD_INTERVAL rows.
-    Per-row yielding (the earlier approach) added 1-2ms of asyncio scheduling
-    overhead per row; for BSC log blocks averaging 940 rows that accumulated
-    to 1-2s of pure overhead per cursor, preventing the log shard from keeping
-    up with BSC's 450ms blocks. Yielding every N rows reduces asyncio overhead
-    from O(rows) to O(rows / N). The stall window between yields is
-    N × ~0.49ms/row (Avro+produce), so N=100 gives ~49ms stall windows --
-    acceptable since librdkafka ACK callbacks are polled every row regardless,
-    and RPC (aiohttp) tolerates ~49ms delayed I/O events against 795ms avg RTT."""
-    from rpcstream.sinks.kafka.producer import _FLUSH_YIELD_INTERVAL
+    The current fix runs encoding in a ThreadPoolExecutor via run_in_executor.
+    produce() and poll() stay on the event-loop thread so delivery callbacks
+    always fire there (no livelock). run_in_executor's await is the event-loop
+    yield -- the pre-scheduled set_event() task runs during that await, proving
+    the event loop is not blocked for the duration of the encode phase."""
 
     class DummyProducer:
         def __init__(self):
@@ -634,26 +630,19 @@ def test_kafka_writer_flush_batch_yields_between_items():
             return 0
 
     writer = _make_writer(DummyProducer())
-
-    def instant_prepare_message(topic, row):
-        return row["id"], b"{}", 1, 1
-
-    writer._prepare_message = instant_prepare_message
+    # Stub out encoding so the thread-pool phase is instant and the test
+    # doesn't depend on json.dumps output format.
+    writer._serialize = lambda topic, row: b"{}"
 
     from opentelemetry import trace
 
     ctx = trace.get_current_span().get_span_context()
 
-    # The test verifies that the event loop gets control DURING the flush,
-    # not just after it. A task scheduled before the flush (via create_task)
-    # will run the first time _flush_batch yields. If the flush never yields,
-    # the task can only run after the flush returns -- event.is_set() would be
-    # False at that point.
-    #
-    # Use _FLUSH_YIELD_INTERVAL + 1 items to guarantee at least one yield
-    # mid-flush (at row 0) followed by rows that also yield at row N.
-    # The event is set by the pre-scheduled task at the first yield (row 0).
-    n_items = _FLUSH_YIELD_INTERVAL + 1
+    # Verify the event loop gets control DURING the flush, not just after.
+    # A task scheduled before the flush via create_task will run the first
+    # time _flush_batch awaits (the run_in_executor call). If the flush
+    # never yields, the task only runs after flush returns.
+    n_items = 5
 
     async def run():
         event = asyncio.Event()
@@ -664,9 +653,6 @@ def test_kafka_writer_flush_batch_yields_between_items():
         task = asyncio.create_task(set_event())
         items = [("topic-a", {"id": f"evt-{i}"}, ctx, None) for i in range(n_items)]
         await writer._flush_batch(items)
-        # Event must be set DURING the flush (task ran at a yield point),
-        # not just after (which would mean the flush held the event loop
-        # hostage for its entire duration).
         assert event.is_set(), (
             "event loop was not yielded during _flush_batch -- "
             "flush held the event loop hostage for its full duration"

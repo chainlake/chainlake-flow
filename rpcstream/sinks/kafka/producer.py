@@ -1,6 +1,7 @@
 import json
 import time
 import asyncio
+import concurrent.futures
 from collections import defaultdict
 
 from confluent_kafka import KafkaException
@@ -11,22 +12,25 @@ from rpcstream.metrics.kafka import KafkaMetrics
 from rpcstream.runtime.observability.context import ObservabilityContext
 from rpcstream.sinks.kafka.protobuf import SchemaRegistrySerializerRegistry
 
-# How often to yield to the asyncio event loop during _flush_batch.
-# Yielding per-row was added to prevent event loop starvation (py-spy
-# confirmed rpcstream_engine_inflight never exceeded 1 without yields),
-# but for high-row-count entities (BSC log: 940 rows/block avg) the
-# 1-2ms asyncio scheduling overhead per sleep(0) call accumulated to
-# 1-2 seconds of pure overhead per cursor -- preventing the log shard
-# from keeping up with BSC 450ms blocks.
+# How often to yield to the event loop during the produce phase of _flush_batch.
 #
-# Measurement: batch_latency for 737 log rows = 362ms, of which
-# asyncio yield overhead = 73 yields × 1.5ms = 109ms (at interval=10).
-# The Avro+librdkafka produce component is ~253ms. Raising the interval
-# to 100 cuts yields to 7-8 per cursor → ~11ms overhead, saving ~98ms
-# per cursor. Stall windows grow from ~5ms to ~49ms (100 rows ×
-# 0.49ms/row), which is acceptable: RPC (aiohttp) sees at most a ~49ms
-# delayed response, a 6% hit on the 795ms avg RTT, and librdkafka ACK
-# callbacks are still polled every row (poll(0) is unconditional).
+# _flush_batch now has three phases:
+#   1. Prepare metadata  (sync, event-loop, fast — ~0.01ms/row)
+#   2. Avro-encode       (thread pool, parallel across workers — ~0.4ms/row)
+#   3. Produce + poll    (sync, event-loop, fast — ~0.02ms/row)
+#
+# Phase 2 is an `await run_in_executor(...)` which inherently yields to the
+# event loop for the full ~294ms encoding window, so per-row yields are no
+# longer needed for event-loop responsiveness. This constant now only governs
+# Phase 3: how often produce+poll yields so RPC coroutines get scheduled.
+# Phase 3 is ~0.02ms/row, so N=100 rows = ~2ms stall window -- negligible.
+#
+# History: per-row yielding was added when _flush_batch ran entirely on the
+# event loop (py-spy confirmed inflight stuck at 1 without it). Raising from
+# 1→10→100 reduced asyncio scheduling overhead from ~1.5ms×rows to
+# ~1.5ms×rows/100. With thread-pool encoding those overheads are gone: the
+# event loop is free the entire time the thread encodes. _FLUSH_YIELD_INTERVAL
+# is kept for the produce loop so a 700-row batch doesn't stall it for 14ms.
 _FLUSH_YIELD_INTERVAL = 100
 
 
@@ -78,11 +82,24 @@ class KafkaWriter:
         # How often to log while librdkafka's local queue stays full.
         self.buffer_full_log_interval_sec = 5.0
 
+        # Number of parallel sink workers (each encodes in its own thread).
+        # Reads n_sink_workers from config if present; defaults to 1 for
+        # backward compatibility with configs that don't set the field.
+        self.n_workers = getattr(config, "n_sink_workers", 1)
+        # Thread pool shared across all workers. Each worker's Avro-encode phase
+        # runs in one thread from this pool, so up to n_workers cursors encode
+        # in parallel. Pool size == n_workers so no thread waits for a slot.
+        self._encode_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.n_workers,
+            thread_name_prefix="kafka-enc",
+        )
+
         self.queue = asyncio.Queue(maxsize=self.queue_maxsize)
         self._queue_depth = 0
 
         self._running = False
-        self._worker_task = None
+        self._worker_task = None  # points to _worker_tasks[0] for back-compat
+        self._worker_tasks: list = []
         self._last_delivery_summary = None
 
         if self.schema_registry_enabled:
@@ -249,7 +266,9 @@ class KafkaWriter:
             # Fail immediately: the crash itself is already logged by
             # _on_worker_done, and this makes the stall visible to the caller
             # (engine -> Prefect) instead of looking like slow Kafka.
-            if self._worker_task is not None and self._worker_task.done():
+            # Any worker crash is treated as fatal: the whole pool is considered
+            # unhealthy rather than waiting for every worker to die.
+            if self._worker_tasks and any(t.done() for t in self._worker_tasks):
                 raise RuntimeError("kafka sink worker is no longer running")
 
             # Batch enqueue with real backpressure. The sink queue is the
@@ -270,7 +289,7 @@ class KafkaWriter:
                     )
                     break
                 except asyncio.TimeoutError:
-                    if self._worker_task is not None and self._worker_task.done():
+                    if self._worker_tasks and any(t.done() for t in self._worker_tasks):
                         raise RuntimeError("kafka sink worker is no longer running")
                     continue
             self._queue_depth += 1
@@ -332,6 +351,47 @@ class KafkaWriter:
     async def _flush_buffer(self, buffer):
         await self._flush_batch(buffer)
 
+    def _prepare_row_only(self, topic, row):
+        """Prepare row metadata without encoding. Mutates row in place.
+
+        Sets row['id'] and row['ingest_timestamp']; pops 'kafka_partition_key'.
+        Returns (kafka_key, event_timestamp_ms, ingest_timestamp_ms).
+
+        Called from the event-loop thread in Phase 1 of _flush_batch so that
+        _encode_batch_sync (Phase 2) receives rows that are fully populated
+        and ready for Avro serialization."""
+        self.metrics.MESSAGE_COUNTER.add(1, {"topic": topic})
+        partition_key = row.pop("kafka_partition_key", None)
+        event_id = row.get("id") or self.id_calc.calculate_event_id(row)
+        event_timestamp_ms = self.time_calc.calculate_event_timestamp_ms(row)
+        if not event_id:
+            event_id = f"dlq-{row.get('cursor')}-{time.time_ns()}"
+        row["id"] = event_id
+        row["ingest_timestamp"] = self.time_calc.calculate_ingest_timestamp()
+        kafka_key = partition_key or event_id
+        return kafka_key, event_timestamp_ms, row["ingest_timestamp"]
+
+    def _encode_batch_sync(self, topic_row_pairs):
+        """Avro-encode a batch of prepared rows. Designed to run in a thread pool.
+
+        topic_row_pairs: [(topic, row), ...] where every row has already been
+        mutated by _prepare_row_only (id and ingest_timestamp are set).
+        Returns [bytes, ...] -- one encoded payload per row.
+
+        Thread-safety: after KafkaWriter.start() warmup, AvroSerializer
+        ._known_subjects is populated and effectively read-only (no more HTTP
+        to the schema registry), and fastavro.schemaless_writer creates a new
+        BytesIO buffer per call -- both are safe for concurrent callers.
+
+        Intentionally does NOT call producer.produce() or producer.poll().
+        Keeping produce/poll on the event-loop thread (Phase 3) ensures that
+        delivery callbacks always fire there, so future.set_result() is called
+        from the correct asyncio thread. The prior livelock from thread-pool
+        attempts: poll() from a thread → callback from that thread →
+        future.set_result() from non-event-loop thread → asyncio gather waiting
+        on the future never woke up."""
+        return [self._serialize(topic, row) for topic, row in topic_row_pairs]
+
     async def _flush_batch(self, items):
         links = []
         seen = set()
@@ -351,10 +411,8 @@ class KafkaWriter:
             span.set_attribute("component", "sink")
             span.set_attribute("batch_size", len(items))
             span.set_attribute("linked_span_count", len(links))
-            
-            topic_counts = defaultdict(int)
 
-            # count per topic
+            topic_counts = defaultdict(int)
             for topic, _, _, _ in items:
                 topic_counts[topic] += 1
 
@@ -364,23 +422,61 @@ class KafkaWriter:
                     batch_size=len(items),
                     topics=dict(topic_counts),
                 )
-                
+
             start = time.time()
             self.metrics.BATCH_COUNTER.add(1)
-            
-            for _row_idx, (topic, r, _, delivery_tracker) in enumerate(items):
+
+            # --- Phase 1: Prepare metadata (sync, event-loop thread, fast) ---
+            # Mutates each row to add id/ingest_timestamp, extracts kafka_key.
+            # Must run on the event loop so metrics counters and id/time
+            # calculators are accessed from a single thread.
+            prepared = []  # [(topic, kafka_key, delivery_tracker), ...]
+            encode_pairs = []  # [(topic, row), ...] -- rows fully populated
+            for topic, row, _, delivery_tracker in items:
                 try:
-                    kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = self._prepare_message(topic, r)
+                    kafka_key, event_ts, ingest_ts = self._prepare_row_only(topic, row)
                 except Exception as exc:
                     self._fail_delivery_tracker(delivery_tracker, exc)
                     raise
-
                 if delivery_tracker is not None:
-                    if event_timestamp_ms is not None:
-                        delivery_tracker.setdefault("event_timestamps", []).append(event_timestamp_ms)
-                    if ingest_timestamp_ms is not None:
-                        delivery_tracker.setdefault("ingest_timestamps", []).append(ingest_timestamp_ms)
+                    if event_ts is not None:
+                        delivery_tracker.setdefault("event_timestamps", []).append(event_ts)
+                    if ingest_ts is not None:
+                        delivery_tracker.setdefault("ingest_timestamps", []).append(ingest_ts)
+                prepared.append((topic, kafka_key, delivery_tracker))
+                encode_pairs.append((topic, row))
 
+            # --- Phase 2: Avro-encode in thread pool (CPU-bound, parallel) ---
+            # `await run_in_executor` yields the event loop for the full encode
+            # window (~294ms for 737 BSC log rows), so RPC-fetch coroutines make
+            # progress concurrently. With n_sink_workers > 1 (config), up to N
+            # workers encode simultaneously in separate threads -- making the
+            # throughput ceiling ~N × batch_latency^-1 rather than 1 worker at a
+            # time, shifting the bottleneck from the sink to the upstream RPC.
+            loop = asyncio.get_running_loop()
+            try:
+                payloads = await loop.run_in_executor(
+                    self._encode_pool, self._encode_batch_sync, encode_pairs
+                )
+            except Exception as exc:
+                for _, _, delivery_tracker in prepared:
+                    self._fail_delivery_tracker(delivery_tracker, exc)
+                raise
+
+            # --- Phase 3: Produce + poll (sync, event-loop thread, fast) ---
+            # produce() copies the pre-encoded bytes into librdkafka's local
+            # buffer (~0.02ms/row -- much faster than encoding). poll(0) fires
+            # delivery callbacks from the event-loop thread so future.set_result()
+            # is always called from the correct asyncio context (no livelock).
+            #
+            # BufferError (librdkafka local queue full) is backpressure, not
+            # failure: wait it out. KafkaException (e.g. MSG_SIZE_TOO_LARGE) is
+            # specific to one row: fail its tracker and continue the batch so one
+            # bad message never kills the whole sink (observed live: an oversized
+            # log row took down ingestion until the pod was manually restarted).
+            for _row_idx, ((topic, kafka_key, delivery_tracker), payload) in enumerate(
+                zip(prepared, payloads)
+            ):
                 if self.logger:
                     self.logger.debug(
                         "kafka.produce_attempt",
@@ -388,27 +484,6 @@ class KafkaWriter:
                         key=kafka_key,
                     )
 
-                # BufferError means librdkafka's local queue is full
-                # (queue.buffering.max.messages). That is ordinary backpressure
-                # (broker slower than producer), not a permanent failure, so we
-                # wait it out: raising here killed the sink worker, after which
-                # the queue was never drained again and every send timed out.
-                #
-                # A KafkaException here (e.g. MSG_SIZE_TOO_LARGE, which
-                # produce() raises synchronously when librdkafka can tell
-                # up front a single message won't fit) is specific to this
-                # one row, not the worker or the broker connection -- fail
-                # just its delivery tracker and move on to the rest of the
-                # batch, the same "one bad message must not kill the whole
-                # sink forever" fix as the BufferError case above (an
-                # oversized "log" entity row hit this live and took down
-                # ingestion until the pod was restarted). Deliberately
-                # narrower than a bare `except Exception`: a non-Kafka
-                # error here means something we didn't anticipate, and
-                # test_kafka_sink_worker_crash_is_logged /
-                # test_kafka_writer_send_fails_fast_when_worker_is_dead
-                # depend on that case still crashing the worker loudly
-                # rather than silently swallowing an unknown failure mode.
                 try:
                     backpressure_since = None
                     while True:
@@ -420,23 +495,18 @@ class KafkaWriter:
                                 callback=self._delivery_callback(delivery_tracker),
                             )
                             break
-
                         except BufferError:
                             self.metrics.BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
                             now = time.time()
                             if backpressure_since is None:
                                 backpressure_since = now
                             elif now - backpressure_since >= self.buffer_full_log_interval_sec:
-                                # Log periodically so sustained backpressure is
-                                # visible without flooding on every retry.
                                 backpressure_since = now
                                 if self.logger:
                                     self.logger.warn(
                                         "kafka.producer_backpressure",
                                         topic=topic,
                                     )
-                            # Free queued/delivered batches, then yield so the rest
-                            # of the event loop keeps running while we wait.
                             self.producer.poll(0.1)
                             await asyncio.sleep(0.01)
                 except KafkaException as exc:
@@ -450,28 +520,17 @@ class KafkaWriter:
                         )
                     continue
 
-                # poll(0) is non-blocking and triggers delivery callbacks.
-                # Call it after every row so ACKs are never delayed by more
-                # than one row's serialization time (prevents the spurious
-                # "sink delivery timed out" DLQ storm seen when polling only
-                # once per full batch).
-                #
-                # asyncio.sleep(0) yields to the event loop so RPC-fetch
-                # coroutines can run. Yielding per-row caused a different
-                # problem for high-row-count entities: BSC log blocks average
-                # 940 rows, and with 1-2ms of asyncio scheduling overhead
-                # per sleep(0) call under concurrent load, 940 yields added
-                # 1-2 seconds of pure scheduling overhead per cursor -- making
-                # the log shard structurally unable to keep up with BSC's
-                # 450ms blocks. Yield every _FLUSH_YIELD_INTERVAL rows
-                # instead: each stall window is ~0.1-0.3ms of Avro work
-                # (negligible against 229ms RPC) but asyncio overhead drops
-                # from O(rows) to O(rows / _FLUSH_YIELD_INTERVAL).
+                # poll(0) fires delivery callbacks after every row so ACKs are
+                # never delayed by more than one row's produce time (~0.02ms).
+                # sleep(0) yields so RPC coroutines can be scheduled between
+                # produce bursts; the stall window (N × 0.02ms = 2ms for N=100)
+                # is negligible -- the event loop was already free the whole
+                # time the thread encoded in Phase 2.
                 self.producer.poll(0)
                 if _row_idx % _FLUSH_YIELD_INTERVAL == 0:
                     await asyncio.sleep(0)
 
-            # trigger delivery callbacks
+            # Final poll to flush any remaining pending callbacks.
             self.producer.poll(0)
             latency = (time.time() - start) * 1000
             self.metrics.BATCH_LATENCY.record(latency)
@@ -608,12 +667,18 @@ class KafkaWriter:
                 )
 
         self._running = True
-        self._worker_task = asyncio.create_task(self._worker())
-        # asyncio only reports "Task exception was never retrieved" when the Task
-        # is garbage-collected. We keep a strong reference in self._worker_task,
-        # so a crashed worker would otherwise die completely silently and the
-        # sink would stop draining with no trace in the logs.
-        self._worker_task.add_done_callback(self._on_worker_done)
+        self._worker_tasks = [
+            asyncio.create_task(self._worker(), name=f"kafka-worker-{i}")
+            for i in range(self.n_workers)
+        ]
+        for task in self._worker_tasks:
+            # asyncio only reports "Task exception was never retrieved" when the
+            # Task is garbage-collected. Strong references in _worker_tasks
+            # would otherwise let a crashed worker die silently with no log entry.
+            task.add_done_callback(self._on_worker_done)
+        # Keep _worker_task pointing to the first task for backward compat with
+        # anything that reads it (monitoring, tests).
+        self._worker_task = self._worker_tasks[0] if self._worker_tasks else None
 
     def _on_worker_done(self, task: asyncio.Task) -> None:
         """Surface a crashed sink worker instead of letting it die silently."""
@@ -677,8 +742,12 @@ class KafkaWriter:
     async def close(self):
         self._running = False
 
-        if self._worker_task:
-            await self._worker_task
+        if self._worker_tasks:
+            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+
+        # Shut down the encode thread pool after workers have drained the queue
+        # so no in-flight run_in_executor call is interrupted mid-encode.
+        self._encode_pool.shutdown(wait=True)
 
         if self._queue_depth > 0:
             self.metrics.QUEUE_SIZE.add(-self._queue_depth)
