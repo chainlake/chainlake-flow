@@ -22,7 +22,7 @@ jobs:
       - name: Login to Alibaba Cloud ACR
         uses: docker/login-action@v3
         with:
-          registry: crpi-tzzdgvt2as7ll5cj.cn-shanghai.personal.cr.aliyuncs.com
+          registry: ${{ vars.ACR_REGISTRY }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
@@ -30,7 +30,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: crpi-tzzdgvt2as7ll5cj.cn-shanghai.personal.cr.aliyuncs.com/chainlake/chainlake-rpcstream
+          images: ${{ vars.ACR_REGISTRY }}/chainlake/chainlake-rpcstream
           tags: |
             type=sha,prefix=,format=short
 
@@ -56,7 +56,7 @@ jobs:
             --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
             --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
             --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
-            --kustomize-image "${{ steps.meta.outputs.tags }}"
+            --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
           # rpcstream-dlq-replay (Argo Workflows CronWorkflow, apps/rpcstream-dlq-replay
           # in chainlake-infra) is a separate ArgoCD Application from `rpcstream`, so it
           # needs its own image override -- otherwise it stays pinned to the
@@ -67,4 +67,4 @@ jobs:
             --header "CF-Access-Client-Id: ${{ secrets.CF_ACCESS_CLIENT_ID }}" \
             --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}" \
             --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}" \
-            --kustomize-image "${{ steps.meta.outputs.tags }}"
+            --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
