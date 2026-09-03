@@ -11,6 +11,19 @@ from rpcstream.metrics.kafka import KafkaMetrics
 from rpcstream.runtime.observability.context import ObservabilityContext
 from rpcstream.sinks.kafka.protobuf import SchemaRegistrySerializerRegistry
 
+# How often to yield to the asyncio event loop during _flush_batch.
+# Yielding per-row was added to prevent event loop starvation (py-spy
+# confirmed rpcstream_engine_inflight never exceeded 1 without yields),
+# but for high-row-count entities (BSC log: 940 rows/block avg) the
+# 1-2ms asyncio scheduling overhead per sleep(0) call accumulated to
+# 1-2 seconds of pure overhead per cursor -- preventing the log shard
+# from keeping up with BSC 450ms blocks. Yield every N rows: each
+# stall window stays under ~0.3ms (10 rows × ~0.03ms Avro/row), which
+# is negligible against the 229ms RPC round-trip but reduces asyncio
+# overhead by 10x for dense entities.
+_FLUSH_YIELD_INTERVAL = 10
+
+
 class KafkaWriter:
     def __init__(
         self,
@@ -349,7 +362,7 @@ class KafkaWriter:
             start = time.time()
             self.metrics.BATCH_COUNTER.add(1)
             
-            for topic, r, _, delivery_tracker in items:
+            for _row_idx, (topic, r, _, delivery_tracker) in enumerate(items):
                 try:
                     kafka_key, payload, event_timestamp_ms, ingest_timestamp_ms = self._prepare_message(topic, r)
                 except Exception as exc:
@@ -431,34 +444,26 @@ class KafkaWriter:
                         )
                     continue
 
-                # Poll after every item, not just once at the end of the
-                # whole batch. Delivery callbacks (the thing that resolves
-                # each row's delivery_tracker future) only ever get serviced
-                # inside a poll() call -- with poll() called once per up-to-
-                # batch_size (100) items, callbacks for early items in a
-                # large/slow batch could sit unprocessed long enough that
-                # _finalize_checkpoint's 10s sink_failure_timeout_sec fired
-                # even though the broker had already acked them, producing
-                # a flood of spurious "sink delivery timed out" DLQ entries
-                # under load. poll(0) is non-blocking and safe to call this
-                # often.
+                # poll(0) is non-blocking and triggers delivery callbacks.
+                # Call it after every row so ACKs are never delayed by more
+                # than one row's serialization time (prevents the spurious
+                # "sink delivery timed out" DLQ storm seen when polling only
+                # once per full batch).
                 #
-                # Also yield to the event loop after every item.
-                # _prepare_message's Avro/schema-registry serialization is
-                # synchronous and CPU-bound; looping through the whole batch
-                # without ever returning to the event loop held it hostage
-                # for the batch's total serialization time -- confirmed live
-                # via py-spy: rpcstream_engine_inflight never exceeded 1
-                # despite the scheduler's 20-worker window being fully open,
-                # because no RPC-fetch coroutine ever got a turn to run in
-                # between. This trades some throughput (bounded work still
-                # runs inline, unlike a thread-pool offload) for something
-                # that can't deadlock: no cross-thread calls into
-                # confluent_kafka or the schema registry client, which is
-                # what a genuine executor-based fix hit three times in a row
-                # in production.
+                # asyncio.sleep(0) yields to the event loop so RPC-fetch
+                # coroutines can run. Yielding per-row caused a different
+                # problem for high-row-count entities: BSC log blocks average
+                # 940 rows, and with 1-2ms of asyncio scheduling overhead
+                # per sleep(0) call under concurrent load, 940 yields added
+                # 1-2 seconds of pure scheduling overhead per cursor -- making
+                # the log shard structurally unable to keep up with BSC's
+                # 450ms blocks. Yield every _FLUSH_YIELD_INTERVAL rows
+                # instead: each stall window is ~0.1-0.3ms of Avro work
+                # (negligible against 229ms RPC) but asyncio overhead drops
+                # from O(rows) to O(rows / _FLUSH_YIELD_INTERVAL).
                 self.producer.poll(0)
-                await asyncio.sleep(0)
+                if _row_idx % _FLUSH_YIELD_INTERVAL == 0:
+                    await asyncio.sleep(0)
 
             # trigger delivery callbacks
             self.producer.poll(0)

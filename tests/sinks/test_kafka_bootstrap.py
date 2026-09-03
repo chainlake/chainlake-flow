@@ -606,20 +606,19 @@ def test_kafka_writer_logs_sustained_backpressure():
 
 def test_kafka_writer_flush_batch_yields_between_items():
     """_prepare_message's Avro/schema-registry serialization is synchronous
-    and CPU-bound. Looping through a whole batch (up to batch_size, 100)
-    without ever returning to the event loop held it hostage for the
-    batch's total serialization time -- confirmed live via py-spy:
-    rpcstream_engine_inflight never exceeded 1 despite the scheduler's
-    20-worker window being fully open, because no RPC-fetch coroutine ever
-    got a turn to run. Three separate attempts to fix this by moving
-    serialization to a thread pool (shared default executor, then a
-    dedicated one, tried twice under different CPU limits) each caused a
-    production livelock -- something in confluent_kafka's schema registry
-    client does not tolerate being called from a worker thread. The safe
-    fix stays single-threaded: yield after every item so the loop can
-    interleave other coroutines between them, at the cost of some
-    throughput headroom versus true multithreading."""
-    import time
+    and CPU-bound. Looping through a whole batch without ever returning to
+    the event loop held it hostage -- confirmed live via py-spy: inflight
+    never exceeded 1 despite the scheduler's 20-worker window. Thread-pool
+    offload was tried three times and each time caused a production livelock
+    in confluent_kafka's schema registry client.
+
+    The fix yields to the event loop every _FLUSH_YIELD_INTERVAL rows.
+    Per-row yielding (the earlier approach) added 1-2ms of asyncio scheduling
+    overhead per row; for BSC log blocks averaging 940 rows that accumulated
+    to 1-2s of pure overhead per cursor, preventing the log shard from keeping
+    up with BSC's 450ms blocks. Yielding every N rows keeps event-loop stalls
+    under ~0.3ms per window while reducing asyncio overhead by 10x."""
+    from rpcstream.sinks.kafka.producer import _FLUSH_YIELD_INTERVAL
 
     class DummyProducer:
         def __init__(self):
@@ -633,41 +632,46 @@ def test_kafka_writer_flush_batch_yields_between_items():
 
     writer = _make_writer(DummyProducer())
 
-    def slow_prepare_message(topic, row):
-        time.sleep(0.05)
+    def instant_prepare_message(topic, row):
         return row["id"], b"{}", 1, 1
 
-    writer._prepare_message = slow_prepare_message
+    writer._prepare_message = instant_prepare_message
 
     from opentelemetry import trace
 
     ctx = trace.get_current_span().get_span_context()
-    other_task_completed_at = None
 
-    async def other_task(start):
-        nonlocal other_task_completed_at
-        await asyncio.sleep(0.01)
-        other_task_completed_at = asyncio.get_running_loop().time() - start
+    # The test verifies that the event loop gets control DURING the flush,
+    # not just after it. A task scheduled before the flush (via create_task)
+    # will run the first time _flush_batch yields. If the flush never yields,
+    # the task can only run after the flush returns -- event.is_set() would be
+    # False at that point.
+    #
+    # Use _FLUSH_YIELD_INTERVAL + 1 items to guarantee at least one yield
+    # mid-flush (at row 0) followed by rows that also yield at row N.
+    # The event is set by the pre-scheduled task at the first yield (row 0).
+    n_items = _FLUSH_YIELD_INTERVAL + 1
 
     async def run():
-        start = asyncio.get_running_loop().time()
-        task = asyncio.create_task(other_task(start))
-        items = [("topic-a", {"id": f"evt-{i}"}, ctx, None) for i in range(5)]
+        event = asyncio.Event()
+
+        async def set_event():
+            event.set()
+
+        task = asyncio.create_task(set_event())
+        items = [("topic-a", {"id": f"evt-{i}"}, ctx, None) for i in range(n_items)]
         await writer._flush_batch(items)
+        # Event must be set DURING the flush (task ran at a yield point),
+        # not just after (which would mean the flush held the event loop
+        # hostage for its entire duration).
+        assert event.is_set(), (
+            "event loop was not yielded during _flush_batch -- "
+            "flush held the event loop hostage for its full duration"
+        )
         await task
 
     asyncio.run(run())
-
-    assert len(writer.producer.produced) == 5
-    assert other_task_completed_at is not None
-    # 5 items * 0.05s = 0.25s if the batch blocks as one unit (measured
-    # ~0.26s without the yield). asyncio.sleep(0) doesn't guarantee a
-    # competing task wins the very next iteration -- measured ~0.20s with
-    # the yield in place (both under 3.11 and 3.14) -- but it reliably
-    # finishes before the batch's last item, proving real interleaving
-    # rather than only-after-the-whole-batch. Threshold set with margin
-    # below the unfixed value, not at an idealized "immediate" number.
-    assert other_task_completed_at < 0.22
+    assert len(writer.producer.produced) == n_items
 
 
 def test_kafka_writer_flush_batch_polls_after_every_item():
