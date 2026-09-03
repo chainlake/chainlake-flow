@@ -17,11 +17,17 @@ from rpcstream.sinks.kafka.protobuf import SchemaRegistrySerializerRegistry
 # but for high-row-count entities (BSC log: 940 rows/block avg) the
 # 1-2ms asyncio scheduling overhead per sleep(0) call accumulated to
 # 1-2 seconds of pure overhead per cursor -- preventing the log shard
-# from keeping up with BSC 450ms blocks. Yield every N rows: each
-# stall window stays under ~0.3ms (10 rows × ~0.03ms Avro/row), which
-# is negligible against the 229ms RPC round-trip but reduces asyncio
-# overhead by 10x for dense entities.
-_FLUSH_YIELD_INTERVAL = 10
+# from keeping up with BSC 450ms blocks.
+#
+# Measurement: batch_latency for 737 log rows = 362ms, of which
+# asyncio yield overhead = 73 yields × 1.5ms = 109ms (at interval=10).
+# The Avro+librdkafka produce component is ~253ms. Raising the interval
+# to 100 cuts yields to 7-8 per cursor → ~11ms overhead, saving ~98ms
+# per cursor. Stall windows grow from ~5ms to ~49ms (100 rows ×
+# 0.49ms/row), which is acceptable: RPC (aiohttp) sees at most a ~49ms
+# delayed response, a 6% hit on the 795ms avg RTT, and librdkafka ACK
+# callbacks are still polled every row (poll(0) is unconditional).
+_FLUSH_YIELD_INTERVAL = 100
 
 
 class KafkaWriter:

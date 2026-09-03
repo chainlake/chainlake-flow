@@ -616,8 +616,11 @@ def test_kafka_writer_flush_batch_yields_between_items():
     Per-row yielding (the earlier approach) added 1-2ms of asyncio scheduling
     overhead per row; for BSC log blocks averaging 940 rows that accumulated
     to 1-2s of pure overhead per cursor, preventing the log shard from keeping
-    up with BSC's 450ms blocks. Yielding every N rows keeps event-loop stalls
-    under ~0.3ms per window while reducing asyncio overhead by 10x."""
+    up with BSC's 450ms blocks. Yielding every N rows reduces asyncio overhead
+    from O(rows) to O(rows / N). The stall window between yields is
+    N × ~0.49ms/row (Avro+produce), so N=100 gives ~49ms stall windows --
+    acceptable since librdkafka ACK callbacks are polled every row regardless,
+    and RPC (aiohttp) tolerates ~49ms delayed I/O events against 795ms avg RTT."""
     from rpcstream.sinks.kafka.producer import _FLUSH_YIELD_INTERVAL
 
     class DummyProducer:
