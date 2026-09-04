@@ -645,7 +645,7 @@ class IngestionEngine:
                                         "engine.processed",
                                         cursor=cursor,
                                         entity=entity,
-                                        rpc_latency_ms=latency,
+                                        **({"rpc_latency_ms": latency} if latency else {}),
                                         payload=emitted_rows,
                                         ingestion_lag_ms=ingestion_lag_ms,
                                     )

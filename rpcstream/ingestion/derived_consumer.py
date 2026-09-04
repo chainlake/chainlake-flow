@@ -4,11 +4,19 @@ DerivedEnvelopeFetcher implements both the CursorSource and Fetcher protocols
 so it can be passed as both cursor_source and engine.fetcher to IngestionEngine.
 
 Flow per block:
-  next_cursor() → Kafka poll → cache (block_json, receipts_json) → return block_number
+  next_cursor() → asyncio.to_thread(_poll_and_parse_message) →
+                  cache (block_json, receipts_json) → return block_number
   fetch(cursor) → retrieve cached payload → {"block_envelope": ((b, r), meta)}
   DerivedEnvelopeProcessor.process() → {"block", "transaction", "receipt", "log"}
   EvmDecoder.decode() → adds "token_transfer"
   EvmEnricher.enrich() → receipt fields on transactions, block context on logs
+
+Throughput note: json.loads on 1–3 MB of raw_envelope JSON is CPU-bound Python
+that blocks the event loop for ~100–200 ms/block. Moving poll + json.loads into
+a thread via asyncio.to_thread allows the event loop to run decode/enrich/sink
+tasks for the previous block while the next block is being parsed. For N×
+throughput, use cursor-range sharding: run N derived pods each covering
+1/N of the block range (--from-block / --to-block on ingest-derived).
 """
 from __future__ import annotations
 
@@ -48,6 +56,69 @@ def _build_consumer_config(kafka_config: dict, group_id: str) -> dict:
     return config
 
 
+def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
+    """Poll ONE raw_envelope message and fully JSON-decode it.
+
+    Runs in a thread pool (via asyncio.to_thread) so the heavy json.loads calls
+    on 1–3 MB of block+receipts JSON do not block the asyncio event loop.
+    No asyncio primitives used here — pure synchronous code.
+
+    Return tags:
+      ("none",)                                          — poll timeout
+      ("eof",)                                           — PARTITION_EOF
+      ("kafka_error", err)                               — other Kafka error
+      ("parse_error", offset, exc)                       — outer JSON failed
+      ("missing_fields", block_number, has_b, has_r)    — envelope incomplete
+      ("json_error", block_number, exc)                  — inner JSON failed
+      ("ok", block_number, block_json_dict, receipts_list)
+    """
+    msg = consumer.poll(timeout)
+    if msg is None:
+        return ("none",)
+    if msg.error():
+        err = msg.error()
+        if err.code() == KafkaError._PARTITION_EOF:
+            return ("eof",)
+        return ("kafka_error", err)
+    try:
+        raw = msg.value()
+        if not raw:
+            return ("none",)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        return ("parse_error", msg.offset(), exc)
+
+    block_number = payload.get("block_number")
+    if block_number is None:
+        key = msg.key()
+        if key:
+            try:
+                block_number = int(key.decode("utf-8"))
+            except Exception:
+                pass
+    if block_number is None:
+        return ("none",)
+    block_number = int(block_number)
+
+    block_json_str = payload.get("block_json")
+    receipts_json_str = payload.get("receipts_json")
+    if not block_json_str or receipts_json_str is None:
+        return (
+            "missing_fields",
+            block_number,
+            bool(block_json_str),
+            receipts_json_str is not None,
+        )
+
+    try:
+        block_json = json.loads(block_json_str)
+        receipts_json = json.loads(receipts_json_str)
+    except Exception as exc:
+        return ("json_error", block_number, exc)
+
+    return ("ok", block_number, block_json, receipts_json)
+
+
 class DerivedEnvelopeProcessor:
     """Parses a (block_json, receipts_json) tuple into all EVM entity rows.
 
@@ -77,9 +148,11 @@ class DerivedEnvelopeFetcher:
         engine = IngestionEngine(fetcher=source, ...)
         await engine.run_stream(source, ...)
 
-    next_cursor() is called by the engine producer (serial). fetch() is called
-    by engine workers (potentially concurrent). They share _pending via the
-    asyncio event loop (no true concurrency), so dict access is safe.
+    next_cursor() offloads poll + json.loads to a thread via asyncio.to_thread,
+    freeing the event loop during the JSON decode of large raw_envelope messages.
+    fetch() is called by engine workers (potentially concurrent) and retrieves
+    the already-decoded payload from _pending; dict access is safe because all
+    callers share the same event loop (no true concurrency).
     """
 
     def __init__(
@@ -122,60 +195,70 @@ class DerivedEnvelopeFetcher:
     async def next_cursor(self) -> int | None:
         """Consume the next in-range message; return its block_number as cursor.
 
+        Poll + json.loads run in a thread pool to avoid blocking the event loop
+        during the expensive decode of large raw_envelope payloads.
         Returns None when to_block is reached (bounded/backfill mode ends).
-        Loops until a message in the configured range is available.
         """
         if not self._subscribed:
             self._subscribe()
 
         while True:
-            msg = await asyncio.to_thread(self._consumer.poll, self._poll_timeout_sec)
-            if msg is None:
+            result = await asyncio.to_thread(
+                _poll_and_parse_message, self._consumer, self._poll_timeout_sec
+            )
+            kind = result[0]
+
+            if kind == "none":
                 await asyncio.sleep(0)
                 continue
 
-            if msg.error():
-                err = msg.error()
-                if err.code() == KafkaError._PARTITION_EOF:
-                    if self._to_block is not None:
-                        # Reached end of log in bounded mode; wait for new data
-                        # (producer is ahead) or signal done if fully consumed.
-                        await asyncio.sleep(0.05)
-                    continue
+            if kind == "eof":
+                if self._to_block is not None:
+                    await asyncio.sleep(0.05)
+                continue
+
+            if kind == "kafka_error":
                 if self._logger:
                     self._logger.error(
                         "derived_consumer.kafka_error",
-                        error=str(err),
-                        code=err.code(),
+                        error=str(result[1]),
+                        code=result[1].code(),
                         topic=self._source_topic,
                     )
                 continue
 
-            try:
-                raw = msg.value()
-                if not raw:
-                    continue
-                payload = json.loads(raw.decode("utf-8"))
-            except Exception as exc:
+            if kind == "parse_error":
                 if self._logger:
                     self._logger.warn(
                         "derived_consumer.parse_error",
-                        offset=msg.offset(),
+                        offset=result[1],
+                        error=repr(result[2]),
+                    )
+                continue
+
+            if kind == "missing_fields":
+                _, block_number, has_block, has_receipts = result
+                if self._logger:
+                    self._logger.warn(
+                        "derived_consumer.missing_fields",
+                        block_number=block_number,
+                        has_block=has_block,
+                        has_receipts=has_receipts,
+                    )
+                continue
+
+            if kind == "json_error":
+                _, block_number, exc = result
+                if self._logger:
+                    self._logger.warn(
+                        "derived_consumer.json_error",
+                        block_number=block_number,
                         error=repr(exc),
                     )
                 continue
 
-            block_number = payload.get("block_number")
-            if block_number is None:
-                key = msg.key()
-                if key:
-                    try:
-                        block_number = int(key.decode("utf-8"))
-                    except Exception:
-                        pass
-            if block_number is None:
-                continue
-            block_number = int(block_number)
+            # kind == "ok"
+            _, block_number, block_json, receipts_json = result
 
             if self._from_block is not None and block_number < self._from_block:
                 continue
@@ -185,30 +268,6 @@ class DerivedEnvelopeFetcher:
                 except Exception:
                     pass
                 return None
-
-            block_json_str = payload.get("block_json")
-            receipts_json_str = payload.get("receipts_json")
-            if not block_json_str or receipts_json_str is None:
-                if self._logger:
-                    self._logger.warn(
-                        "derived_consumer.missing_fields",
-                        block_number=block_number,
-                        has_block=bool(block_json_str),
-                        has_receipts=receipts_json_str is not None,
-                    )
-                continue
-
-            try:
-                block_json = json.loads(block_json_str)
-                receipts_json = json.loads(receipts_json_str)
-            except Exception as exc:
-                if self._logger:
-                    self._logger.warn(
-                        "derived_consumer.json_error",
-                        block_number=block_number,
-                        error=repr(exc),
-                    )
-                continue
 
             meta = RpcTaskMeta(
                 task_id=block_number,
