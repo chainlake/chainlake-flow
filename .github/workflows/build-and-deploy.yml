@@ -6,6 +6,12 @@ on:
       - main
   workflow_dispatch: {}
 
+# Only one deploy runs at a time. A new push cancels the in-progress run
+# so we never have two CI jobs racing on the same ArgoCD application.
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -57,19 +63,31 @@ jobs:
             --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
             --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}"
           )
-          # Wait for any in-flight sync to finish before setting the new image
-          # override. Using --operation (not terminate-op) so we don't disrupt
-          # a valid sync that's still converging. selfHeal can re-trigger between
-          # terminate-op and app set, making terminate-op a race; wait is safer.
-          argocd app wait rpcstream "${ARGOCD_COMMON[@]}" --operation --timeout 120 || true
-          argocd app set rpcstream "${ARGOCD_COMMON[@]}" \
-            --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
-          argocd app sync rpcstream "${ARGOCD_COMMON[@]}" --async
-          # rpcstream-dlq-replay (Argo Workflows CronWorkflow, apps/rpcstream-dlq-replay
-          # in chainlake-infra) is a separate ArgoCD Application from `rpcstream`, so it
-          # needs its own image override -- otherwise it stays pinned to the
-          # unpublished `:latest` tag in git and every run ErrImagePulls.
-          argocd app wait rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" --operation --timeout 120 || true
-          argocd app set rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" \
-            --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
-          argocd app sync rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" --async
+
+          # app_set <app>: wait for any running operation to clear, then set
+          # the new image override. Retries up to 5× with increasing backoff
+          # to handle the selfHeal race: selfHeal can start a new sync in the
+          # gap between wait returning and app set running.
+          # No explicit app sync needed — selfHeal=true picks up the new image.
+          app_set() {
+            local app=$1
+            local image_override=$2
+            local delay=5
+            for attempt in 1 2 3 4 5; do
+              argocd app wait "$app" "${ARGOCD_COMMON[@]}" --operation --timeout 120 || true
+              if argocd app set "$app" "${ARGOCD_COMMON[@]}" \
+                  --kustomize-image "$image_override"; then
+                echo "$app: image override set (attempt $attempt)"
+                return 0
+              fi
+              echo "$app: app set failed (attempt $attempt), retrying in ${delay}s..."
+              sleep $delay
+              delay=$((delay * 2))
+            done
+            echo "$app: all attempts failed" >&2
+            return 1
+          }
+
+          IMAGE="chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
+          app_set rpcstream         "$IMAGE"
+          app_set rpcstream-dlq-replay "$IMAGE"
