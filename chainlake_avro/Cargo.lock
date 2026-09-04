@@ -72,6 +72,7 @@ dependencies = [
  "once_cell",
  "pyo3",
  "rayon",
+ "serde_json",
 ]
 
 [[package]]

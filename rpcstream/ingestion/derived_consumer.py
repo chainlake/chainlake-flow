@@ -5,18 +5,20 @@ so it can be passed as both cursor_source and engine.fetcher to IngestionEngine.
 
 Flow per block:
   next_cursor() → asyncio.to_thread(_poll_and_parse_message) →
-                  cache (block_json, receipts_json) → return block_number
-  fetch(cursor) → retrieve cached payload → {"block_envelope": ((b, r), meta)}
+                  cache parsed payload → return block_number
+  fetch(cursor) → retrieve cached payload → {"block_envelope": (payload, meta)}
   DerivedEnvelopeProcessor.process() → {"block", "transaction", "receipt", "log"}
   EvmDecoder.decode() → adds "token_transfer"
   EvmEnricher.enrich() → receipt fields on transactions, block context on logs
 
-Throughput note: json.loads on 1–3 MB of raw_envelope JSON is CPU-bound Python
-that blocks the event loop for ~100–200 ms/block. Moving poll + json.loads into
-a thread via asyncio.to_thread allows the event loop to run decode/enrich/sink
-tasks for the previous block while the next block is being parsed. For N×
-throughput, use cursor-range sharding: run N derived pods each covering
-1/N of the block range (--from-block / --to-block on ingest-derived).
+Parsing path (fast, when chainlake_avro Rust extension is available):
+  _poll_and_parse_message calls chainlake_avro.parse_block_envelope(str, str)
+  which runs serde_json inside py.allow_threads() — GIL released, true parallel
+  execution across all engine worker threads (~1–2 ms/block vs ~300 ms Python).
+
+Fallback path (if Rust extension unavailable):
+  json.loads inside thread + Python parse_blocks/parse_transactions/parse_receipts
+  in DerivedEnvelopeProcessor.process() (original behavior).
 """
 from __future__ import annotations
 
@@ -30,6 +32,13 @@ from rpcstream.client.models import RpcTaskMeta
 from rpcstream.adapters.evm.parser.parse_blocks import parse_blocks
 from rpcstream.adapters.evm.parser.parse_transactions import parse_transactions
 from rpcstream.adapters.evm.parser.parse_receipts_logs import parse_receipts
+
+try:
+    import chainlake_avro as _chainlake_avro
+    _RUST_PARSER = hasattr(_chainlake_avro, "parse_block_envelope")
+except ImportError:
+    _chainlake_avro = None  # type: ignore[assignment]
+    _RUST_PARSER = False
 
 
 # Producer-only librdkafka keys that break the Consumer constructor.
@@ -57,20 +66,25 @@ def _build_consumer_config(kafka_config: dict, group_id: str) -> dict:
 
 
 def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
-    """Poll ONE raw_envelope message and fully JSON-decode it.
+    """Poll ONE raw_envelope message and parse it into entity rows.
 
-    Runs in a thread pool (via asyncio.to_thread) so the heavy json.loads calls
-    on 1–3 MB of block+receipts JSON do not block the asyncio event loop.
-    No asyncio primitives used here — pure synchronous code.
+    Runs in a thread pool (via asyncio.to_thread). No asyncio primitives used.
+
+    When chainlake_avro.parse_block_envelope is available, it is called here:
+    serde_json runs inside Rust's py.allow_threads(), so the GIL is released
+    for the entire JSON parse + field extraction phase. Multiple engine workers
+    can therefore parse blocks in true parallel on separate OS threads.
 
     Return tags:
-      ("none",)                                          — poll timeout
-      ("eof",)                                           — PARTITION_EOF
-      ("kafka_error", err)                               — other Kafka error
-      ("parse_error", offset, exc)                       — outer JSON failed
-      ("missing_fields", block_number, has_b, has_r)    — envelope incomplete
-      ("json_error", block_number, exc)                  — inner JSON failed
-      ("ok", block_number, block_json_dict, receipts_list)
+      ("none",)                                       — poll timeout
+      ("eof",)                                        — PARTITION_EOF
+      ("kafka_error", err)                            — other Kafka error
+      ("parse_error", offset, exc)                    — outer JSON failed
+      ("missing_fields", block_number, has_b, has_r) — envelope incomplete
+      ("json_error", block_number, exc)               — inner parse failed
+      ("ok", block_number, payload)
+          payload is dict {"block","transaction","receipt","log"} (Rust path)
+          or tuple (block_json_dict, receipts_list)   (Python fallback path)
     """
     msg = consumer.poll(timeout)
     if msg is None:
@@ -110,23 +124,36 @@ def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
             receipts_json_str is not None,
         )
 
+    if _RUST_PARSER:
+        try:
+            parsed = _chainlake_avro.parse_block_envelope(block_json_str, receipts_json_str)
+        except Exception as exc:
+            return ("json_error", block_number, exc)
+        return ("ok", block_number, parsed)
+
     try:
         block_json = json.loads(block_json_str)
         receipts_json = json.loads(receipts_json_str)
     except Exception as exc:
         return ("json_error", block_number, exc)
-
-    return ("ok", block_number, block_json, receipts_json)
+    return ("ok", block_number, (block_json, receipts_json))
 
 
 class DerivedEnvelopeProcessor:
-    """Parses a (block_json, receipts_json) tuple into all EVM entity rows.
+    """Parses a raw_envelope payload into all EVM entity rows.
 
-    Returns receipt rows so EvmEnricher can join them onto transactions.
-    Receipt has no topic in the derived topic-map so it stays internal.
+    When the Rust parser is active, `value` arrives pre-parsed as a dict
+    {"block", "transaction", "receipt", "log"} and is returned as-is.
+    In the Python fallback path, `value` is (block_json_dict, receipts_list)
+    and the Python parsers are called here (original behavior).
+
+    Receipt rows are included so EvmEnricher can join them onto transactions;
+    receipt has no Kafka topic in the derived topic-map so it stays internal.
     """
 
-    def process(self, cursor: int, value: tuple) -> dict:
+    def process(self, cursor: int, value) -> dict:
+        if isinstance(value, dict):
+            return value
         block_json, receipts_json = value
         parsed_block = parse_blocks(block_json)
         txs = parse_transactions(block_json)
@@ -173,10 +200,12 @@ class DerivedEnvelopeFetcher:
         self._to_block = to_block
         self._logger = logger
         self._poll_timeout_sec = poll_timeout_sec
-        # block_number → (block_json, receipts_json, RpcTaskMeta)
-        # Bounded by engine.sink_inflight_cursors (≤ 20 entries).
-        self._pending: dict[int, tuple] = {}
         self._subscribed = False
+        # block_number → (payload, RpcTaskMeta)
+        # payload is dict {"block","transaction","receipt","log"} (Rust path)
+        # or tuple (block_json_dict, receipts_list) (Python fallback path).
+        # Bounded by engine.sink_inflight_cursors (≤ max_inflight entries).
+        self._pending: dict[int, tuple] = {}
         # IngestionEngine inspects these via getattr() for lag / circuit-breaker.
         self.scheduler = None
         self.tracker = None
@@ -258,7 +287,7 @@ class DerivedEnvelopeFetcher:
                 continue
 
             # kind == "ok"
-            _, block_number, block_json, receipts_json = result
+            _, block_number, payload = result
 
             if self._from_block is not None and block_number < self._from_block:
                 continue
@@ -280,7 +309,7 @@ class DerivedEnvelopeFetcher:
                     "source": "kafka_envelope",
                 },
             )
-            self._pending[block_number] = (block_json, receipts_json, meta)
+            self._pending[block_number] = (payload, meta)
             return block_number
 
     async def fetch(self, cursor: int) -> dict:
@@ -292,8 +321,8 @@ class DerivedEnvelopeFetcher:
         cursor = int(cursor)
         while cursor not in self._pending:
             await asyncio.sleep(0)
-        block_json, receipts_json, meta = self._pending.pop(cursor)
-        return {"block_envelope": ((block_json, receipts_json), meta)}
+        payload, meta = self._pending.pop(cursor)
+        return {"block_envelope": (payload, meta)}
 
     def close(self) -> None:
         try:
