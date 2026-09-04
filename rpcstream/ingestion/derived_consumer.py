@@ -77,26 +77,44 @@ def _build_consumer_config(kafka_config: dict, group_id: str) -> dict:
     return config
 
 
+def _encode_block_envelope_sync(
+    block_json_str: str, receipts_json_str: str, config: dict
+) -> dict:
+    """Call parse_and_encode_block_envelope from a thread pool worker.
+
+    Called via asyncio.to_thread from DerivedEnvelopeFetcher.fetch() so that
+    each engine worker encodes its own block concurrently. The Rust function
+    releases the GIL inside allow_threads(), so 8 workers encode on 8 OS
+    threads in true parallel — throughput scales with CPU cores.
+    """
+    return _chainlake_avro.parse_and_encode_block_envelope(
+        block_json_str, receipts_json_str, config
+    )
+
+
 def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
-    """Poll ONE raw_envelope message and parse it into entity rows.
+    """Poll ONE raw_envelope message and return its raw JSON strings.
 
     Runs in a thread pool (via asyncio.to_thread). No asyncio primitives used.
 
-    When chainlake_avro.parse_block_envelope is available, it is called here:
-    serde_json runs inside Rust's py.allow_threads(), so the GIL is released
-    for the entire JSON parse + field extraction phase. Multiple engine workers
-    can therefore parse blocks in true parallel on separate OS threads.
+    For the Rust encode path (_RUST_ENCODE), this function is deliberately
+    lightweight — it only polls Kafka and parses the outer envelope JSON.
+    The heavy work (JSON parse + Avro encode) is deferred to fetch() so that
+    each of the 8 engine workers encodes its own block concurrently instead
+    of the single producer coroutine serializing all encodes.
 
     Return tags:
-      ("none",)                                       — poll timeout
-      ("eof",)                                        — PARTITION_EOF
-      ("kafka_error", err)                            — other Kafka error
-      ("parse_error", offset, exc)                    — outer JSON failed
-      ("missing_fields", block_number, has_b, has_r) — envelope incomplete
-      ("json_error", block_number, exc)               — inner parse failed
+      ("none",)                                           — poll timeout
+      ("eof",)                                            — PARTITION_EOF
+      ("kafka_error", err)                                — other Kafka error
+      ("parse_error", offset, exc)                        — outer JSON failed
+      ("missing_fields", block_number, has_b, has_r)     — envelope incomplete
+      ("json_error", block_number, exc)                   — inner parse failed
       ("ok", block_number, payload)
-          payload is dict {"block","transaction","receipt","log"} (Rust path)
-          or tuple (block_json_dict, receipts_list)   (Python fallback path)
+          payload is (block_json_str, receipts_json_str)  — Rust encode path
+                                                            (encode deferred to fetch)
+          payload is dict {"block","transaction",...}      — Rust parse path
+          payload is (block_json_dict, receipts_list)      — Python fallback
     """
     msg = consumer.poll(timeout)
     if msg is None:
@@ -137,13 +155,10 @@ def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
         )
 
     if _RUST_ENCODE and _RUST_ENCODE_CONFIG:
-        try:
-            parsed = _chainlake_avro.parse_and_encode_block_envelope(
-                block_json_str, receipts_json_str, _RUST_ENCODE_CONFIG
-            )
-        except Exception as exc:
-            return ("json_error", block_number, exc)
-        return ("ok", block_number, parsed)
+        # Return raw JSON strings. Encoding is deferred to fetch() so each
+        # engine worker encodes its own block concurrently in a thread pool
+        # (8 workers × GIL-free Rust = true parallel encode on all cores).
+        return ("ok", block_number, (block_json_str, receipts_json_str))
 
     if _RUST_PARSER:
         try:
@@ -222,8 +237,9 @@ class DerivedEnvelopeFetcher:
         self._poll_timeout_sec = poll_timeout_sec
         self._subscribed = False
         # block_number → (payload, RpcTaskMeta)
-        # payload is dict {"block","transaction","receipt","log"} (Rust path)
-        # or tuple (block_json_dict, receipts_list) (Python fallback path).
+        # payload is (block_json_str, receipts_json_str) strings (Rust encode path,
+        # encode deferred to fetch()), dict {"block",...} (Rust parse path), or
+        # tuple (block_json_dict, receipts_list) (Python fallback).
         # Bounded by engine.sink_inflight_cursors (≤ max_inflight entries).
         self._pending: dict[int, tuple] = {}
         # IngestionEngine inspects these via getattr() for lag / circuit-breaker.
@@ -333,7 +349,12 @@ class DerivedEnvelopeFetcher:
             return block_number
 
     async def fetch(self, cursor: int) -> dict:
-        """Return raw data for the engine's processor loop.
+        """Return parsed/encoded data for the engine's processor loop.
+
+        For the Rust encode path, payload is (block_json_str, receipts_json_str)
+        raw strings. Encoding runs here via asyncio.to_thread so that the 8
+        engine workers each encode their own block concurrently — GIL is released
+        inside Rust's allow_threads(), giving true parallelism on all CPU cores.
 
         next_cursor() always populates _pending before the engine worker calls
         fetch(), so the spin-wait exits immediately in the common case.
@@ -342,6 +363,28 @@ class DerivedEnvelopeFetcher:
         while cursor not in self._pending:
             await asyncio.sleep(0)
         payload, meta = self._pending.pop(cursor)
+
+        # Rust encode path: payload is (block_json_str: str, receipts_json_str: str).
+        # Distinguished from Python fallback (block_json_dict, receipts_list) by
+        # the element type — raw strings vs parsed Python objects.
+        if (
+            _RUST_ENCODE
+            and _RUST_ENCODE_CONFIG is not None
+            and isinstance(payload, tuple)
+            and len(payload) == 2
+            and isinstance(payload[0], str)
+        ):
+            config = _RUST_ENCODE_CONFIG  # snapshot before releasing event loop
+            try:
+                encoded = await asyncio.to_thread(
+                    _encode_block_envelope_sync, payload[0], payload[1], config
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"parse_and_encode_block_envelope failed for cursor {cursor}: {exc}"
+                ) from exc
+            return {"block_envelope": (encoded, meta)}
+
         return {"block_envelope": (payload, meta)}
 
     def close(self) -> None:
