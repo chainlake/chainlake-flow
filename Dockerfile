@@ -22,6 +22,18 @@ RUN uv venv /opt/venv
 # install INTO venv explicitly
 RUN uv pip install --python /opt/venv/bin/python .
 
+# ---------- chainlake_avro: Rust PyO3 GIL-free Avro encoder ----------
+# Rust is already available at /root/.cargo/bin (same prefix uv uses above).
+# --profile minimal = rustc + cargo only; saves ~1 GB vs default profile.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+COPY chainlake_avro /app/chainlake_avro
+RUN uv pip install maturin --python /opt/venv/bin/python \
+    && cd /app/chainlake_avro \
+    && /opt/venv/bin/maturin build --release -o /tmp/wheels \
+    && uv pip install /tmp/wheels/chainlake_avro-*.whl --python /opt/venv/bin/python \
+    && rm -rf /tmp/wheels /app/chainlake_avro/target
+
 # ---------------- runtime ----------------
 FROM python:3.11-slim
 
