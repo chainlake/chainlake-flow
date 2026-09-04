@@ -795,13 +795,13 @@ fn extract_row_from_json(row: &Row, fields: &[FieldSpec]) -> Vec<Option<Extracte
 
 /// Pure Rust implementation: parse JSON, extract + enrich all entities, Avro-encode.
 ///
-/// Returns HashMap<entity_name, Vec<(kafka_key_str, avro_bytes)>>.
+/// Returns (HashMap<entity_name, Vec<(kafka_key_str, avro_bytes)>>, block_ts_ms, ingest_ts_ms).
 /// Only entities present in `entity_config` are processed and returned.
 fn encode_block_envelope_impl(
     block_json_str: &str,
     receipts_json_str: &str,
     entity_config: &HashMap<String, (i64, Arc<SchemaEntry>)>,
-) -> Result<HashMap<String, Vec<(String, Vec<u8>)>>, String> {
+) -> Result<(HashMap<String, Vec<(String, Vec<u8>)>>, i64, i64), String> {
     let block: serde_json::Value = serde_json::from_str(block_json_str)
         .map_err(|e| format!("block parse error: {e}"))?;
     let receipts: Vec<serde_json::Value> = match serde_json::from_str(receipts_json_str) {
@@ -814,6 +814,13 @@ fn encode_block_envelope_impl(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+
+    // Block timestamp in seconds → milliseconds for Python-side lag computation.
+    let block_ts_sec: i64 = block.get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| hex_to_i64(s))
+        .unwrap_or(0);
+    let block_ts_ms = block_ts_sec * 1000;
 
     let mut result: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
 
@@ -903,7 +910,7 @@ fn encode_block_envelope_impl(
         }
     }
 
-    Ok(result)
+    Ok((result, block_ts_ms, ingest_ts))
 }
 
 /// Parse raw_envelope JSON strings, encode all entity rows to Avro bytes
@@ -947,7 +954,7 @@ fn parse_and_encode_block_envelope(
     };
 
     // Phase 2: all CPU work with GIL released
-    let encoded: HashMap<String, Vec<(String, Vec<u8>)>> = py
+    let (encoded, block_ts_ms, ingest_ts_ms): (HashMap<String, Vec<(String, Vec<u8>)>>, i64, i64) = py
         .allow_threads(|| {
             encode_block_envelope_impl(block_json_str, receipts_json_str, &entity_config)
         })
@@ -964,6 +971,15 @@ fn parse_and_encode_block_envelope(
         }
         out.set_item(entity, list)?;
     }
+    // __meta__ carries block/ingest timestamps so Python can compute ingestion_lag_ms
+    // without decoding the Avro bytes. Stored as a list so the engine's extend() call
+    // works correctly (dict values in parsed_bundle must be lists).
+    let meta_dict = PyDict::new_bound(py);
+    meta_dict.set_item("block_timestamp_ms", block_ts_ms)?;
+    meta_dict.set_item("ingest_timestamp_ms", ingest_ts_ms)?;
+    let meta_list = PyList::empty_bound(py);
+    meta_list.append(meta_dict)?;
+    out.set_item("__meta__", meta_list)?;
     Ok(out.unbind().into_any())
 }
 

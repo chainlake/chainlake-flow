@@ -261,15 +261,6 @@ class KafkaWriter:
             span.set_attribute("batch_size", len(rows))
             span.set_attribute("queue_size", self.queue.qsize())
             
-            # Log enqueue action before adding to the queue
-            if self.logger:
-                self.logger.debug(
-                    "kafka.enqueue",
-                    topic=topic,
-                    batch_size=len(rows),
-                    queue_size=self.queue.qsize(),
-                )
-
             # A dead sink worker means the queue will never drain again, so
             # waiting out the full timeout only delays an inevitable failure.
             # Fail immediately: the crash itself is already logged by
@@ -435,13 +426,6 @@ class KafkaWriter:
             topic_counts = defaultdict(int)
             for topic, _, _, _ in items:
                 topic_counts[topic] += 1
-
-            if self.logger:
-                self.logger.debug(
-                    "kafka.batch_send",
-                    batch_size=len(items),
-                    topics=dict(topic_counts),
-                )
 
             start = time.time()
             self.metrics.BATCH_COUNTER.add(1)

@@ -708,6 +708,13 @@ class IngestionEngine:
                             cursor_observation["event_timestamp_ms"] = self._extract_event_timestamp_ms(
                                 final_bundle
                             )
+                            # For pre-encoded path, ingest_timestamp_ms comes from __meta__
+                            # (delivery tracker can't see it because rows are opaque tuples).
+                            meta_list = final_bundle.get("__meta__")
+                            if isinstance(meta_list, list) and meta_list and isinstance(meta_list[0], dict):
+                                ingest_ts = meta_list[0].get("ingest_timestamp_ms")
+                                if ingest_ts is not None:
+                                    cursor_observation["ingest_timestamp_ms"] = int(ingest_ts)
                             emitted_rows = 0
                             for entity, topic in self.topics.items():
                                 rows = final_bundle.get(entity, [])
@@ -1310,6 +1317,17 @@ class IngestionEngine:
             return ingestion_lag
 
     def _extract_event_timestamp_ms(self, bundle: dict) -> int | None:
+        # Fast path: pre-encoded bundles carry __meta__ with block_timestamp_ms
+        # already in milliseconds (set by parse_and_encode_block_envelope in Rust).
+        meta_list = bundle.get("__meta__")
+        if isinstance(meta_list, list) and meta_list and isinstance(meta_list[0], dict):
+            ts_ms = meta_list[0].get("block_timestamp_ms")
+            if ts_ms is not None:
+                try:
+                    return int(ts_ms)
+                except Exception:
+                    pass
+
         timestamps: list[int] = []
         for rows in bundle.values():
             if not isinstance(rows, list):
