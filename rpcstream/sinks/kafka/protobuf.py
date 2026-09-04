@@ -235,8 +235,10 @@ class SchemaRegistrySerializerRegistry:
                 continue
             rows = [row for _, row in indexed_rows]
             encoded = _chainlake_avro.encode_batch(schema_id, rows)
+            # PyO3 ≤0.20 returns Vec<u8> as list[int]; normalize to bytes so
+            # producer.produce(value=...) always receives a bytes-like object.
             for (orig_i, _), payload in zip(indexed_rows, encoded):
-                results[orig_i] = payload
+                results[orig_i] = bytes(payload) if isinstance(payload, list) else payload
 
         return results
 

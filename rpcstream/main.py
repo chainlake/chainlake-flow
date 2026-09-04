@@ -315,6 +315,14 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
         # -------------------------
         producer = Producer(runtime.kafka.config)
 
+        # raw_envelope produces plain JSON bytes; bypass Avro schema registry.
+        raw_json_topics: set[str] = set()
+        for entity in runtime.entities:
+            if entity == "raw_envelope":
+                envelope_topic = topic_maps.main.get("raw_envelope")
+                if envelope_topic:
+                    raw_json_topics.add(envelope_topic)
+
         kafka_write = KafkaWriter(
             producer=producer,
             id_calculator=adapter.build_event_id_calculator(),
@@ -333,6 +341,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             observability=observability,
             eos_enabled=runtime.kafka.eos_enabled,
             eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
+            raw_json_topics=frozenset(raw_json_topics),
         )
 
         watermark_manager = WatermarkManager(

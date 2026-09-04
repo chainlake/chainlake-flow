@@ -2,6 +2,7 @@ import json
 import time
 import asyncio
 import concurrent.futures
+import traceback as _traceback
 from collections import defaultdict
 
 from confluent_kafka import KafkaException
@@ -552,6 +553,25 @@ class KafkaWriter:
                         key=kafka_key,
                     )
 
+                # Guard against encode bugs: produce() raises a bare TypeError
+                # when value is not bytes/str/None, which crashes the whole
+                # worker.  Catch it here so one bad payload fails its delivery
+                # tracker and the worker keeps running.
+                if not isinstance(payload, (bytes, type(None))):
+                    err = TypeError(
+                        f"sink encode returned {type(payload).__name__} for "
+                        f"{topic}; expected bytes"
+                    )
+                    if self.logger:
+                        self.logger.error(
+                            "kafka.payload_type_error",
+                            topic=topic,
+                            payload_type=type(payload).__name__,
+                            payload_repr=repr(payload)[:500],
+                        )
+                    self._fail_delivery_tracker(delivery_tracker, err)
+                    continue
+
                 try:
                     backpressure_since = None
                     while True:
@@ -756,10 +776,12 @@ class KafkaWriter:
         if exc is None:
             return
         if self.logger:
+            tb = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
             self.logger.error(
                 "kafka.sink_worker_crashed",
                 error=str(exc),
                 error_type=type(exc).__name__,
+                traceback=tb,
             )
 
     async def _init_transactions(self):

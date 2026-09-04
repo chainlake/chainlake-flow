@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use apache_avro::{to_avro_datum, types::Value, Schema};
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use rayon::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -248,13 +248,14 @@ fn register_schema(
 /// GIL strategy:
 ///   Phase 1 (GIL held)    – extract Python dicts into Rust-native values.
 ///   Phase 2 (GIL released) – rayon parallel Avro encode (all threads run freely).
-///   Phase 3 (GIL acquired) – return Vec<Vec<u8>> which PyO3 converts to list[bytes].
+///   Phase 3 (GIL acquired) – wrap each Vec<u8> in PyBytes so Python always
+///                             receives bytes, not list[int] (PyO3 ≤0.20 quirk).
 #[pyfunction]
 fn encode_batch(
     py: Python<'_>,
     schema_id: i64,
     rows: &Bound<'_, PyList>,
-) -> PyResult<Vec<Vec<u8>>> {
+) -> PyResult<Vec<Py<PyBytes>>> {
     // Cheap Arc clone; drops the RwLock read guard before touching Python objects.
     let entry: Arc<SchemaEntry> = {
         let cache = SCHEMA_CACHE.read().unwrap();
@@ -283,9 +284,11 @@ fn encode_batch(
             .collect()
     });
 
-    // Propagate first encoding error (rare: only fires on schema/value mismatch)
+    // Propagate first encoding error (rare: only fires on schema/value mismatch).
+    // Explicitly wrap as PyBytes so Python always receives bytes, not list[int].
     results.into_iter().map(|r| {
         r.map_err(|msg| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(msg))
+         .map(|v| PyBytes::new_bound(py, &v).unbind())
     }).collect()
 }
 

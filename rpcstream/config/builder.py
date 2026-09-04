@@ -71,6 +71,11 @@ def build_kafka_config(cfg: PipelineConfig) -> dict:
     # (BufferError) once this is full. setdefault lets operators override.
     result.setdefault("queue.buffering.max.messages", 5000)
     result.setdefault("queue.buffering.max.kbytes", 32768)
+    # BSC raw_envelope rows embed the full block JSON + receipts JSON, which can
+    # exceed 1MB for blocks with many transactions.  The librdkafka default of
+    # 1 048 576 bytes rejects these client-side before they reach the broker;
+    # 10 MB covers the largest blocks observed in production.
+    result.setdefault("message.max.bytes", 10485760)
 
     if kafka.eos.enabled:
         result["enable.idempotence"] = True
