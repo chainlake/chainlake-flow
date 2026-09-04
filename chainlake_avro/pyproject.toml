@@ -5,6 +5,7 @@ build-backend = "maturin"
 [project]
 name = "chainlake-avro"
 requires-python = ">=3.11"
+dynamic = ["version"]
 classifiers = [
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",

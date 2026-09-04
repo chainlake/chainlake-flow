@@ -9,7 +9,9 @@ name = "chainlake_avro"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3     = { version = "0.22", features = ["extension-module"] }
+# abi3-py311: build against the stable Python C ABI (works on CPython 3.11+,
+# including 3.14+). Avoids the interpreter-version check that blocks 0.22 on 3.14.
+pyo3     = { version = "0.22", features = ["extension-module", "abi3-py311"] }
 # apache-avro: schema parsing + binary encoding (no compression features needed)
 apache-avro = { version = "0.16", default-features = false }
 rayon    = "1"

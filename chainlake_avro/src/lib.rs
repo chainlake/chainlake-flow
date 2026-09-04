@@ -49,7 +49,7 @@ static SCHEMA_CACHE: Lazy<RwLock<HashMap<i64, Arc<SchemaEntry>>>> =
 
 static JSON_DUMPS: Lazy<Py<PyAny>> = Lazy::new(|| {
     Python::with_gil(|py| {
-        py.import("json")
+        py.import_bound("json")
             .and_then(|m| m.getattr("dumps"))
             .expect("failed to cache json.dumps")
             .unbind()
