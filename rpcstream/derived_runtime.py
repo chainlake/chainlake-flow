@@ -19,7 +19,11 @@ from confluent_kafka import Producer
 from rpcstream.adapters import build_chain_adapter
 from rpcstream.config.loader import load_pipeline_config
 from rpcstream.config.resolver import resolve
-from rpcstream.ingestion.derived_consumer import DerivedEnvelopeFetcher, DerivedEnvelopeProcessor
+from rpcstream.ingestion.derived_consumer import (
+    DerivedEnvelopeFetcher,
+    DerivedEnvelopeProcessor,
+    _RUST_PARSER,
+)
 from rpcstream.ingestion.engine import IngestionEngine
 from rpcstream.runtime.observability.provider import build_observability
 from rpcstream.runtime.topic import build_default_topic_namespace
@@ -235,11 +239,14 @@ async def run_derived_pipeline(
             meter=observability.get_meter("rpcstream.watermark"),
         )
 
+        # When parse_block_envelope (Rust) is active, it already returns fully
+        # decoded + enriched rows including token_transfers. Skip Python decoder
+        # and enricher entirely so they don't re-run on the same data and burn GIL.
         engine = IngestionEngine(
             fetcher=derived_fetcher,
             processors=processors,
-            decoder=adapter.build_decoder(client=None),
-            enricher=adapter.build_enricher(),
+            decoder=None if _RUST_PARSER else adapter.build_decoder(client=None),
+            enricher=None if _RUST_PARSER else adapter.build_enricher(),
             sink=kafka_writer,
             topics=runtime.topic_map.main,
             dlq_topic=runtime.topic_map.dlq,
