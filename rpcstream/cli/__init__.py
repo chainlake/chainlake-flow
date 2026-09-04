@@ -10,6 +10,7 @@ from rpcstream.cli.config import config_app
 from rpcstream.cli.dlq import dlq_app
 from rpcstream.cli.ingest import run_ingest
 from rpcstream.cli.init import kafka_init as kafka_init_command
+from rpcstream.cli.ingest_derived import run_ingest_derived
 
 app = typer.Typer(
     help=(
@@ -105,6 +106,57 @@ app.command(
 )(kafka_init_command)
 
 
+@app.command(
+    "ingest-derived",
+    help=(
+        "Run derived ingestion: consume raw envelopes from Kafka and produce typed "
+        "entity topics (block, transaction, log, token_transfer) with Avro encoding. "
+        "No upstream RPC calls — throughput ceiling is Kafka read rate."
+    ),
+)
+def ingest_derived_command(
+    config_path: str = typer.Option(
+        None,
+        "--config",
+        help="Path to pipeline.yaml.",
+    ),
+    source_topic: str | None = typer.Option(
+        None,
+        "--source-topic",
+        help=(
+            "Kafka topic to read raw envelopes from. "
+            "Defaults to {namespace}.raw_envelope inferred from config."
+        ),
+    ),
+    from_block: int | None = typer.Option(
+        None,
+        "--from-block",
+        help="First block to process (inclusive). Defaults to checkpoint or topic start.",
+    ),
+    to_block: int | None = typer.Option(
+        None,
+        "--to-block",
+        help="Last block to process (inclusive). Omit for continuous realtime mode.",
+    ),
+    entity: list[str] | None = typer.Option(
+        None,
+        "--entity",
+        help="Override output entities (default: block,transaction,log,token_transfer).",
+    ),
+) -> None:
+    config_path = config_path or default_config_path()
+    try:
+        run_ingest_derived(
+            config_path=config_path,
+            source_topic=source_topic,
+            from_block=from_block,
+            to_block=to_block,
+            entity=entity,
+        )
+    except Exception as exc:
+        fail(exc)
+
+
 def cli() -> None:
     app()
 
@@ -115,4 +167,5 @@ __all__ = [
     "cli",
     "config_app",
     "dlq_app",
+    "run_ingest_derived",
 ]

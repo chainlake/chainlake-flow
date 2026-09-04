@@ -52,6 +52,7 @@ class KafkaWriter:
         observability: ObservabilityContext | None = None,
         eos_enabled=False,
         eos_init_timeout_sec=30.0,
+        raw_json_topics: frozenset | None = None,
     ):
         self.producer = producer
         self.id_calc = id_calculator
@@ -78,6 +79,10 @@ class KafkaWriter:
         self.eos_enabled = eos_enabled
         self.eos_init_timeout_sec = eos_init_timeout_sec
         self.protobuf_registry = None
+        # Topics that bypass Avro encoding and are written as raw JSON bytes.
+        # Used by canonical-fetch (raw_envelope) so the envelope topic gets
+        # plain JSON while checkpoint/watermark topics keep their Avro schemas.
+        self._raw_json_topics: frozenset = frozenset(raw_json_topics or [])
 
         # How often to log while librdkafka's local queue stays full.
         self.buffer_full_log_interval_sec = 5.0
@@ -425,6 +430,58 @@ class KafkaWriter:
 
             start = time.time()
             self.metrics.BATCH_COUNTER.add(1)
+
+            # --- Raw JSON path (canonical-fetch envelope topics) ---
+            # Topics in _raw_json_topics bypass Avro entirely: partition key is
+            # popped from the row, the remainder is json.dumps'd, and the bytes
+            # are produced directly. No thread pool needed — JSON encoding for a
+            # single-row envelope is <0.1ms, nowhere near the 294ms Avro hot path.
+            if self._raw_json_topics:
+                raw_items = [it for it in items if it[0] in self._raw_json_topics]
+                items = [it for it in items if it[0] not in self._raw_json_topics]
+                for topic, row, _, delivery_tracker in raw_items:
+                    self.metrics.MESSAGE_COUNTER.add(1, {"topic": topic})
+                    kafka_key = row.pop("kafka_partition_key", None) or str(row.get("block_number", ""))
+                    if isinstance(kafka_key, str):
+                        kafka_key = kafka_key.encode("utf-8")
+                    payload = json.dumps(row, separators=(",", ":")).encode("utf-8")
+                    backpressure_since = None
+                    try:
+                        while True:
+                            try:
+                                self.producer.produce(
+                                    topic=topic,
+                                    key=kafka_key,
+                                    value=payload,
+                                    callback=self._delivery_callback(delivery_tracker),
+                                )
+                                break
+                            except BufferError:
+                                self.metrics.BUFFER_RETRY_COUNTER.add(1, {"topic": topic})
+                                now = time.time()
+                                if backpressure_since is None:
+                                    backpressure_since = now
+                                elif now - backpressure_since >= self.buffer_full_log_interval_sec:
+                                    backpressure_since = now
+                                    if self.logger:
+                                        self.logger.warn("kafka.producer_backpressure", topic=topic)
+                                self.producer.poll(0.1)
+                                await asyncio.sleep(0.01)
+                    except KafkaException as exc:
+                        self._fail_delivery_tracker(delivery_tracker, exc)
+                        if self.logger:
+                            self.logger.error(
+                                "kafka.produce_failed",
+                                topic=topic,
+                                error=str(exc),
+                                error_type=type(exc).__name__,
+                            )
+                    self.producer.poll(0)
+                if not items:
+                    latency = (time.time() - start) * 1000
+                    self.metrics.BATCH_LATENCY.record(latency)
+                    span.set_attribute("batch_latency_ms", latency)
+                    return
 
             # --- Phase 1: Prepare metadata (sync, event-loop thread, fast) ---
             # Mutates each row to add id/ingest_timestamp, extracts kafka_key.

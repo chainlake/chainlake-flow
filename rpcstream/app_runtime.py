@@ -166,6 +166,16 @@ def build_runtime_stack(
         )
         state_records = state_reader.load()
     processors = adapter.build_processors(entities=internal_entities)
+    # Topics that should be written as raw JSON bytes (no Avro schema registry).
+    # raw_envelope is the canonical-fetch output topic; checkpoint/watermark
+    # topics are NOT included so they keep their Avro encoding.
+    raw_json_topics: set[str] = set()
+    for entity in runtime.entities:
+        if entity == "raw_envelope":
+            envelope_topic = runtime.topic_map.main.get("raw_envelope")
+            if envelope_topic:
+                raw_json_topics.add(envelope_topic)
+
     producer = Producer(producer_config)
     kafka_writer = KafkaWriter(
         producer=producer,
@@ -185,6 +195,7 @@ def build_runtime_stack(
         observability=observability,
         eos_enabled=eos_active,
         eos_init_timeout_sec=runtime.kafka.eos_init_timeout_sec,
+        raw_json_topics=frozenset(raw_json_topics),
     )
     watermark_manager = WatermarkManager(
         sink=kafka_writer,

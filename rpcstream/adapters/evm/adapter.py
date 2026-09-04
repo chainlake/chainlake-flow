@@ -8,7 +8,7 @@ from rpcstream.adapters.evm.decoder import EvmDecoder
 from rpcstream.adapters.evm.enrich import EvmEnricher
 from rpcstream.adapters.evm.identity.event_id_calculator import EventIdCalculator
 from rpcstream.adapters.evm.identity.event_time_calculator import EventTimeCalculator
-from rpcstream.adapters.evm.fetcher import EvmRpcFetcher
+from rpcstream.adapters.evm.fetcher import EvmRpcFetcher, RawEnvelopeFetcher
 from rpcstream.adapters.evm.processors import PROCESSOR_REGISTRY
 from rpcstream.adapters.evm.schema import EVM_ENTITY_SCHEMAS
 from rpcstream.adapters.evm.tracker import EvmChainHeadTracker
@@ -33,6 +33,8 @@ class EvmChainAdapter(ChainAdapter):
         )
 
     def build_fetcher(self, *, scheduler, entities, logger=None, tracker=None):
+        if "raw_envelope" in entities:
+            return RawEnvelopeFetcher(scheduler, logger=logger, tracker=tracker)
         return EvmRpcFetcher(scheduler, entities, logger, tracker)
 
     def build_processors(self, *, entities):

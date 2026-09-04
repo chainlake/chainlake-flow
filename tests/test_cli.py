@@ -262,7 +262,9 @@ def test_root_help_lists_only_dlq_and_config_commands():
     assert "init" in result.stdout
     assert "dlq" in result.stdout
     assert "config" in result.stdout
-    assert "│ ingest" not in result.stdout
+    assert "ingest-derived" in result.stdout
+    # The root callback (realtime/backfill) must not appear as a named subcommand.
+    assert "│ ingest " not in result.stdout
 
 
 def test_benchmark_command_invokes_runner(monkeypatch):

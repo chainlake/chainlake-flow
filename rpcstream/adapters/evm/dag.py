@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 
-SINK_ENTITY_ORDER = ("block", "transaction", "log", "token_transfer", "trace")
-INTERNAL_ENTITY_ORDER = ("block", "transaction", "receipt", "log", "trace")
+SINK_ENTITY_ORDER = ("block", "transaction", "log", "token_transfer", "trace", "raw_envelope")
+INTERNAL_ENTITY_ORDER = ("block", "transaction", "receipt", "log", "trace", "raw_envelope")
 
 ENTITY_DEPENDENCIES = {
     "block": {"block"},
@@ -11,6 +11,8 @@ ENTITY_DEPENDENCIES = {
     "token_transfer": {"log"},
     "trace": {"block", "trace"},
     "receipt": {"block", "receipt"},
+    # raw_envelope fetches block(full)+receipts directly; no derived internal deps.
+    "raw_envelope": {"raw_envelope"},
 }
 
 
@@ -35,8 +37,8 @@ def resolve_sink_entities(requested_entities: list[str]) -> list[str]:
 
 
 def topic_kind_for_entity(entity: str) -> str:
-    if entity == "token_transfer":
-        return ""
+    if entity in ("token_transfer", "raw_envelope"):
+        return ""  # topic: bsc.<entity> — no kind prefix
     if entity == "transaction":
         return "enriched"
     return "raw"
