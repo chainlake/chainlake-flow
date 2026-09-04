@@ -3,10 +3,11 @@ FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# system deps (Kafka)
+# system deps: Kafka headers + C linker for Rust (maturin needs cc to link .so)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     librdkafka-dev \
     curl \
+    gcc \
     && rm -rf /var/lib/apt/lists/*
 
 # install uv
