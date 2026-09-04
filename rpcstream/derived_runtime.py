@@ -22,7 +22,9 @@ from rpcstream.config.resolver import resolve
 from rpcstream.ingestion.derived_consumer import (
     DerivedEnvelopeFetcher,
     DerivedEnvelopeProcessor,
+    _RUST_ENCODE,
     _RUST_PARSER,
+    set_rust_encode_config,
 )
 from rpcstream.ingestion.engine import IngestionEngine
 from rpcstream.runtime.observability.provider import build_observability
@@ -238,6 +240,30 @@ async def run_derived_pipeline(
             logger=logger,
             meter=observability.get_meter("rpcstream.watermark"),
         )
+
+        # When parse_and_encode_block_envelope (Rust encode) is available, pre-warm
+        # the schema registry now so schema_ids are known before run_stream() starts.
+        # engine.run_stream() calls kafka_writer.start() which calls
+        # protobuf_registry.start() again — that's a no-op (guarded by _started).
+        if _RUST_ENCODE and kafka_writer.protobuf_registry is not None:
+            try:
+                await asyncio.to_thread(kafka_writer.protobuf_registry.start)
+                entity_schema_ids = {
+                    entity: (kafka_writer.protobuf_registry._topic_schema_ids[topic], topic)
+                    for entity, topic in runtime.topic_map.main.items()
+                    if topic in kafka_writer.protobuf_registry._topic_schema_ids
+                }
+                if entity_schema_ids:
+                    set_rust_encode_config(entity_schema_ids)
+                    logger.info(
+                        "derived_runtime.rust_encode_activated",
+                        entities=list(entity_schema_ids.keys()),
+                    )
+            except Exception as exc:
+                logger.warn(
+                    "derived_runtime.rust_encode_warmup_failed",
+                    error=repr(exc),
+                )
 
         # When parse_block_envelope (Rust) is active, it already returns fully
         # decoded + enriched rows including token_transfers. Skip Python decoder

@@ -156,6 +156,9 @@ class KafkaWriter:
             topic_counts[topic] += len(rows)
             total_rows += len(rows)
             for row in rows:
+                if not isinstance(row, dict):
+                    # Pre-encoded (key_bytes, avro_bytes) tuples — no metadata.
+                    continue
                 event_ts = self.time_calc.calculate_event_timestamp_ms(row)
                 if event_ts is not None:
                     event_timestamps.append(event_ts)
@@ -494,6 +497,61 @@ class KafkaWriter:
                     self.metrics.BATCH_LATENCY.record(latency)
                     span.set_attribute("batch_latency_ms", latency)
                     return
+
+            # --- Pre-encoded fast path (Rust parse+encode) ---
+            # Rows from parse_and_encode_block_envelope arrive as (key_bytes,
+            # avro_bytes) tuples — already encoded in Rust. Bypass Phases 1 and 2
+            # entirely; produce directly. This eliminates the 15ms Python GIL hold
+            # per block that rows_to_pylist caused.
+            preenc_items = [it for it in items if isinstance(it[1], tuple)]
+            items = [it for it in items if not isinstance(it[1], tuple)]
+            for _pe_idx, (pe_topic, pe_row, _, pe_tracker) in enumerate(preenc_items):
+                pe_key, pe_avro = pe_row
+                self.metrics.MESSAGE_COUNTER.add(1, {"topic": pe_topic})
+                backpressure_since = None
+                try:
+                    while True:
+                        try:
+                            self.producer.produce(
+                                topic=pe_topic,
+                                key=pe_key,
+                                value=pe_avro,
+                                callback=self._delivery_callback(pe_tracker),
+                            )
+                            break
+                        except BufferError:
+                            self.metrics.BUFFER_RETRY_COUNTER.add(1, {"topic": pe_topic})
+                            now = time.time()
+                            if backpressure_since is None:
+                                backpressure_since = now
+                            elif now - backpressure_since >= self.buffer_full_log_interval_sec:
+                                backpressure_since = now
+                                if self.logger:
+                                    self.logger.warn(
+                                        "kafka.producer_backpressure", topic=pe_topic
+                                    )
+                            self.producer.poll(0.1)
+                            await asyncio.sleep(0.01)
+                except KafkaException as exc:
+                    self._fail_delivery_tracker(pe_tracker, exc)
+                    if self.logger:
+                        self.logger.error(
+                            "kafka.produce_failed",
+                            topic=pe_topic,
+                            error=str(exc),
+                            error_type=type(exc).__name__,
+                        )
+                self.producer.poll(0)
+                if _pe_idx % _FLUSH_YIELD_INTERVAL == 0:
+                    await asyncio.sleep(0)
+            if preenc_items:
+                self.producer.poll(0)
+
+            if not items:
+                latency = (time.time() - start) * 1000
+                self.metrics.BATCH_LATENCY.record(latency)
+                span.set_attribute("batch_latency_ms", latency)
+                return
 
             # --- Phase 1: Prepare metadata (sync, event-loop thread, fast) ---
             # Mutates each row to add id/ingest_timestamp, extracts kafka_key.

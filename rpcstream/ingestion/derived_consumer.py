@@ -36,9 +36,21 @@ from rpcstream.adapters.evm.parser.parse_receipts_logs import parse_receipts
 try:
     import chainlake_avro as _chainlake_avro
     _RUST_PARSER = hasattr(_chainlake_avro, "parse_block_envelope")
+    _RUST_ENCODE = _RUST_PARSER and hasattr(_chainlake_avro, "parse_and_encode_block_envelope")
 except ImportError:
     _chainlake_avro = None  # type: ignore[assignment]
     _RUST_PARSER = False
+    _RUST_ENCODE = False
+
+# entity → (schema_id: int, topic: str) — set by derived_runtime after schema
+# registry warmup via set_rust_encode_config(). None means encode path inactive.
+_RUST_ENCODE_CONFIG: dict | None = None
+
+
+def set_rust_encode_config(entity_schema_ids: dict) -> None:
+    """Activate the GIL-free parse+encode path with the given schema_id map."""
+    global _RUST_ENCODE_CONFIG
+    _RUST_ENCODE_CONFIG = entity_schema_ids
 
 
 # Producer-only librdkafka keys that break the Consumer constructor.
@@ -124,6 +136,15 @@ def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
             receipts_json_str is not None,
         )
 
+    if _RUST_ENCODE and _RUST_ENCODE_CONFIG:
+        try:
+            parsed = _chainlake_avro.parse_and_encode_block_envelope(
+                block_json_str, receipts_json_str, _RUST_ENCODE_CONFIG
+            )
+        except Exception as exc:
+            return ("json_error", block_number, exc)
+        return ("ok", block_number, parsed)
+
     if _RUST_PARSER:
         try:
             parsed = _chainlake_avro.parse_block_envelope(block_json_str, receipts_json_str)
@@ -142,13 +163,12 @@ def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
 class DerivedEnvelopeProcessor:
     """Parses a raw_envelope payload into all EVM entity rows.
 
-    When the Rust parser is active, `value` arrives pre-parsed as a dict
-    {"block", "transaction", "receipt", "log"} and is returned as-is.
-    In the Python fallback path, `value` is (block_json_dict, receipts_list)
-    and the Python parsers are called here (original behavior).
-
-    Receipt rows are included so EvmEnricher can join them onto transactions;
-    receipt has no Kafka topic in the derived topic-map so it stays internal.
+    Three payload forms:
+    • parse_and_encode_block_envelope (Rust encode path): dict whose values are
+      list[(key_bytes, avro_bytes)] — pre-encoded Avro, returned as-is.
+    • parse_block_envelope (Rust parser path): dict {"block", "transaction",
+      "receipt", "log", "token_transfer"} of Row dicts — returned as-is.
+    • Python fallback: tuple (block_json_dict, receipts_list) — parsed here.
     """
 
     def process(self, cursor: int, value) -> dict:

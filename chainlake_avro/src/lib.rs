@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use apache_avro::{to_avro_datum, types::Value, Schema};
 use once_cell::sync::Lazy;
@@ -738,6 +739,234 @@ fn extract_receipts_logs_transfers(
     (receipt_rows, log_rows, transfer_rows)
 }
 
+// ---------------------------------------------------------------------------
+// Rust-native row → Avro encode helpers (GIL-free path)
+// ---------------------------------------------------------------------------
+
+/// Convert a serde_json Value to a string using the same rules as Python's
+/// normalize_scalar: strings pass through, numbers/bools use Display, arrays
+/// and objects use compact JSON (matches json.dumps with separators=(',',':')).
+fn json_val_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+/// Extract a Rust-native Row (serde_json HashMap) into schema-ordered
+/// Vec<Option<ExtractedValue>>, ready for encode_row.  No GIL required.
+fn extract_row_from_json(row: &Row, fields: &[FieldSpec]) -> Vec<Option<ExtractedValue>> {
+    fields
+        .iter()
+        .map(|field| {
+            let v = match row.get(&field.name) {
+                None | Some(serde_json::Value::Null) => return None,
+                Some(v) => v,
+            };
+            match &field.kind {
+                FieldKind::String => Some(ExtractedValue::Str(json_val_to_string(v))),
+                FieldKind::Long => v.as_i64().map(ExtractedValue::Long),
+                FieldKind::Bool => v.as_bool().map(ExtractedValue::Bool),
+                FieldKind::StringArray => match v {
+                    serde_json::Value::Array(arr) => Some(ExtractedValue::StrArr(
+                        arr.iter().map(json_val_to_string).collect(),
+                    )),
+                    _ => Some(ExtractedValue::StrArr(vec![json_val_to_string(v)])),
+                },
+                FieldKind::LongArray => match v {
+                    serde_json::Value::Array(arr) => Some(ExtractedValue::LongArr(
+                        arr.iter().filter_map(|x| x.as_i64()).collect(),
+                    )),
+                    _ => None,
+                },
+                FieldKind::BoolArray => match v {
+                    serde_json::Value::Array(arr) => Some(ExtractedValue::BoolArr(
+                        arr.iter().filter_map(|x| x.as_bool()).collect(),
+                    )),
+                    _ => None,
+                },
+            }
+        })
+        .collect()
+}
+
+/// Pure Rust implementation: parse JSON, extract + enrich all entities, Avro-encode.
+///
+/// Returns HashMap<entity_name, Vec<(kafka_key_str, avro_bytes)>>.
+/// Only entities present in `entity_config` are processed and returned.
+fn encode_block_envelope_impl(
+    block_json_str: &str,
+    receipts_json_str: &str,
+    entity_config: &HashMap<String, (i64, Arc<SchemaEntry>)>,
+) -> Result<HashMap<String, Vec<(String, Vec<u8>)>>, String> {
+    let block: serde_json::Value = serde_json::from_str(block_json_str)
+        .map_err(|e| format!("block parse error: {e}"))?;
+    let receipts: Vec<serde_json::Value> = match serde_json::from_str(receipts_json_str) {
+        Ok(serde_json::Value::Array(arr)) => arr,
+        Ok(_) => vec![],
+        Err(e) => return Err(format!("receipts parse error: {e}")),
+    };
+
+    let ingest_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let mut result: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+
+    // Block
+    if let Some((schema_id, entry)) = entity_config.get("block") {
+        let mut row = extract_block_row(&block);
+        let block_hash = block.get("hash").and_then(|v| v.as_str()).unwrap_or("");
+        let event_id = format!("block_{block_hash}");
+        row.insert("id".into(), serde_json::Value::String(event_id.clone()));
+        row.insert("ingest_timestamp".into(), serde_json::Value::from(ingest_ts));
+        let extracted = extract_row_from_json(&row, &entry.fields);
+        let avro = encode_row(entry, *schema_id, extracted)?;
+        result.insert("block".into(), vec![(event_id, avro)]);
+    }
+
+    // Transactions: build receipt lookup inside a block so it drops before
+    // we borrow `receipts` again for log/transfer extraction.
+    if let Some((schema_id, entry)) = entity_config.get("transaction") {
+        let block_hash = block.get("hash").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let tx_rows = {
+            let receipt_by_hash: HashMap<&str, &serde_json::Value> = receipts
+                .iter()
+                .filter_map(|r| r.get("transactionHash")?.as_str().map(|h| (h, r)))
+                .collect();
+            extract_tx_rows(&block, &receipt_by_hash)
+        };
+        let mut messages = Vec::with_capacity(tx_rows.len());
+        for mut row in tx_rows {
+            let tx_idx = row.get("transaction_index").and_then(|v| v.as_i64()).unwrap_or(0);
+            let event_id = format!("enriched_transaction_{block_hash}_{tx_idx}");
+            row.insert("id".into(), serde_json::Value::String(event_id.clone()));
+            row.insert("ingest_timestamp".into(), serde_json::Value::from(ingest_ts));
+            let extracted = extract_row_from_json(&row, &entry.fields);
+            let avro = encode_row(entry, *schema_id, extracted)?;
+            messages.push((event_id, avro));
+        }
+        result.insert("transaction".into(), messages);
+    }
+
+    // Logs and token_transfers share one extraction pass.
+    let need_logs = entity_config.contains_key("log");
+    let need_transfers = entity_config.contains_key("token_transfer");
+
+    if need_logs || need_transfers {
+        let block_timestamp = val_hex_or(&block, "timestamp", 0);
+        let (_, log_rows, transfer_rows) =
+            extract_receipts_logs_transfers(&receipts, &block_timestamp);
+
+        if need_logs {
+            if let Some((schema_id, entry)) = entity_config.get("log") {
+                let mut messages = Vec::with_capacity(log_rows.len());
+                for mut row in log_rows {
+                    let tx_hash = row
+                        .get("transaction_hash")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let log_index = row.get("log_index").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let event_id = format!("log_{tx_hash}_{log_index}");
+                    row.insert("id".into(), serde_json::Value::String(event_id.clone()));
+                    row.insert("ingest_timestamp".into(), serde_json::Value::from(ingest_ts));
+                    let extracted = extract_row_from_json(&row, &entry.fields);
+                    let avro = encode_row(entry, *schema_id, extracted)?;
+                    messages.push((event_id, avro));
+                }
+                result.insert("log".into(), messages);
+            }
+        }
+
+        if need_transfers {
+            if let Some((schema_id, entry)) = entity_config.get("token_transfer") {
+                let mut messages = Vec::with_capacity(transfer_rows.len());
+                for mut row in transfer_rows {
+                    // build_token_transfer already set "id" = "token_transfer_{hash}_{idx}_{n}"
+                    let event_id = row
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    row.insert("ingest_timestamp".into(), serde_json::Value::from(ingest_ts));
+                    let extracted = extract_row_from_json(&row, &entry.fields);
+                    let avro = encode_row(entry, *schema_id, extracted)?;
+                    messages.push((event_id, avro));
+                }
+                result.insert("token_transfer".into(), messages);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Parse raw_envelope JSON strings, encode all entity rows to Avro bytes
+/// in a single GIL-free pass, and return pre-encoded messages by entity.
+///
+/// Arguments:
+///   block_json_str    – raw JSON from eth_getBlockByNumber(true)
+///   receipts_json_str – raw JSON from eth_getBlockReceipts
+///   entity_schema_ids – Python dict: entity_name → (schema_id: int, topic: str)
+///                       Only entities listed here are processed.
+///
+/// Returns dict[entity_name, list[(key_bytes, avro_bytes)]]:
+///   key_bytes  – Kafka partition key (event_id UTF-8)
+///   avro_bytes – Confluent wire format (magic byte + 4-byte schema_id + avro)
+///
+/// GIL strategy:
+///   Phase 1 (GIL held, ~0.01ms) — extract schema_ids from Python dict.
+///   Phase 2 (GIL released)      — serde_json parse + entity extraction + Avro encode.
+///   Phase 3 (GIL held, ~0.1ms)  — wrap encoded bytes as PyBytes objects.
+///
+/// Compare: parse_block_envelope holds the GIL for ~15ms (rows_to_pylist).
+#[pyfunction]
+fn parse_and_encode_block_envelope(
+    py: Python<'_>,
+    block_json_str: &str,
+    receipts_json_str: &str,
+    entity_schema_ids: &Bound<'_, PyDict>,
+) -> PyResult<PyObject> {
+    // Phase 1: extract entity config (GIL held — Arc clone is cheap)
+    let entity_config: HashMap<String, (i64, Arc<SchemaEntry>)> = {
+        let cache = SCHEMA_CACHE.read().unwrap();
+        entity_schema_ids
+            .iter()
+            .filter_map(|(k, v)| {
+                let entity = k.extract::<String>().ok()?;
+                let (schema_id, _topic): (i64, String) = v.extract().ok()?;
+                let entry = cache.get(&schema_id)?.clone();
+                Some((entity, (schema_id, entry)))
+            })
+            .collect()
+    };
+
+    // Phase 2: all CPU work with GIL released
+    let encoded: HashMap<String, Vec<(String, Vec<u8>)>> = py
+        .allow_threads(|| {
+            encode_block_envelope_impl(block_json_str, receipts_json_str, &entity_config)
+        })
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    // Phase 3: wrap bytes into Python objects (~0.1ms for ~1700 rows)
+    let out = PyDict::new_bound(py);
+    for (entity, messages) in encoded {
+        let list = PyList::empty_bound(py);
+        for (key_str, avro) in messages {
+            let key_py = PyBytes::new_bound(py, key_str.as_bytes());
+            let avro_py = PyBytes::new_bound(py, &avro);
+            list.append((key_py, avro_py))?;
+        }
+        out.set_item(entity, list)?;
+    }
+    Ok(out.unbind().into_any())
+}
+
 /// Convert a serde_json Value to a Python object (GIL must be held).
 #[allow(deprecated)]
 fn json_to_py(py: Python<'_>, v: &serde_json::Value) -> PyObject {
@@ -843,5 +1072,6 @@ fn chainlake_avro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(register_schema, m)?)?;
     m.add_function(wrap_pyfunction!(encode_batch, m)?)?;
     m.add_function(wrap_pyfunction!(parse_block_envelope, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_and_encode_block_envelope, m)?)?;
     Ok(())
 }
