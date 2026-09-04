@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "chainlake-avro"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[tool.maturin]
+# cdylib name must match #[pymodule] fn name and lib.name in Cargo.toml
+module-name = "chainlake_avro"
+features    = ["pyo3/extension-module"]

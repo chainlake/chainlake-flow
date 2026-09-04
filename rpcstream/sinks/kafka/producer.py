@@ -383,6 +383,12 @@ class KafkaWriter:
         mutated by _prepare_row_only (id and ingest_timestamp are set).
         Returns [bytes, ...] -- one encoded payload per row.
 
+        When chainlake_avro (Rust PyO3 extension) is available, delegates to
+        protobuf_registry.encode_batch_many() which releases the GIL inside
+        the Rust call, so multiple workers in _encode_pool can encode in true
+        parallel. Without the extension, falls back to per-row Python encoding
+        (GIL held, workers serialized -- same behaviour as before Batch 3).
+
         Thread-safety: after KafkaWriter.start() warmup, AvroSerializer
         ._known_subjects is populated and effectively read-only (no more HTTP
         to the schema registry), and fastavro.schemaless_writer creates a new
@@ -395,6 +401,11 @@ class KafkaWriter:
         attempts: poll() from a thread → callback from that thread →
         future.set_result() from non-event-loop thread → asyncio gather waiting
         on the future never woke up."""
+        if (
+            self.protobuf_registry is not None
+            and self.protobuf_registry.rust_encoder_available
+        ):
+            return self.protobuf_registry.encode_batch_many(topic_row_pairs)
         return [self._serialize(topic, row) for topic, row in topic_row_pairs]
 
     async def _flush_batch(self, items):

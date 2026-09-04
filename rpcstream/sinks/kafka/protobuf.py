@@ -4,7 +4,15 @@ import inspect
 import json
 import os
 import warnings
+from collections import defaultdict
 from urllib.parse import urlparse
+
+try:
+    import chainlake_avro as _chainlake_avro
+    _RUST_ENCODER_AVAILABLE = True
+except ImportError:  # extension not built yet
+    _chainlake_avro = None
+    _RUST_ENCODER_AVAILABLE = False
 
 from rpcstream.sinks.kafka.schema import (
     CHECKPOINT_SCHEMA,
@@ -46,6 +54,8 @@ class SchemaRegistrySerializerRegistry:
         self.schema_format = _normalize_schema_format(schema_format)
         self._serializers = {}
         self._started = False
+        # topic → Confluent schema_id (populated in start() when Rust encoder is available)
+        self._topic_schema_ids: dict[str, int] = {}
         _ensure_schema_registry_host_bypasses_proxy(schema_registry_url)
 
     def prepare(self) -> None:
@@ -73,7 +83,31 @@ class SchemaRegistrySerializerRegistry:
                     message_name=schema.message_name,
                     schema_registry=self.schema_registry_url,
                 )
+
+        # After warmup every schema is registered in the Schema Registry.
+        # Populate the schema_id cache and prime the Rust encoder if available.
+        if _RUST_ENCODER_AVAILABLE and self.schema_format == "avro":
+            self._register_rust_schemas()
+
         self._started = True
+
+    def _register_rust_schemas(self) -> None:
+        """Fetch schema IDs from the registry and register each with the Rust encoder."""
+        for topic, schema in self.topic_schemas.items():
+            entry = self._serializers.get(topic, {})
+            client = entry.get("client")
+            avro_schema = entry.get("avro_schema")
+            if client is None or avro_schema is None:
+                continue
+            try:
+                subject = f"{topic}-value"
+                schema_id = client.get_latest_version(subject).schema_id
+                self._topic_schema_ids[topic] = schema_id
+                field_specs = [(f.name, f.scalar_type, f.repeated) for f in schema.fields]
+                _chainlake_avro.register_schema(schema_id, avro_schema, field_specs)
+            except Exception:
+                # Non-fatal: this topic falls back to Python encoding
+                pass
 
     def serialize(self, topic: str, row: dict) -> bytes:
         entry = self._serializers.get(topic)
@@ -154,6 +188,7 @@ class SchemaRegistrySerializerRegistry:
             "avro_schema": avro_schema,
             "serializer": serializer,
             "deserializer": deserializer,
+            "client": client,
         }
 
     def _schema_registry_conf(self) -> dict:
@@ -174,6 +209,36 @@ class SchemaRegistrySerializerRegistry:
         if self.schema_format == "protobuf":
             return build_message_class(schema)()
         return {}
+
+    @property
+    def rust_encoder_available(self) -> bool:
+        """True when the chainlake_avro Rust extension is loaded and has registered schemas."""
+        return _RUST_ENCODER_AVAILABLE and bool(self._topic_schema_ids)
+
+    def encode_batch_many(self, topic_row_pairs: list) -> list:
+        """Encode a batch of (topic, row) pairs using Rust when schema_id is known.
+
+        Groups rows by topic, calls chainlake_avro.encode_batch per group (GIL is
+        released inside that call for parallel rayon encoding), then reassembles in
+        original order. Falls back to self.serialize() for any topic without a
+        cached schema_id (e.g. if the registry query failed during start())."""
+        groups: dict[str, list] = defaultdict(list)
+        for i, (topic, row) in enumerate(topic_row_pairs):
+            groups[topic].append((i, row))
+
+        results: list = [None] * len(topic_row_pairs)
+        for topic, indexed_rows in groups.items():
+            schema_id = self._topic_schema_ids.get(topic)
+            if schema_id is None:
+                for orig_i, row in indexed_rows:
+                    results[orig_i] = self.serialize(topic, row)
+                continue
+            rows = [row for _, row in indexed_rows]
+            encoded = _chainlake_avro.encode_batch(schema_id, rows)
+            for (orig_i, _), payload in zip(indexed_rows, encoded):
+                results[orig_i] = payload
+
+        return results
 
     def _normalize_record(self, schema: EntitySchema, row: dict) -> dict:
         normalized: dict[str, object] = {}
