@@ -57,9 +57,11 @@ jobs:
             --header "CF-Access-Client-Secret: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}"
             --auth-token "${{ secrets.ARGOCD_AUTH_TOKEN }}"
           )
-          # Terminate any in-progress sync before setting the new image override,
-          # to avoid "another operation is already in progress" from a previous run.
-          argocd app terminate-op rpcstream "${ARGOCD_COMMON[@]}" || true
+          # Wait for any in-flight sync to finish before setting the new image
+          # override. Using --operation (not terminate-op) so we don't disrupt
+          # a valid sync that's still converging. selfHeal can re-trigger between
+          # terminate-op and app set, making terminate-op a race; wait is safer.
+          argocd app wait rpcstream "${ARGOCD_COMMON[@]}" --operation --timeout 120 || true
           argocd app set rpcstream "${ARGOCD_COMMON[@]}" \
             --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
           argocd app sync rpcstream "${ARGOCD_COMMON[@]}" --async
@@ -67,7 +69,7 @@ jobs:
           # in chainlake-infra) is a separate ArgoCD Application from `rpcstream`, so it
           # needs its own image override -- otherwise it stays pinned to the
           # unpublished `:latest` tag in git and every run ErrImagePulls.
-          argocd app terminate-op rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" || true
+          argocd app wait rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" --operation --timeout 120 || true
           argocd app set rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" \
             --kustomize-image "chainlake-rpcstream=${{ steps.meta.outputs.tags }}"
           argocd app sync rpcstream-dlq-replay "${ARGOCD_COMMON[@]}" --async
