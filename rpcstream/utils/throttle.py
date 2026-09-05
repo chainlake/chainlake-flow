@@ -31,11 +31,13 @@ class ThrottledLogger:
 
         last_emit, suppressed, last_summary = bucket
         if suppressed > 0 and now - last_summary >= self._summary_interval:
-            # Emit summary at the same level as the suppressed messages.
-            # Hardcoding "warn" turned routine debug/info throttling (e.g.
-            # kafka.delivery_success suppressed 99K times) into false alarms.
+            # Always emit at DEBUG: the summary is meta-info about log
+            # throttling, not pipeline state. Emitting at the original
+            # level (even info) pollutes operator logs with routine noise
+            # (e.g. "engine.processed suppressed: 55" every 10 seconds).
+            # Lower logLevel to debug to see these during investigations.
             self._wrapped._log(
-                level,
+                "debug",
                 "log.throttled_summary",
                 throttled_level=level,
                 throttled_message=message,
