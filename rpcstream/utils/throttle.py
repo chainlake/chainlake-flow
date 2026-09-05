@@ -31,13 +31,11 @@ class ThrottledLogger:
 
         last_emit, suppressed, last_summary = bucket
         if suppressed > 0 and now - last_summary >= self._summary_interval:
-            # Bypass throttling for the summary line itself. `level`/`message`
-            # would collide with _log's own positional params of the same
-            # name (TypeError: got multiple values for argument 'message'),
-            # so the throttled entry's own level/message are passed under
-            # different keys.
+            # Emit summary at the same level as the suppressed messages.
+            # Hardcoding "warn" turned routine debug/info throttling (e.g.
+            # kafka.delivery_success suppressed 99K times) into false alarms.
             self._wrapped._log(
-                "warn",
+                level,
                 "log.throttled_summary",
                 throttled_level=level,
                 throttled_message=message,
