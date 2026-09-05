@@ -4,17 +4,17 @@ DerivedEnvelopeFetcher implements both the CursorSource and Fetcher protocols
 so it can be passed as both cursor_source and engine.fetcher to IngestionEngine.
 
 Flow per block:
-  next_cursor() → asyncio.to_thread(_poll_and_parse_message) →
-                  cache parsed payload → return block_number
-  fetch(cursor) → retrieve cached payload → {"block_envelope": (payload, meta)}
-  DerivedEnvelopeProcessor.process() → {"block", "transaction", "receipt", "log"}
-  EvmDecoder.decode() → adds "token_transfer"
-  EvmEnricher.enrich() → receipt fields on transactions, block context on logs
+  _prefetch_loop() polls Kafka in background, enqueues ("ok", block_number, payload)
+  next_cursor() reads from _prefetch_q (no thread overhead) -> returns block_number
+  fetch(cursor) -> retrieve cached payload -> {"block_envelope": (payload, meta)}
+  DerivedEnvelopeProcessor.process() -> {"block", "transaction", "receipt", "log"}
+  EvmDecoder.decode() -> adds "token_transfer"
+  EvmEnricher.enrich() -> receipt fields on transactions, block context on logs
 
 Parsing path (fast, when chainlake_avro Rust extension is available):
   _poll_and_parse_message calls chainlake_avro.parse_block_envelope(str, str)
-  which runs serde_json inside py.allow_threads() — GIL released, true parallel
-  execution across all engine worker threads (~1–2 ms/block vs ~300 ms Python).
+  which runs serde_json inside py.allow_threads() -- GIL released, true parallel
+  execution across all engine worker threads (~1-2 ms/block vs ~300 ms Python).
 
 Fallback path (if Rust extension unavailable):
   json.loads inside thread + Python parse_blocks/parse_transactions/parse_receipts
@@ -42,7 +42,7 @@ except ImportError:
     _RUST_PARSER = False
     _RUST_ENCODE = False
 
-# entity → (schema_id: int, topic: str) — set by derived_runtime after schema
+# entity -> (schema_id: int, topic: str) -- set by derived_runtime after schema
 # registry warmup via set_rust_encode_config(). None means encode path inactive.
 _RUST_ENCODE_CONFIG: dict | None = None
 
@@ -85,7 +85,7 @@ def _encode_block_envelope_sync(
     Called via asyncio.to_thread from DerivedEnvelopeFetcher.fetch() so that
     each engine worker encodes its own block concurrently. The Rust function
     releases the GIL inside allow_threads(), so 8 workers encode on 8 OS
-    threads in true parallel — throughput scales with CPU cores.
+    threads in true parallel -- throughput scales with CPU cores.
     """
     return _chainlake_avro.parse_and_encode_block_envelope(
         block_json_str, receipts_json_str, config
@@ -98,23 +98,23 @@ def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
     Runs in a thread pool (via asyncio.to_thread). No asyncio primitives used.
 
     For the Rust encode path (_RUST_ENCODE), this function is deliberately
-    lightweight — it only polls Kafka and parses the outer envelope JSON.
+    lightweight -- it only polls Kafka and parses the outer envelope JSON.
     The heavy work (JSON parse + Avro encode) is deferred to fetch() so that
     each of the 8 engine workers encodes its own block concurrently instead
     of the single producer coroutine serializing all encodes.
 
     Return tags:
-      ("none",)                                           — poll timeout
-      ("eof",)                                            — PARTITION_EOF
-      ("kafka_error", err)                                — other Kafka error
-      ("parse_error", offset, exc)                        — outer JSON failed
-      ("missing_fields", block_number, has_b, has_r)     — envelope incomplete
-      ("json_error", block_number, exc)                   — inner parse failed
+      ("none",)                                           -- poll timeout
+      ("eof",)                                            -- PARTITION_EOF
+      ("kafka_error", err)                                -- other Kafka error
+      ("parse_error", offset, exc)                        -- outer JSON failed
+      ("missing_fields", block_number, has_b, has_r)     -- envelope incomplete
+      ("json_error", block_number, exc)                   -- inner parse failed
       ("ok", block_number, payload)
-          payload is (block_json_str, receipts_json_str)  — Rust encode path
+          payload is (block_json_str, receipts_json_str)  -- Rust encode path
                                                             (encode deferred to fetch)
-          payload is dict {"block","transaction",...}      — Rust parse path
-          payload is (block_json_dict, receipts_list)      — Python fallback
+          payload is dict {"block","transaction",...}      -- Rust parse path
+          payload is (block_json_dict, receipts_list)      -- Python fallback
     """
     msg = consumer.poll(timeout)
     if msg is None:
@@ -157,7 +157,7 @@ def _poll_and_parse_message(consumer: Consumer, timeout: float) -> tuple:
     if _RUST_ENCODE and _RUST_ENCODE_CONFIG:
         # Return raw JSON strings. Encoding is deferred to fetch() so each
         # engine worker encodes its own block concurrently in a thread pool
-        # (8 workers × GIL-free Rust = true parallel encode on all cores).
+        # (8 workers x GIL-free Rust = true parallel encode on all cores).
         return ("ok", block_number, (block_json_str, receipts_json_str))
 
     if _RUST_PARSER:
@@ -179,11 +179,11 @@ class DerivedEnvelopeProcessor:
     """Parses a raw_envelope payload into all EVM entity rows.
 
     Three payload forms:
-    • parse_and_encode_block_envelope (Rust encode path): dict whose values are
-      list[(key_bytes, avro_bytes)] — pre-encoded Avro, returned as-is.
-    • parse_block_envelope (Rust parser path): dict {"block", "transaction",
-      "receipt", "log", "token_transfer"} of Row dicts — returned as-is.
-    • Python fallback: tuple (block_json_dict, receipts_list) — parsed here.
+    - parse_and_encode_block_envelope (Rust encode path): dict whose values are
+      list[(key_bytes, avro_bytes)] -- pre-encoded Avro, returned as-is.
+    - parse_block_envelope (Rust parser path): dict {"block", "transaction",
+      "receipt", "log", "token_transfer"} of Row dicts -- returned as-is.
+    - Python fallback: tuple (block_json_dict, receipts_list) -- parsed here.
     """
 
     def process(self, cursor: int, value) -> dict:
@@ -210,11 +210,15 @@ class DerivedEnvelopeFetcher:
         engine = IngestionEngine(fetcher=source, ...)
         await engine.run_stream(source, ...)
 
-    next_cursor() offloads poll + json.loads to a thread via asyncio.to_thread,
-    freeing the event loop during the JSON decode of large raw_envelope messages.
-    fetch() is called by engine workers (potentially concurrent) and retrieves
-    the already-decoded payload from _pending; dict access is safe because all
-    callers share the same event loop (no true concurrency).
+    A background asyncio Task (_prefetch_loop) runs consumer.poll() continuously
+    in a thread pool and enqueues valid ("ok") messages into _prefetch_q.
+    next_cursor() reads from _prefetch_q without thread overhead, so the engine
+    producer coroutine never blocks waiting for a Kafka poll round-trip.
+
+    With raw_envelope partitioned across N partitions, librdkafka's internal
+    fetch thread pre-fetches from all N partitions in parallel, so consumer.poll()
+    returns with near-zero latency when the topic has a backlog -- _prefetch_loop
+    keeps _prefetch_q full and next_cursor() drains it at full engine speed.
     """
 
     def __init__(
@@ -227,6 +231,7 @@ class DerivedEnvelopeFetcher:
         to_block: int | None = None,
         logger=None,
         poll_timeout_sec: float = 1.0,
+        prefetch_size: int = 32,
     ):
         consumer_config = _build_consumer_config(kafka_config, group_id)
         self._consumer = Consumer(consumer_config)
@@ -236,12 +241,18 @@ class DerivedEnvelopeFetcher:
         self._logger = logger
         self._poll_timeout_sec = poll_timeout_sec
         self._subscribed = False
-        # block_number → (payload, RpcTaskMeta)
+        # block_number -> (payload, RpcTaskMeta)
         # payload is (block_json_str, receipts_json_str) strings (Rust encode path,
         # encode deferred to fetch()), dict {"block",...} (Rust parse path), or
         # tuple (block_json_dict, receipts_list) (Python fallback).
-        # Bounded by engine.sink_inflight_cursors (≤ max_inflight entries).
+        # Bounded by engine.sink_inflight_cursors (<= max_inflight entries).
         self._pending: dict[int, tuple] = {}
+        # Prefetch queue: _prefetch_loop enqueues ("ok", block_number, payload)
+        # tuples so next_cursor() never blocks on a Kafka poll round-trip.
+        # maxsize caps memory: each entry is ~0.5-1MB (raw JSON strings).
+        self._prefetch_q: asyncio.Queue[tuple] = asyncio.Queue(maxsize=prefetch_size)
+        self._prefetch_task: asyncio.Task | None = None
+        self._stopped = False
         # IngestionEngine inspects these via getattr() for lag / circuit-breaker.
         self.scheduler = None
         self.tracker = None
@@ -257,17 +268,14 @@ class DerivedEnvelopeFetcher:
                 to_block=self._to_block,
             )
 
-    async def next_cursor(self) -> int | None:
-        """Consume the next in-range message; return its block_number as cursor.
+    async def _prefetch_loop(self) -> None:
+        """Continuously poll Kafka and enqueue valid blocks into _prefetch_q.
 
-        Poll + json.loads run in a thread pool to avoid blocking the event loop
-        during the expensive decode of large raw_envelope payloads.
-        Returns None when to_block is reached (bounded/backfill mode ends).
+        Handles all error/skip cases inline so next_cursor() only ever sees
+        ("ok", block_number, payload) tuples. Blocks on _prefetch_q.put() when
+        the queue is full, providing natural backpressure against the engine.
         """
-        if not self._subscribed:
-            self._subscribe()
-
-        while True:
+        while not self._stopped:
             result = await asyncio.to_thread(
                 _poll_and_parse_message, self._consumer, self._poll_timeout_sec
             )
@@ -322,12 +330,29 @@ class DerivedEnvelopeFetcher:
                     )
                 continue
 
-            # kind == "ok"
+            # kind == "ok" -- enqueue; blocks here if engine is processing slowly.
+            await self._prefetch_q.put(result)
+
+    async def next_cursor(self) -> int | None:
+        """Return the next in-range block_number without blocking on Kafka I/O.
+
+        Starts _prefetch_loop on first call. Reads pre-fetched ("ok", ...) tuples
+        from _prefetch_q; skips blocks outside [from_block, to_block].
+        Returns None when to_block is reached (bounded/backfill mode ends).
+        """
+        if not self._subscribed:
+            self._subscribe()
+        if self._prefetch_task is None:
+            self._prefetch_task = asyncio.create_task(self._prefetch_loop())
+
+        while True:
+            result = await self._prefetch_q.get()
             _, block_number, payload = result
 
             if self._from_block is not None and block_number < self._from_block:
                 continue
             if self._to_block is not None and block_number > self._to_block:
+                self._stopped = True
                 try:
                     self._consumer.commit(asynchronous=False)
                 except Exception:
@@ -353,7 +378,7 @@ class DerivedEnvelopeFetcher:
 
         For the Rust encode path, payload is (block_json_str, receipts_json_str)
         raw strings. Encoding runs here via asyncio.to_thread so that the 8
-        engine workers each encode their own block concurrently — GIL is released
+        engine workers each encode their own block concurrently -- GIL is released
         inside Rust's allow_threads(), giving true parallelism on all CPU cores.
 
         next_cursor() always populates _pending before the engine worker calls
@@ -366,7 +391,7 @@ class DerivedEnvelopeFetcher:
 
         # Rust encode path: payload is (block_json_str: str, receipts_json_str: str).
         # Distinguished from Python fallback (block_json_dict, receipts_list) by
-        # the element type — raw strings vs parsed Python objects.
+        # the element type -- raw strings vs parsed Python objects.
         if (
             _RUST_ENCODE
             and _RUST_ENCODE_CONFIG is not None
@@ -388,6 +413,9 @@ class DerivedEnvelopeFetcher:
         return {"block_envelope": (payload, meta)}
 
     def close(self) -> None:
+        self._stopped = True
+        if self._prefetch_task is not None:
+            self._prefetch_task.cancel()
         try:
             self._consumer.commit(asynchronous=False)
         except Exception:
