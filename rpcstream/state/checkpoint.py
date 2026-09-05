@@ -382,7 +382,7 @@ class KafkaWatermarkStateReader:
             self._serializer_registry.prepare()
             self._deserializer = self._serializer_registry.build_deserializer(self.topic)
 
-    def load(self) -> dict[int, WatermarkStateRecord]:
+    def load(self, committed_cursor: int | None = None) -> dict[int, WatermarkStateRecord]:
         from confluent_kafka import KafkaError, TopicPartition
 
         if self._consumer is None:
@@ -425,6 +425,14 @@ class KafkaWatermarkStateReader:
             elif position >= high:
                 seen_eof.add(tp.partition)
 
+        # Only the records actually read in this call — the delta.
+        # On the first call _records_by_key is empty so every record is new
+        # (old is None), and newly_read == the full bootstrap snapshot.
+        # On subsequent calls only truly new/changed records end up here, so
+        # merge_external_state_records processes a tiny delta instead of the
+        # ever-growing full set, eliminating the O(n) sort + dict-build per tick.
+        newly_read: dict[int, WatermarkStateRecord] = {}
+
         while len(seen_eof) < len(self._assigned_partitions):
             message = consumer.poll(1.0)
             if message is None:
@@ -458,10 +466,7 @@ class KafkaWatermarkStateReader:
                             key=self.identity.key,
                             error=str(exc),
                         )
-                    return {
-                        record.cursor: record
-                        for record in self._records_by_key.values()
-                    }
+                    return newly_read
                 raise
             record = WatermarkStateRecord(
                 cursor=int(value["cursor"]),
@@ -470,17 +475,32 @@ class KafkaWatermarkStateReader:
                 identity=self.identity,
                 error=value.get("error"),
             )
+            old = self._records_by_key.get(key)
             self._records_by_key[key] = record
+            if old is None or old.updated_at_ms != record.updated_at_ms:
+                newly_read[record.cursor] = record
 
-        records = {record.cursor: record for record in self._records_by_key.values()}
-        if records and self.logger:
-                self.logger.info(
-                    "watermark.external_state_loaded",
-                    topic=self.topic,
-                    key=self.identity.key,
-                    cursor_count=len(records),
-                )
-        return records
+        # Prune _records_by_key for committed cursors — those entries are
+        # unreachable by future merge_external_state_records calls (the manager
+        # skips cursor <= self.cursor), so keeping them wastes memory. This
+        # keeps the dict bounded to the inflight window rather than all-time.
+        if committed_cursor is not None:
+            keys_to_delete = [
+                k for k, v in self._records_by_key.items()
+                if v.cursor <= committed_cursor
+            ]
+            for k in keys_to_delete:
+                del self._records_by_key[k]
+
+        if newly_read and self.logger:
+            self.logger.info(
+                "watermark.external_state_loaded",
+                topic=self.topic,
+                key=self.identity.key,
+                cursor_count=len(self._records_by_key),
+                new_records=len(newly_read),
+            )
+        return newly_read
 
     def close(self) -> None:
         if self._consumer is not None:
@@ -690,6 +710,17 @@ class WatermarkManager:
             self._dirty = True
             if self.flush_on_advance and advanced >= self.commit_batch_size:
                 self._flush_event.set()
+            # Prune _state_versions for committed cursors — the version
+            # deduplication check in merge_external_state_records already
+            # skips cursor <= self.cursor before it reaches _state_versions,
+            # so these entries are dead weight. Without pruning this dict
+            # grows at block-rate indefinitely, causing OOMKill over hours.
+            if self.cursor is not None and self._state_versions:
+                committed = self.cursor
+                self._state_versions = {
+                    c: v for c, v in self._state_versions.items()
+                    if c > committed
+                }
         return advanced_cursor
 
     async def mark_failed(self, cursor: int, error: str | None = None) -> None:
@@ -800,14 +831,18 @@ class WatermarkManager:
     async def _refresh_loop(self) -> None:
         while self._running:
             try:
-                state_records = await asyncio.to_thread(self.state_reader.load)
-                advanced_watermark = await self.merge_external_state_records(state_records)
-                if advanced_watermark is not None and self.logger is not None:
-                    self.logger.info(
-                        "watermark.external_state_merged",
-                        cursor=advanced_watermark,
-                        topic=self.state_reader.topic,
-                    )
+                committed = self.cursor
+                state_records = await asyncio.to_thread(
+                    self.state_reader.load, committed
+                )
+                if state_records:
+                    advanced_watermark = await self.merge_external_state_records(state_records)
+                    if advanced_watermark is not None and self.logger is not None:
+                        self.logger.info(
+                            "watermark.external_state_merged",
+                            cursor=advanced_watermark,
+                            topic=self.state_reader.topic,
+                        )
             except Exception as exc:
                 if self.logger is not None:
                     self.logger.warn(

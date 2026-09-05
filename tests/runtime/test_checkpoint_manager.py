@@ -634,7 +634,12 @@ def test_kafka_watermark_state_reader_load_is_incremental(monkeypatch):
     )
 
     second = reader.load()
-    assert set(second) == {1, 2}
+    # load() now returns only the delta — records newly read in this call.
+    # Cursor 1 was already returned in `first`; cursor 2 is the only new one.
+    # The caller (WatermarkManager._refresh_loop) accumulates state across
+    # calls via merge_external_state_records, so it doesn't need the full
+    # snapshot every tick — only the delta.
+    assert set(second) == {2}
     # Still the same Consumer: no second construction, and the fake's
     # internal position only advances forward -- if load() had re-scanned
     # from the start, poll() would have to be called for offset 0 again,
