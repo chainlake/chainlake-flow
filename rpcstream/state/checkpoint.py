@@ -493,7 +493,7 @@ class KafkaWatermarkStateReader:
                 del self._records_by_key[k]
 
         if newly_read and self.logger:
-            self.logger.info(
+            self.logger.debug(
                 "watermark.external_state_loaded",
                 topic=self.topic,
                 key=self.identity.key,
