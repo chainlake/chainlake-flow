@@ -44,40 +44,65 @@ DEFILLAMA_BATCH = 100
 RPC_FALLBACK_CAP = 50
 
 
-def _get(url: str, timeout: int = 30) -> bytes:
+def _get(url: str, timeout: int = 30, retries: int = 3) -> bytes:
     req = urllib.request.Request(
         url, headers={"User-Agent": "chainlake-dim-token-sync/1.0"}
     )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            wait = 5 * (attempt + 1)
+            print(f"  GET {url[:60]}... failed ({e}), retry in {wait}s")
+            time.sleep(wait)
 
 
-def _ch_query(sql: str) -> list[dict]:
+def _ch_query(sql: str, retries: int = 5) -> list[dict]:
     params = urllib.parse.urlencode({"query": sql + " FORMAT JSON"})
     req = urllib.request.Request(f"{CH_URL}/?{params}")
     req.add_header("X-ClickHouse-User", CH_USER)
     req.add_header("X-ClickHouse-Key", CH_PASS)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.loads(r.read())["data"]
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read())["data"]
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            wait = 10 * (attempt + 1)
+            print(f"  CH query failed ({e}), retry in {wait}s")
+            time.sleep(wait)
 
 
-def _ch_insert(table: str, rows: list[dict]) -> None:
+def _ch_insert(table: str, rows: list[dict], retries: int = 5) -> None:
     if not rows:
         return
     body = "\n".join(json.dumps(r, ensure_ascii=False) for r in rows).encode()
     params = urllib.parse.urlencode(
         {"query": f"INSERT INTO {table} FORMAT JSONEachRow"}
     )
-    req = urllib.request.Request(
-        f"{CH_URL}/?{params}", data=body, method="POST"
-    )
-    req.add_header("X-ClickHouse-User", CH_USER)
-    req.add_header("X-ClickHouse-Key", CH_PASS)
-    req.add_header("Content-Type", "application/x-ndjson")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        resp = r.read()
-    if resp and b"Exception" in resp:
-        raise RuntimeError(f"ClickHouse INSERT error: {resp[:500]}")
+    for attempt in range(retries):
+        req = urllib.request.Request(
+            f"{CH_URL}/?{params}", data=body, method="POST"
+        )
+        req.add_header("X-ClickHouse-User", CH_USER)
+        req.add_header("X-ClickHouse-Key", CH_PASS)
+        req.add_header("Content-Type", "application/x-ndjson")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                resp = r.read()
+            if resp and b"Exception" in resp:
+                raise RuntimeError(f"ClickHouse INSERT error: {resp[:500]}")
+            return
+        except Exception as e:
+            if attempt == retries - 1:
+                raise
+            wait = 10 * (attempt + 1)
+            print(f"  CH insert {table} failed ({e}), retry in {wait}s")
+            time.sleep(wait)
 
 
 def _abi_str(hex_result: str) -> str:
