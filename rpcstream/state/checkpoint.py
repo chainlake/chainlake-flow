@@ -216,64 +216,100 @@ class KafkaCheckpointReader:
             if not partitions:
                 return None
 
-            low_high = {}
-            seen_eof = set()
+            # Assign first; get_watermark_offsets() after assign() settles
+            # the internal fetch state so subsequent seek() calls succeed.
+            consumer.assign(partitions)
+
+            low_high: dict[int, tuple[int, int]] = {}
+            empty_partitions: set[int] = set()
+            tail_seeks: dict[int, int] = {}  # partition → tail scan start offset
+
+            # The most recent checkpoint record for our key is always near the
+            # end of the topic (each flush appends one record). Scanning only
+            # the last TAIL_LOOKBACK offsets avoids re-reading millions of
+            # pre-compaction records — 200k covers ~5.5h of 10 rec/s writes.
+            TAIL_LOOKBACK = 200_000
             for tp in partitions:
                 low, high = consumer.get_watermark_offsets(tp, timeout=10)
                 low_high[tp.partition] = (low, high)
                 if high <= low:
-                    seen_eof.add(tp.partition)
+                    empty_partitions.add(tp.partition)
+                else:
+                    start = max(low, high - TAIL_LOOKBACK)
+                    tail_seeks[tp.partition] = start
+                    consumer.seek(TopicPartition(self.topic, tp.partition, start))
 
-            if len(seen_eof) == len(partitions):
+            if len(empty_partitions) == len(partitions):
                 return None
 
-            consumer.assign(partitions)
+            def _scan(start_from_low: bool = False) -> CheckpointRecord | None:
+                if start_from_low:
+                    for tp in partitions:
+                        if tp.partition not in empty_partitions:
+                            low = low_high[tp.partition][0]
+                            consumer.seek(TopicPartition(self.topic, tp.partition, low))
+                seen_eof = set(empty_partitions)
+                found: CheckpointRecord | None = None
+                while len(seen_eof) < len(partitions):
+                    messages = consumer.consume(num_messages=500, timeout=1.0)
+                    for message in messages:
+                        if message.error():
+                            if message.error().code() == KafkaError._PARTITION_EOF:
+                                seen_eof.add(message.partition())
+                                continue
+                            raise RuntimeError(message.error())
 
-            while len(seen_eof) < len(partitions):
-                # consume() returns up to 500 messages per call instead of
-                # one. This turns ~1.2M poll() round-trips (each ~35 µs of
-                # Python overhead) into ~2400 consume() calls -- cutting the
-                # cold-start checkpoint scan from ~26s down to under 1s.
-                messages = consumer.consume(num_messages=500, timeout=1.0)
-                for message in messages:
-                    if message.error():
-                        if message.error().code() == KafkaError._PARTITION_EOF:
+                        high = low_high.get(message.partition(), (0, 0))[1]
+                        if message.offset() >= high - 1:
                             seen_eof.add(message.partition())
+
+                        if message.key() is None or message.value() is None:
                             continue
-                        raise RuntimeError(message.error())
+                        if message.key().decode("utf-8") != self.identity.key:
+                            continue
 
-                    high = low_high.get(message.partition(), (0, 0))[1]
-                    if message.offset() >= high - 1:
-                        seen_eof.add(message.partition())
+                        try:
+                            value = self._decode_record(message.value())
+                        except Exception as exc:
+                            if _is_missing_schema_error(exc):
+                                self.schema_missing = True
+                                if self.logger:
+                                    self.logger.warn(
+                                        "checkpoint.schema_missing",
+                                        topic=self.topic,
+                                        key=self.identity.key,
+                                        error=str(exc),
+                                    )
+                                return None
+                            raise
+                        snapshot = value.get("cursor_state_snapshot") or None
+                        found = CheckpointRecord(
+                            cursor=int(value["cursor"]),
+                            status=value.get("status", "running"),
+                            updated_at_ms=int(value.get("updated_at_ms", 0)),
+                            identity=self.identity,
+                            error=value.get("error"),
+                            cursor_state_snapshot=snapshot,
+                        )
+                return found
 
-                    if message.key() is None or message.value() is None:
-                        continue
-                    if message.key().decode("utf-8") != self.identity.key:
-                        continue
+            latest_record = _scan()
 
-                    try:
-                        value = self._decode_record(message.value())
-                    except Exception as exc:
-                        if _is_missing_schema_error(exc):
-                            self.schema_missing = True
-                            if self.logger:
-                                self.logger.warn(
-                                    "checkpoint.schema_missing",
-                                    topic=self.topic,
-                                    key=self.identity.key,
-                                    error=str(exc),
-                                )
-                            return None
-                        raise
-                    snapshot = value.get("cursor_state_snapshot") or None
-                    latest_record = CheckpointRecord(
-                        cursor=int(value["cursor"]),
-                        status=value.get("status", "running"),
-                        updated_at_ms=int(value.get("updated_at_ms", 0)),
-                        identity=self.identity,
-                        error=value.get("error"),
-                        cursor_state_snapshot=snapshot,
+            # Tail miss: our key is older than the tail window (rare — happens
+            # when the pipeline hasn't checkpointed since before TAIL_LOOKBACK
+            # records were written by other pipelines on the same topic).
+            # Fall back to a full scan from offset 0.
+            if latest_record is None and any(
+                s > low_high[p][0] for p, s in tail_seeks.items()
+            ):
+                if self.logger:
+                    self.logger.debug(
+                        "checkpoint.tail_miss_full_scan",
+                        topic=self.topic,
+                        key=self.identity.key,
                     )
+                latest_record = _scan(start_from_low=True)
+
         finally:
             consumer.close()
 
