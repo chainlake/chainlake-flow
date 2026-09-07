@@ -45,6 +45,12 @@ class UnifiedDlqKafkaClient:
                 "auto.offset.reset": auto_offset_reset,
                 "enable.auto.commit": False,
                 "isolation.level": "read_committed",
+                # Limit librdkafka's internal pre-fetch buffer. The default
+                # queued.max.messages.kbytes is 65536 (64 MB), which lets
+                # librdkafka pre-fetch the entire DLQ backlog into memory even
+                # when the consumer is processing records one at a time.
+                # 2 MB is plenty for a serial retry loop polling 1 msg/s.
+                "queued.max.messages.kbytes": 2048,
             }
         )
         self._producer = Producer(_kafka_client_config(producer_config))

@@ -198,6 +198,12 @@ async def run_derived_pipeline(
             from_block=effective_from_block,
             to_block=to_block,
             logger=logger,
+            # Cap Kafka prefetch to max_inflight so _prefetch_q + _pending stay
+            # proportional to the worker pool. With engine queue = max_inflight*2
+            # and prefetch_size = max_inflight, total _pending is bounded to
+            # ~3 × max_inflight entries (~60 for the default 20-worker pool)
+            # instead of ~1020, capping raw JSON buffering to ~60 MB vs ~1 GB.
+            prefetch_size=runtime.scheduler.max_inflight,
         )
 
         # Derived pipeline uses a single internal entity ("block_envelope") to

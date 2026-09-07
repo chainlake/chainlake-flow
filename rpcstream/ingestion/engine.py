@@ -137,7 +137,19 @@ class IngestionEngine:
             await self.watermark_manager.start()
             checkpoint_started = True
 
-        queue = asyncio.Queue(maxsize=1 if self.eos_enabled else 1000)
+        # Queue depth: just enough to keep all workers busy without buffering
+        # large raw payloads (e.g. derived's ~1 MB/block JSON strings held in
+        # DerivedEnvelopeFetcher._pending for every queued cursor). A depth of
+        # worker_pool_size * 2 lets the producer stay one "lap" ahead while
+        # bounding _pending to ~3 × pool_size entries instead of the old 1000+,
+        # which caused ~1 GB of raw JSON accumulation during backfill.
+        if self.eos_enabled:
+            _queue_maxsize = 1
+        elif self.concurrency == 0:
+            _queue_maxsize = self.max_inflight * 2
+        else:
+            _queue_maxsize = max(1, self.concurrency) * 2
+        queue = asyncio.Queue(maxsize=_queue_maxsize)
         # Cap how many cursors may be simultaneously in the sink pipeline
         # (fully enqueued, delivery not yet confirmed). See __init__ comment.
         # EOS mode is strict-serial anyway; use the configured limit otherwise.
