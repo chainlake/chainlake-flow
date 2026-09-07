@@ -216,10 +216,10 @@ class KafkaCheckpointReader:
             if not partitions:
                 return None
 
-            # Assign first; get_watermark_offsets() after assign() settles
-            # the internal fetch state so subsequent seek() calls succeed.
-            consumer.assign(partitions)
-
+            # Fetch watermark offsets BEFORE assign() — no assignment needed
+            # for get_watermark_offsets(); doing it before avoids the librdkafka
+            # _STATE (-172) error that occurs when seek() is called too soon
+            # after assign() before the fetch state has settled.
             low_high: dict[int, tuple[int, int]] = {}
             empty_partitions: set[int] = set()
             tail_seeks: dict[int, int] = {}  # partition → tail scan start offset
@@ -235,19 +235,30 @@ class KafkaCheckpointReader:
                 if high <= low:
                     empty_partitions.add(tp.partition)
                 else:
-                    start = max(low, high - TAIL_LOOKBACK)
-                    tail_seeks[tp.partition] = start
-                    consumer.seek(TopicPartition(self.topic, tp.partition, start))
+                    tail_seeks[tp.partition] = max(low, high - TAIL_LOOKBACK)
 
             if len(empty_partitions) == len(partitions):
                 return None
 
+            # Embed the tail offset directly in the TopicPartition objects
+            # passed to assign(). librdkafka uses the offset field as the
+            # initial fetch position when it is non-negative, so this avoids
+            # a post-assign seek() and the _STATE error it can trigger.
+            consumer.assign([
+                TopicPartition(
+                    self.topic, p,
+                    tail_seeks.get(p, low_high[p][0]),  # tail start or low for empty
+                )
+                for p in [tp.partition for tp in partitions]
+            ])
+
             def _scan(start_from_low: bool = False) -> CheckpointRecord | None:
                 if start_from_low:
-                    for tp in partitions:
-                        if tp.partition not in empty_partitions:
-                            low = low_high[tp.partition][0]
-                            consumer.seek(TopicPartition(self.topic, tp.partition, low))
+                    # Re-assign from low watermark to avoid seek() _STATE errors.
+                    consumer.assign([
+                        TopicPartition(self.topic, tp.partition, low_high[tp.partition][0])
+                        for tp in partitions
+                    ])
                 seen_eof = set(empty_partitions)
                 found: CheckpointRecord | None = None
                 while len(seen_eof) < len(partitions):
