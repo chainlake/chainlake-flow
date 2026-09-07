@@ -565,9 +565,17 @@ class KafkaWatermarkStateReader:
 
         consumer.assign(partitions)
         for tp in partitions:
-            target: int | None = positions.get(tp.partition) if positions is not None else None
-            if target is None:
-                _, high = consumer.get_watermark_offsets(tp, timeout=10)
+            # Always call get_watermark_offsets() — librdkafka requires at
+            # least one broker round-trip after assign() to settle the fetch
+            # state before seek() is valid (skipping it causes _STATE errors).
+            # Also use the high watermark to clamp stored positions: if the
+            # topic was trimmed or re-created since the checkpoint, a stored
+            # offset > high would be invalid.
+            _, high = consumer.get_watermark_offsets(tp, timeout=10)
+            stored = positions.get(tp.partition) if positions is not None else None
+            if stored is not None and 0 <= stored <= high:
+                target = stored
+            else:
                 target = high if high > 0 else 0
             consumer.seek(TopicPartition(self.topic, tp.partition, target))
 
