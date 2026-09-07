@@ -279,6 +279,11 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
                 logger=logger,
             )
             state_records = await asyncio.to_thread(state_reader.load)
+            logger.info(
+                "watermark_state.loaded",
+                topic=runtime.checkpoint.watermark_state_topic,
+                record_count=len(state_records),
+            )
 
             if getattr(checkpoint_reader, "schema_missing", False) or getattr(
                 state_reader, "schema_missing", False
