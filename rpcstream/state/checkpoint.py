@@ -615,22 +615,23 @@ class KafkaWatermarkStateReader:
             consumer.close()
             return
 
-        consumer.assign(partitions)
+        # Compute target offsets BEFORE assign() then embed them in the
+        # TopicPartition objects. assign()-with-offset sets the initial fetch
+        # position directly without a separate seek() call, avoiding the
+        # librdkafka _STATE (-172) error that seek()-after-assign() triggers
+        # (even with a get_watermark_offsets() call in between — unreliable).
+        # Clamp stored positions to [0, high]: guards against topic recreation.
+        targets: list[TopicPartition] = []
         for tp in partitions:
-            # Always call get_watermark_offsets() — librdkafka requires at
-            # least one broker round-trip after assign() to settle the fetch
-            # state before seek() is valid (skipping it causes _STATE errors).
-            # Also use the high watermark to clamp stored positions: if the
-            # topic was trimmed or re-created since the checkpoint, a stored
-            # offset > high would be invalid.
             _, high = consumer.get_watermark_offsets(tp, timeout=10)
             stored = positions.get(tp.partition) if positions is not None else None
             if stored is not None and 0 <= stored <= high:
                 target = stored
             else:
                 target = high if high > 0 else 0
-            consumer.seek(TopicPartition(self.topic, tp.partition, target))
+            targets.append(TopicPartition(self.topic, tp.partition, target))
 
+        consumer.assign(targets)
         self._consumer = consumer
         self._assigned_partitions = partitions
 
