@@ -285,24 +285,29 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
                 else None
             )
             if snapshot:
-                # Fast path: inflight states are embedded in the checkpoint.
-                # Reconstructing from the snapshot avoids the O(N) full-topic
-                # scan of bsc.cursor_state (~42s for 1.6M msgs). fast_init()
-                # positions the consumer at EOF so _refresh_loop reads only
-                # new records from this point forward.
                 import json as _json
-                raw_states = _json.loads(snapshot)
-                state_records = {
-                    s["cursor"]: WatermarkStateRecord(
-                        cursor=s["cursor"],
-                        status=s["status"],
-                        updated_at_ms=s["updated_at_ms"],
-                        identity=checkpoint_identity,
-                        error=s.get("error"),
-                    )
-                    for s in raw_states
-                }
-                await asyncio.to_thread(state_reader.fast_init)
+                snapshot_data = _json.loads(snapshot)
+                if isinstance(snapshot_data, dict):
+                    # New format: consumer positions {partition_str: offset}.
+                    # Seek the state_reader consumer to these offsets so the
+                    # first _refresh_loop call reads only records written after
+                    # the checkpoint, skipping the full O(N) scan.
+                    positions = {int(k): int(v) for k, v in snapshot_data.items()}
+                    state_records = {}
+                    await asyncio.to_thread(state_reader.fast_init, positions)
+                else:
+                    # Legacy format: list of inflight state records.
+                    state_records = {
+                        s["cursor"]: WatermarkStateRecord(
+                            cursor=s["cursor"],
+                            status=s["status"],
+                            updated_at_ms=s["updated_at_ms"],
+                            identity=checkpoint_identity,
+                            error=s.get("error"),
+                        )
+                        for s in snapshot_data
+                    }
+                    await asyncio.to_thread(state_reader.fast_init)
                 logger.info(
                     "watermark_state.loaded_from_snapshot",
                     topic=runtime.checkpoint.watermark_state_topic,

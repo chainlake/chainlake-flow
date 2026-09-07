@@ -378,6 +378,10 @@ class KafkaWatermarkStateReader:
         self._consumer = None
         self._assigned_partitions = None
         self._records_by_key: dict[str, WatermarkStateRecord] = {}
+        # Written by load() (inside the worker thread) after each scan.
+        # Read by WatermarkManager._refresh_loop() (event loop) after to_thread()
+        # returns — the happens-before guarantee of to_thread() makes this safe.
+        self._last_consumer_positions: dict[int, int] = {}
 
         if self.schema_registry_url:
             self._serializer_registry = SchemaRegistrySerializerRegistry(
@@ -491,6 +495,20 @@ class KafkaWatermarkStateReader:
                 if old is None or old.updated_at_ms != record.updated_at_ms:
                     newly_read[record.cursor] = record
 
+        # Capture the consumer's read position while still on the worker thread.
+        # Stored so WatermarkManager can embed it in the next checkpoint, letting
+        # cold start seek directly here instead of re-scanning from offset 0.
+        new_positions: dict[int, int] = {}
+        for tp in self._assigned_partitions:
+            try:
+                pos_list = consumer.position([tp])
+                if pos_list and pos_list[0].offset >= 0:
+                    new_positions[tp.partition] = pos_list[0].offset
+            except Exception:
+                pass
+        if new_positions:
+            self._last_consumer_positions = new_positions
+
         # Prune _records_by_key for committed cursors — those entries are
         # unreachable by future merge_external_state_records calls (the manager
         # skips cursor <= self.cursor), so keeping them wastes memory. This
@@ -513,13 +531,17 @@ class KafkaWatermarkStateReader:
             )
         return newly_read
 
-    def fast_init(self) -> None:
-        """Position the consumer at the end of the topic without scanning.
+    def fast_init(self, positions: dict[int, int] | None = None) -> None:
+        """Seek consumer to saved positions (or topic head) without scanning.
 
         Called on cold start when cursor_state_snapshot in the checkpoint
-        provides inflight state inline, eliminating the O(N) bootstrap scan.
-        Positions the internal consumer so the first _refresh_loop call reads
-        only new records instead of re-scanning from offset 0.
+        carries the consumer's last read positions. Seeking there means the
+        first _refresh_loop call reads only records written after the
+        checkpoint, skipping the full O(N) bootstrap scan.
+
+        `positions` maps partition → next-fetch offset, as captured by load()
+        after the previous pod's last scan. If None (legacy fallback), seeks
+        each partition to its current high watermark (topic head).
         """
         from confluent_kafka import Consumer, TopicPartition
 
@@ -543,9 +565,11 @@ class KafkaWatermarkStateReader:
 
         consumer.assign(partitions)
         for tp in partitions:
-            _, high = consumer.get_watermark_offsets(tp, timeout=10)
-            if high > 0:
-                consumer.seek(TopicPartition(self.topic, tp.partition, high))
+            target: int | None = positions.get(tp.partition) if positions is not None else None
+            if target is None:
+                _, high = consumer.get_watermark_offsets(tp, timeout=10)
+                target = high if high > 0 else 0
+            consumer.seek(TopicPartition(self.topic, tp.partition, target))
 
         self._consumer = consumer
         self._assigned_partitions = partitions
@@ -642,6 +666,9 @@ class WatermarkManager:
         # Cursors pruned from _state_versions on advance — need tombstones
         # written to state_topic so compaction can remove their keys.
         self._pending_tombstones: list[int] = []
+        # Consumer read positions from the last state_reader.load() call.
+        # Embedded in each checkpoint so cold start can seek past old records.
+        self._last_state_consumer_positions: dict[int, int] = {}
         self.last_delivery_wait_ms: float | None = None
         self.metrics = WatermarkMetrics(
             meter,
@@ -853,16 +880,16 @@ class WatermarkManager:
                 return
             cursor = self.cursor
             self._dirty = False
-            # Snapshot the inflight cursor states (at most max_inflight entries).
-            # Stored inline in the checkpoint so cold start can reconstruct
-            # WatermarkManager state without scanning the cursor_state topic.
-            if self._state_versions:
-                _snapshot = json.dumps([
-                    {"cursor": c, "status": s, "updated_at_ms": ts}
-                    for c, (ts, s) in self._state_versions.items()
-                ])
-            else:
-                _snapshot = ""
+            # Embed the state_reader consumer's last read position so cold start
+            # can seek directly there instead of re-scanning from offset 0.
+            # For a realtime pipeline the inflight window (_state_versions) is
+            # typically empty (in-order completions leave nothing to snapshot),
+            # but the consumer position is always valid after the first scan.
+            positions = self._last_state_consumer_positions
+            _snapshot = (
+                json.dumps({str(p): o for p, o in positions.items()})
+                if positions else ""
+            )
 
         started_at = time.perf_counter()
         row = build_checkpoint_row(self.identity, cursor, status=status)
@@ -923,6 +950,11 @@ class WatermarkManager:
                 state_records = await asyncio.to_thread(
                     self.state_reader.load, committed
                 )
+                # to_thread() provides happens-before for all writes inside
+                # load(), so reading _last_consumer_positions here is safe.
+                positions = getattr(self.state_reader, "_last_consumer_positions", {})
+                if positions:
+                    self._last_state_consumer_positions = positions
                 if state_records:
                     advanced_watermark = await self.merge_external_state_records(state_records)
                     if advanced_watermark is not None and self.logger is not None:

@@ -184,18 +184,23 @@ async def run_derived_pipeline(
             )
             if snapshot:
                 import json as _json
-                raw_states = _json.loads(snapshot)
-                state_records = {
-                    s["cursor"]: WatermarkStateRecord(
-                        cursor=s["cursor"],
-                        status=s["status"],
-                        updated_at_ms=s["updated_at_ms"],
-                        identity=checkpoint_identity,
-                        error=s.get("error"),
-                    )
-                    for s in raw_states
-                }
-                await asyncio.to_thread(state_reader.fast_init)
+                snapshot_data = _json.loads(snapshot)
+                if isinstance(snapshot_data, dict):
+                    positions = {int(k): int(v) for k, v in snapshot_data.items()}
+                    state_records = {}
+                    await asyncio.to_thread(state_reader.fast_init, positions)
+                else:
+                    state_records = {
+                        s["cursor"]: WatermarkStateRecord(
+                            cursor=s["cursor"],
+                            status=s["status"],
+                            updated_at_ms=s["updated_at_ms"],
+                            identity=checkpoint_identity,
+                            error=s.get("error"),
+                        )
+                        for s in snapshot_data
+                    }
+                    await asyncio.to_thread(state_reader.fast_init)
             else:
                 state_records = await asyncio.to_thread(state_reader.load)
 
