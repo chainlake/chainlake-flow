@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from confluent_kafka.serialization import MessageField, SerializationContext
@@ -46,6 +47,9 @@ class CheckpointRecord:
     updated_at_ms: int
     identity: CheckpointIdentity
     error: str | None = None
+    # Non-empty when the checkpoint was written by a WatermarkManager that
+    # supports inline inflight state. JSON list of {cursor,status,updated_at_ms}.
+    cursor_state_snapshot: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = {
@@ -261,12 +265,14 @@ class KafkaCheckpointReader:
                                 )
                             return None
                         raise
+                    snapshot = value.get("cursor_state_snapshot") or None
                     latest_record = CheckpointRecord(
                         cursor=int(value["cursor"]),
                         status=value.get("status", "running"),
                         updated_at_ms=int(value.get("updated_at_ms", 0)),
                         identity=self.identity,
                         error=value.get("error"),
+                        cursor_state_snapshot=snapshot,
                     )
         finally:
             consumer.close()
@@ -507,6 +513,43 @@ class KafkaWatermarkStateReader:
             )
         return newly_read
 
+    def fast_init(self) -> None:
+        """Position the consumer at the end of the topic without scanning.
+
+        Called on cold start when cursor_state_snapshot in the checkpoint
+        provides inflight state inline, eliminating the O(N) bootstrap scan.
+        Positions the internal consumer so the first _refresh_loop call reads
+        only new records instead of re-scanning from offset 0.
+        """
+        from confluent_kafka import Consumer, TopicPartition
+
+        if self._consumer is not None:
+            return
+
+        consumer = Consumer(self._consumer_config())
+        metadata = consumer.list_topics(self.topic, timeout=10)
+        topic_meta = metadata.topics.get(self.topic)
+        if topic_meta is None or topic_meta.error is not None:
+            consumer.close()
+            return
+
+        partitions = [
+            TopicPartition(self.topic, partition)
+            for partition in topic_meta.partitions
+        ]
+        if not partitions:
+            consumer.close()
+            return
+
+        consumer.assign(partitions)
+        for tp in partitions:
+            _, high = consumer.get_watermark_offsets(tp, timeout=10)
+            if high > 0:
+                consumer.seek(TopicPartition(self.topic, tp.partition, high))
+
+        self._consumer = consumer
+        self._assigned_partitions = partitions
+
     def close(self) -> None:
         if self._consumer is not None:
             self._consumer.close()
@@ -596,6 +639,9 @@ class WatermarkManager:
         self._lock = asyncio.Lock()
         self._flush_event = asyncio.Event()
         self._state_versions: dict[int, tuple[int, str]] = {}
+        # Cursors pruned from _state_versions on advance — need tombstones
+        # written to state_topic so compaction can remove their keys.
+        self._pending_tombstones: list[int] = []
         self.last_delivery_wait_ms: float | None = None
         self.metrics = WatermarkMetrics(
             meter,
@@ -722,6 +768,9 @@ class WatermarkManager:
             # grows at block-rate indefinitely, causing OOMKill over hours.
             if self.cursor is not None and self._state_versions:
                 committed = self.cursor
+                to_tombstone = [c for c in self._state_versions if c <= committed]
+                if to_tombstone:
+                    self._pending_tombstones.extend(to_tombstone)
                 self._state_versions = {
                     c: v for c, v in self._state_versions.items()
                     if c > committed
@@ -804,11 +853,23 @@ class WatermarkManager:
                 return
             cursor = self.cursor
             self._dirty = False
+            # Snapshot the inflight cursor states (at most max_inflight entries).
+            # Stored inline in the checkpoint so cold start can reconstruct
+            # WatermarkManager state without scanning the cursor_state topic.
+            if self._state_versions:
+                _snapshot = json.dumps([
+                    {"cursor": c, "status": s, "updated_at_ms": ts}
+                    for c, (ts, s) in self._state_versions.items()
+                ])
+            else:
+                _snapshot = ""
 
         started_at = time.perf_counter()
+        row = build_checkpoint_row(self.identity, cursor, status=status)
+        row["cursor_state_snapshot"] = _snapshot
         delivery_future = await self.sink.send_checkpoint(
             self.topic,
-            build_checkpoint_row(self.identity, cursor, status=status),
+            row,
             wait_delivery=True,
         )
         if delivery_future is not None:
@@ -832,6 +893,28 @@ class WatermarkManager:
                 pass
             self._flush_event.clear()
             await self.flush()
+            await self._write_tombstones()
+
+    async def _write_tombstones(self) -> None:
+        """Write null-value tombstones for recently-committed cursor state keys.
+
+        Tombstones tell Kafka/Redpanda log compaction to delete the key from
+        the cursor_state topic. Without them, committed cursor keys accumulate
+        forever — a 120M-block backfill would leave 120M live keys, making
+        every cold-start scan O(N) even after compaction.
+
+        Fire-and-forget: a lost tombstone means the key lingers until the next
+        checkpoint cycle writes it again; correctness is not affected.
+        """
+        if not self._pending_tombstones:
+            return
+        tombstones, self._pending_tombstones = self._pending_tombstones, []
+        sink = self.sink
+        if not hasattr(sink, "send_tombstone"):
+            return
+        for cursor in tombstones:
+            key = build_watermark_state_key(self.identity, cursor)
+            sink.send_tombstone(self.state_topic, key)
 
     async def _refresh_loop(self) -> None:
         while self._running:

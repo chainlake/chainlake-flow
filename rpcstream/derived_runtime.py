@@ -34,6 +34,7 @@ from rpcstream.state.checkpoint import (
     KafkaCheckpointReader,
     KafkaWatermarkStateReader,
     WatermarkManager,
+    WatermarkStateRecord,
     build_checkpoint_identity,
 )
 from rpcstream.utils.logger import JsonLogger
@@ -176,7 +177,27 @@ async def run_derived_pipeline(
                 schema_registry_type=schema_registry_type or "protobuf",
                 logger=logger,
             )
-            state_records = await asyncio.to_thread(state_reader.load)
+            snapshot = (
+                checkpoint_record.cursor_state_snapshot
+                if checkpoint_record is not None
+                else None
+            )
+            if snapshot:
+                import json as _json
+                raw_states = _json.loads(snapshot)
+                state_records = {
+                    s["cursor"]: WatermarkStateRecord(
+                        cursor=s["cursor"],
+                        status=s["status"],
+                        updated_at_ms=s["updated_at_ms"],
+                        identity=checkpoint_identity,
+                        error=s.get("error"),
+                    )
+                    for s in raw_states
+                }
+                await asyncio.to_thread(state_reader.fast_init)
+            else:
+                state_records = await asyncio.to_thread(state_reader.load)
 
         # Apply checkpoint resume to from_block: skip already-committed cursors.
         effective_from_block = from_block

@@ -301,6 +301,24 @@ class KafkaWriter:
     async def send_checkpoint(self, topic, row, wait_delivery=True):
         return await self.send(topic, [row], wait_delivery=wait_delivery)
 
+    def send_tombstone(self, topic: str, key: str) -> None:
+        """Produce a null-value record so log compaction deletes the key.
+
+        Uses a dedicated non-transactional producer so tombstones are safe
+        to call in both EOS and non-EOS modes. Fire-and-forget: tombstones
+        are best-effort hints to compaction, not data records.
+        """
+        if not hasattr(self, "_tombstone_producer"):
+            from confluent_kafka import Producer as _RawProducer
+            allowed = ("bootstrap.servers", "security.protocol", "sasl.", "ssl.")
+            config = {
+                k: v for k, v in self.producer_config.items()
+                if any(k.startswith(p) for p in allowed)
+            }
+            self._tombstone_producer = _RawProducer(config)
+        self._tombstone_producer.produce(topic=topic, key=key.encode("utf-8"), value=None)
+        self._tombstone_producer.poll(0)
+
     # ----------------------------
     # Worker loop
     # ----------------------------

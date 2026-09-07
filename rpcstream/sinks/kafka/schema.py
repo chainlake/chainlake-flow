@@ -96,6 +96,10 @@ CHECKPOINT_SCHEMA = EntitySchema(
         FieldSchema("primary_unit", "string"),
         FieldSchema("entities", "string", repeated=True),
         FieldSchema("error", "string"),
+        # JSON-encoded list of {cursor, status, updated_at_ms} for each
+        # inflight cursor at checkpoint time. Read on cold start to
+        # reconstruct WatermarkManager state without scanning cursor_state.
+        FieldSchema("cursor_state_snapshot", "string"),
         FieldSchema("id", "string"),
         FieldSchema("ingest_timestamp", "int64"),
     ),
