@@ -216,49 +216,35 @@ class KafkaCheckpointReader:
             if not partitions:
                 return None
 
-            # Fetch watermark offsets BEFORE assign() — no assignment needed
-            # for get_watermark_offsets(); doing it before avoids the librdkafka
-            # _STATE (-172) error that occurs when seek() is called too soon
-            # after assign() before the fetch state has settled.
+            # Fetch watermark offsets before any assign() so we can embed the
+            # correct start offset in the TopicPartition objects. This avoids
+            # the librdkafka _STATE (-172) error from seek()-after-assign().
             low_high: dict[int, tuple[int, int]] = {}
             empty_partitions: set[int] = set()
-            tail_seeks: dict[int, int] = {}  # partition → tail scan start offset
-
-            # The most recent checkpoint record for our key is always near the
-            # end of the topic (each flush appends one record). Scanning only
-            # the last TAIL_LOOKBACK offsets avoids re-reading millions of
-            # pre-compaction records — 200k covers ~5.5h of 10 rec/s writes.
-            TAIL_LOOKBACK = 200_000
             for tp in partitions:
                 low, high = consumer.get_watermark_offsets(tp, timeout=10)
                 low_high[tp.partition] = (low, high)
                 if high <= low:
                     empty_partitions.add(tp.partition)
-                else:
-                    tail_seeks[tp.partition] = max(low, high - TAIL_LOOKBACK)
 
             if len(empty_partitions) == len(partitions):
                 return None
 
-            # Embed the tail offset directly in the TopicPartition objects
-            # passed to assign(). librdkafka uses the offset field as the
-            # initial fetch position when it is non-negative, so this avoids
-            # a post-assign seek() and the _STATE error it can trigger.
-            consumer.assign([
-                TopicPartition(
-                    self.topic, p,
-                    tail_seeks.get(p, low_high[p][0]),  # tail start or low for empty
-                )
-                for p in [tp.partition for tp in partitions]
-            ])
+            partition_ids = [tp.partition for tp in partitions]
 
-            def _scan(start_from_low: bool = False) -> CheckpointRecord | None:
-                if start_from_low:
-                    # Re-assign from low watermark to avoid seek() _STATE errors.
-                    consumer.assign([
-                        TopicPartition(self.topic, tp.partition, low_high[tp.partition][0])
-                        for tp in partitions
-                    ])
+            def _assign_tail(tail: int | None) -> None:
+                """Assign consumer starting from max(low, high - tail) per
+                partition. tail=None means start from low (full scan)."""
+                consumer.assign([
+                    TopicPartition(
+                        self.topic, p,
+                        low_high[p][0] if (tail is None or p in empty_partitions)
+                        else max(low_high[p][0], low_high[p][1] - tail),
+                    )
+                    for p in partition_ids
+                ])
+
+            def _scan() -> CheckpointRecord | None:
                 seen_eof = set(empty_partitions)
                 found: CheckpointRecord | None = None
                 while len(seen_eof) < len(partitions):
@@ -304,22 +290,41 @@ class KafkaCheckpointReader:
                         )
                 return found
 
-            latest_record = _scan()
-
-            # Tail miss: our key is older than the tail window (rare — happens
-            # when the pipeline hasn't checkpointed since before TAIL_LOOKBACK
-            # records were written by other pipelines on the same topic).
-            # Fall back to a full scan from offset 0.
-            if latest_record is None and any(
-                s > low_high[p][0] for p, s in tail_seeks.items()
-            ):
+            # Progressive tail scan — O(1) for single-pipeline topics.
+            #
+            # The checkpoint record for our key is always at the END of the
+            # topic (each flush appends one record; compaction keeps the latest
+            # per key). For a topic used by a single pipeline, the very last
+            # message IS our checkpoint → one consume() batch ≈ 50 ms.
+            #
+            # Steps:
+            #     1 → reads 1 record   ( ~50 ms — single-pipeline common case)
+            #   500 → reads 500 records (~100 ms — multi-pipeline / brief gap)
+            #  None → full scan from low watermark (rare last-resort fallback)
+            #
+            # Between steps, assign() with an updated start offset cleanly
+            # replaces the previous assignment without needing seek().
+            prev_starts: dict[int, int] = {}
+            for tail in (1, 500, None):
+                starts = {
+                    p: (low_high[p][0] if (tail is None or p in empty_partitions)
+                        else max(low_high[p][0], low_high[p][1] - tail))
+                    for p in partition_ids
+                }
+                if starts == prev_starts:
+                    break  # already scanned from this offset — no new records to check
+                _assign_tail(tail)
+                prev_starts = starts
+                latest_record = _scan()
+                if latest_record is not None or self.schema_missing:
+                    break
                 if self.logger:
                     self.logger.debug(
-                        "checkpoint.tail_miss_full_scan",
+                        "checkpoint.tail_miss",
                         topic=self.topic,
                         key=self.identity.key,
+                        tail=tail,
                     )
-                latest_record = _scan(start_from_low=True)
 
         finally:
             consumer.close()
