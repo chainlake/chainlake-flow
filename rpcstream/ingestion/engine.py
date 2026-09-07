@@ -912,6 +912,14 @@ class IngestionEngine:
                 )
         finally:
             gate.release()
+            # Release per-cursor diagnostic state. These dicts are keyed by
+            # block number and grow without bound in long-running pipelines
+            # (17.5 k entries/hour on BSC → OOMKilled after ~22h). The
+            # benchmark path calls _finalize_checkpoint directly and reads
+            # the dicts before this point, so it is unaffected.
+            self._cursor_phase_timings.pop(cursor, None)
+            self._cursor_observations.pop(cursor, None)
+            self._cursor_delivery_summaries.pop(cursor, None)
 
     async def _finalize_checkpoint(
         self,
