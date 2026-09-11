@@ -20,7 +20,11 @@ class WatermarkMetrics:
         self._commit_delay = None
         self._backfill_start = None
         self._backfill_target = None
+        self._oldest_gap_age_sec = None
+        self._pending_completed = 0
+        self._state_versions = 0
         self._cursor_failed_counter = _NoOpCounter()
+        self._gap_forced_resolved_counter = _NoOpCounter()
 
         if meter is None:
             return
@@ -64,6 +68,27 @@ class WatermarkMetrics:
             description="Configured segment end cursor (pipeline.to) for this bounded backfill process.",
         )
 
+        # Advance-released bookkeeping. Both of these are only pruned when the
+        # contiguous watermark advances, so a watermark pinned by an
+        # unresolved gap shows up here as steady growth -- which is exactly the
+        # signal that was missing when the pipeline grew ~112 MB/day for 3.3
+        # days without any error being logged.
+        meter.create_observable_gauge(
+            "rpcstream_watermark_pending_completed",
+            callbacks=[self._observe_pending_completed],
+            description="Cursors completed but not yet committable because the watermark is blocked lower down.",
+        )
+        meter.create_observable_gauge(
+            "rpcstream_watermark_state_versions",
+            callbacks=[self._observe_state_versions],
+            description="Size of the in-memory cursor state-version map (grows while the watermark is pinned).",
+        )
+        meter.create_observable_gauge(
+            "rpcstream_watermark_oldest_gap_age_sec",
+            callbacks=[self._observe_oldest_gap_age],
+            description="Age of the oldest unresolved gap, in seconds.",
+        )
+
         # rpcstream_watermark_gap_count is a point-in-time gauge (current
         # size of the unresolved-cursor set) -- it nets new failures against
         # retries resolving old ones, so it can sit flat while failures are
@@ -76,15 +101,26 @@ class WatermarkMetrics:
             description="Count of mark_failed() calls (watermark.cursor_failed log events).",
         )
 
+        # Cursors force-resolved (skipped) because their gap exceeded the
+        # age/count bound. Non-zero means real data holes were accepted, so
+        # this must be alerted on rather than merely graphed.
+        self._gap_forced_resolved_counter = meter.create_counter(
+            "rpcstream_watermark_gap_forced_resolved_total",
+            description="Cursors skipped as an accepted data hole after their gap exceeded checkpoint.max_gap_age_sec / max_gap_count.",
+        )
+
     def update(
         self,
         *,
         commit_cursor: int | None | object = _UNSET,
         gap_count: int | None = None,
         oldest_gap: int | None | object = _UNSET,
+        oldest_gap_age_sec: float | None | object = _UNSET,
         commit_delay: int | None | object = _UNSET,
         start_cursor: int | None | object = _UNSET,
         target_cursor: int | None | object = _UNSET,
+        pending_completed: int | None = None,
+        state_versions: int | None = None,
     ) -> None:
         if commit_cursor is not _UNSET:
             self._commit_cursor = commit_cursor
@@ -92,24 +128,38 @@ class WatermarkMetrics:
             self._gap_count = gap_count
         if oldest_gap is not _UNSET:
             self._oldest_gap = oldest_gap
+        if oldest_gap_age_sec is not _UNSET:
+            self._oldest_gap_age_sec = oldest_gap_age_sec
         if commit_delay is not _UNSET:
             self._commit_delay = commit_delay
         if start_cursor is not _UNSET:
             self._backfill_start = start_cursor
         if target_cursor is not _UNSET:
             self._backfill_target = target_cursor
+        if pending_completed is not None:
+            self._pending_completed = pending_completed
+        if state_versions is not None:
+            self._state_versions = state_versions
 
     def record_cursor_failed(self) -> None:
         self._cursor_failed_counter.add(1, self._attributes)
+
+    def record_gap_forced_resolved(self, count: int = 1) -> None:
+        if count <= 0:
+            return
+        self._gap_forced_resolved_counter.add(count, self._attributes)
 
     def snapshot(self) -> dict[str, int | None]:
         return {
             "commit_cursor": self._commit_cursor,
             "gap_count": self._gap_count,
             "oldest_gap": self._oldest_gap,
+            "oldest_gap_age_sec": self._oldest_gap_age_sec,
             "commit_delay": self._commit_delay,
             "backfill_start": self._backfill_start,
             "backfill_target": self._backfill_target,
+            "pending_completed": self._pending_completed,
+            "state_versions": self._state_versions,
         }
 
     def _observe_commit_cursor(self, _options):
@@ -139,3 +189,14 @@ class WatermarkMetrics:
         if self._backfill_target is None:
             return []
         return [Observation(self._backfill_target, self._attributes)]
+
+    def _observe_pending_completed(self, _options):
+        return [Observation(self._pending_completed, self._attributes)]
+
+    def _observe_state_versions(self, _options):
+        return [Observation(self._state_versions, self._attributes)]
+
+    def _observe_oldest_gap_age(self, _options):
+        if self._oldest_gap_age_sec is None:
+            return []
+        return [Observation(self._oldest_gap_age_sec, self._attributes)]

@@ -314,7 +314,9 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
                     record_count=len(state_records),
                 )
             else:
-                state_records = await asyncio.to_thread(state_reader.load)
+                state_records = await asyncio.to_thread(
+                    state_reader.load, resume_cursor
+                )
                 logger.info(
                     "watermark_state.loaded",
                     topic=runtime.checkpoint.watermark_state_topic,
@@ -395,6 +397,9 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             state_reader=state_reader,
             flush_interval_ms=runtime.checkpoint.flush_interval_ms,
             commit_batch_size=runtime.checkpoint.commit_batch_size,
+            max_gap_age_sec=runtime.checkpoint.max_gap_age_sec,
+            max_gap_count=runtime.checkpoint.max_gap_count,
+            state_persist_window=runtime.checkpoint.state_persist_window,
             flush_on_advance=not runtime.kafka.eos_enabled,
             logger=logger,
             meter=observability.get_meter("rpcstream.watermark"),

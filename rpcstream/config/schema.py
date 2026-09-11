@@ -196,6 +196,48 @@ class CheckpointConfig(BaseModel):
     flush_interval_ms: int = 100
     commit_batch_size: int = 100
 
+    # ---- Unresolved-gap policy -------------------------------------------
+    # The contiguous watermark can only advance while every cursor below it is
+    # in _completed. One cursor that never succeeds (e.g. repeated sink
+    # delivery timeouts) therefore pins the watermark *forever*, and every
+    # structure that is released on advance -- _completed, _state_versions,
+    # and the persisted checkpoint itself -- grows without bound. Observed in
+    # production: 41 permanently failed cursors pinned the watermark for 3.3
+    # days while the engine kept ingesting, growing RSS ~112 MB/day until the
+    # container OOMKilled, and every restart then replayed the whole stale
+    # range and OOMKilled again in ~86s.
+    #
+    # A gap older than max_gap_age_sec (or a gap set larger than
+    # max_gap_count) is force-resolved: treated as consumed so the watermark
+    # can move past it. This accepts an explicit, logged, alertable data hole
+    # for those cursors instead of wedging the pipeline; backfill the logged
+    # range with the backfill/DLQ-replay tooling afterwards.
+    #
+    # 0 disables either bound (not recommended for realtime pipelines).
+    max_gap_age_sec: float = 900.0
+    max_gap_count: int = 1000
+
+    # Only persist a per-cursor `completed` state row (and its later tombstone)
+    # when the cursor is more than this many blocks ahead of the next
+    # uncommitted cursor. 0 keeps the historical behaviour (persist whenever
+    # cursor > next_cursor), which writes ~one row per processed block and one
+    # tombstone per committed block, growing the watermark_state topic by
+    # ~2 records/block forever. A small window still covers genuine
+    # out-of-order completions (the in-process _completed set already handles
+    # the in-flight window) while keeping the topic, its cold-start scan, and
+    # its live-key count bounded.
+    state_persist_window: int = 0
+
+    @model_validator(mode="after")
+    def validate_gap_policy(self):
+        if self.max_gap_age_sec < 0:
+            raise ValueError("checkpoint.max_gap_age_sec must be >= 0")
+        if self.max_gap_count < 0:
+            raise ValueError("checkpoint.max_gap_count must be >= 0")
+        if self.state_persist_window < 0:
+            raise ValueError("checkpoint.state_persist_window must be >= 0")
+        return self
+
 
 class PipelineConfigModel(BaseModel):
     name: str | None = None

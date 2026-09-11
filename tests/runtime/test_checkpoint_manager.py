@@ -6,6 +6,7 @@ from rpcstream.state.checkpoint import (
     KafkaCheckpointReader,
     KafkaWatermarkStateReader,
     WatermarkManager,
+    WatermarkStateRecord,
     build_checkpoint_identity,
     build_watermark_state_key,
     build_watermark_state_row,
@@ -395,6 +396,15 @@ def test_kafka_checkpoint_reader_returns_none_when_schema_is_missing(monkeypatch
         def assign(self, *_args, **_kwargs):
             return None
 
+        def consume(self, num_messages=500, timeout=1.0):
+            messages = []
+            for _ in range(num_messages):
+                message = self.poll()
+                if message is None:
+                    break
+                messages.append(message)
+            return messages
+
         def poll(self, *_args, **_kwargs):
             if self._polled:
                 return None
@@ -477,6 +487,15 @@ def test_kafka_watermark_state_reader_returns_empty_when_schema_is_missing(monke
             # -1001 == confluent_kafka.OFFSET_INVALID: no fetch has happened
             # on this partition yet (this reader's first-ever call).
             return [SimpleNamespace(offset=-1001) for _ in partitions]
+
+        def consume(self, num_messages=500, timeout=1.0):
+            messages = []
+            for _ in range(num_messages):
+                message = self.poll()
+                if message is None:
+                    break
+                messages.append(message)
+            return messages
 
         def poll(self, *_args, **_kwargs):
             if self._polled:
@@ -593,6 +612,15 @@ def test_kafka_watermark_state_reader_load_is_incremental(monkeypatch):
             self._next_offset += 1
             return message
 
+        def consume(self, num_messages=500, timeout=1.0):
+            messages = []
+            for _ in range(num_messages):
+                message = self.poll()
+                if message is None:
+                    break
+                messages.append(message)
+            return messages
+
         def close(self):
             return None
 
@@ -645,3 +673,279 @@ def test_kafka_watermark_state_reader_load_is_incremental(monkeypatch):
     # from the start, poll() would have to be called for offset 0 again,
     # which this fake can't do without resetting _next_offset itself.
     assert construction_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Unresolved-gap policy: a single cursor that never succeeds must not be able
+# to pin the contiguous watermark forever, because every advance-released
+# structure (_completed, _state_versions, the persisted checkpoint) then grows
+# without bound. Live incident: 41 permanent gaps -> ~112 MB/day RSS growth ->
+# OOMKill after 3.3 days, then a restart loop that OOMKilled in ~86s.
+# ---------------------------------------------------------------------------
+
+
+def _identity() -> CheckpointIdentity:
+    return CheckpointIdentity(
+        pipeline="pipe",
+        chain_uid="evm:56",
+        chain_type="evm",
+        network="mainnet",
+        mode="realtime",
+        primary_unit="block",
+        entities=("block",),
+    )
+
+
+def test_gap_is_force_resolved_once_it_exceeds_max_gap_age():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0.05,
+            max_gap_count=0,
+        )
+
+        await manager.mark_failed(100, "sink timeout")
+        # Not old enough yet: the gap must still hold the watermark back.
+        assert manager.cursor == 99
+        assert 100 in manager._failed
+
+        await asyncio.sleep(0.06)
+        # A second failure re-runs the bound; 100 is now past max_gap_age_sec.
+        await manager.mark_failed(101, "sink timeout")
+
+        assert manager.cursor == 100, "watermark must move past the expired gap"
+        assert 100 not in manager._failed
+        assert 101 in manager._failed, "the fresh gap must be kept"
+        assert manager._completed == set(), "resolved gap must be consumed, not re-queued"
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())
+
+
+def test_gap_count_bound_sheds_the_oldest_gaps():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=2,
+        )
+
+        await manager.mark_failed(100, "boom")
+        await manager.mark_failed(101, "boom")
+        assert len(manager._failed) == 2
+        assert manager.cursor == 99
+
+        # Third failure pushes the set over budget -> oldest gap is shed.
+        await manager.mark_failed(102, "boom")
+        assert manager._failed == {101, 102}
+        assert manager.cursor == 100
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())
+
+
+def test_gap_policy_can_be_disabled():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+        )
+
+        await manager.mark_failed(100, "boom")
+        await manager.mark_failed(101, "boom")
+        await manager.mark_emitted(102)
+        await manager.mark_completed(102)
+
+        # Both bounds off: the gap is never shed, so nothing above it commits.
+        assert manager._failed == {100, 101}
+        assert manager.cursor == 99
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())
+
+
+def test_forced_gap_resolution_is_counted():
+    from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    async def run():
+        sink = MemoryStore()
+        reader = InMemoryMetricReader()
+        provider = SDKMeterProvider(metric_readers=[reader])
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=1,
+            meter=provider.get_meter("rpcstream.watermark"),
+        )
+
+        await manager.mark_failed(100, "boom")
+        await manager.mark_failed(101, "boom")
+
+        reader.collect()
+        data = reader.get_metrics_data()
+        for rm in data.resource_metrics:
+            for sm in rm.scope_metrics:
+                for metric in sm.metrics:
+                    if metric.name == "rpcstream_watermark_gap_forced_resolved_total":
+                        return sum(dp.value for dp in metric.data.data_points)
+        return None
+
+    assert asyncio.run(run()) == 1
+
+
+def test_requires_cursor_state_respects_persist_window():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+            state_persist_window=5,
+        )
+
+        await manager.mark_emitted(100)
+        await manager.mark_completed(100)
+        assert manager.cursor == 100  # _next_cursor is now 101
+
+        # Inside the window: the in-process _completed set already covers it,
+        # so no state row (and later no tombstone) is written.
+        assert await manager.requires_cursor_state(104) is False
+        # Beyond the window: genuinely far ahead, persist it.
+        assert await manager.requires_cursor_state(110) is True
+        # A previously failed cursor is always persisted for visibility.
+        await manager.mark_failed(108, "boom")
+        assert await manager.requires_cursor_state(108) is True
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())
+
+
+def test_zero_persist_window_keeps_legacy_behaviour():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+            state_persist_window=0,
+        )
+
+        await manager.mark_emitted(100)
+        await manager.mark_completed(100)
+        # cursor == 100, so _next_cursor is 101; anything above it is persisted
+        # when the window is disabled (the historical behaviour).
+        assert await manager.requires_cursor_state(101) is False
+        assert await manager.requires_cursor_state(102) is True
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())
+
+
+def test_hydrate_skips_committed_cursors_before_recording_versions():
+    """A cold start against a large state topic must not park every
+    already-committed cursor in _state_versions (observed 687,491 entries)."""
+
+    def record(cursor, status="completed"):
+        return WatermarkStateRecord(
+            cursor=cursor,
+            status=status,
+            updated_at_ms=1,
+            identity=_identity(),
+        )
+
+    manager = WatermarkManager(
+        sink=MemoryStore(),
+        topic="checkpoint-topic",
+        state_topic="watermark-state-topic",
+        identity=_identity(),
+        initial_cursor=100,
+        state_records={50: record(50), 100: record(100), 150: record(150)},
+        flush_interval_ms=10000,
+        commit_batch_size=100,
+    )
+
+    assert set(manager._state_versions) == {150}
+    assert manager._completed == {150}
+    assert manager.cursor == 100
+
+
+def test_merge_external_state_skips_committed_cursors():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=100,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+        )
+
+        def record(cursor):
+            return WatermarkStateRecord(
+                cursor=cursor,
+                status="completed",
+                updated_at_ms=1,
+                identity=_identity(),
+            )
+
+        # 50 is at/below the commit watermark -> dropped without ever entering
+        # the version map. 102 is left pending (101 never completed) so it
+        # survives the post-advance prune and proves it *was* recorded.
+        await manager.merge_external_state_records({50: record(50), 102: record(102)})
+
+        assert set(manager._state_versions) == {102}
+        assert manager.cursor == 100
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())

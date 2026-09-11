@@ -164,7 +164,9 @@ def build_runtime_stack(
             schema_registry_type=schema_registry_type or "protobuf",
             logger=logger,
         )
-        state_records = state_reader.load()
+        # Pass the resume cursor so the reader drops already-committed records
+        # while scanning instead of materialising the whole state topic first.
+        state_records = state_reader.load(resume_cursor)
     processors = adapter.build_processors(entities=internal_entities)
     # Topics that should be written as raw JSON bytes (no Avro schema registry).
     # raw_envelope is the canonical-fetch output topic; checkpoint/watermark
@@ -207,6 +209,9 @@ def build_runtime_stack(
         state_reader=state_reader,
         flush_interval_ms=runtime.checkpoint.flush_interval_ms,
         commit_batch_size=runtime.checkpoint.commit_batch_size,
+        max_gap_age_sec=runtime.checkpoint.max_gap_age_sec,
+        max_gap_count=runtime.checkpoint.max_gap_count,
+        state_persist_window=runtime.checkpoint.state_persist_window,
         flush_on_advance=not eos_active,
         logger=logger,
         meter=observability.get_meter("rpcstream.watermark"),

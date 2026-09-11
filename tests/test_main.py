@@ -39,9 +39,12 @@ def test_startup_context_no_longer_includes_protobuf_enabled(monkeypatch):
             watermark_state_topic="watermark-state-topic",
             flush_interval_ms=100,
             commit_batch_size=100,
+            max_gap_age_sec=900.0,
+            max_gap_count=1000,
+            state_persist_window=0,
         ),
         chain=SimpleNamespace(uid="evm:56", type="evm", network="mainnet"),
-        engine=SimpleNamespace(concurrency=1),
+        engine=SimpleNamespace(concurrency=1, sink_inflight_cursors=2),
     )
 
     monkeypatch.setattr(main_mod, "load_pipeline_config", lambda _path: SimpleNamespace(logLevel="info"))
@@ -127,6 +130,9 @@ def test_run_pipeline_passes_sink_timeout_config_to_engine(monkeypatch):
             watermark_state_topic="watermark-state-topic",
             flush_interval_ms=100,
             commit_batch_size=100,
+            max_gap_age_sec=900.0,
+            max_gap_count=1000,
+            state_persist_window=0,
         ),
         chain=SimpleNamespace(uid="evm:56", type="evm", network="mainnet"),
         engine=SimpleNamespace(
@@ -134,6 +140,7 @@ def test_run_pipeline_passes_sink_timeout_config_to_engine(monkeypatch):
             max_inflight=5,
             sink_failure_timeout_sec=30.0,
             sink_cooldown_sec=20.0,
+            sink_inflight_cursors=2,
         ),
     )
 

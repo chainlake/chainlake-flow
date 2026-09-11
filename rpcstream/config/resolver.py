@@ -34,6 +34,12 @@ class CheckpointRuntime:
     watermark_state_topic: str
     flush_interval_ms: int
     commit_batch_size: int
+    # Unresolved-gap policy; see CheckpointConfig for the rationale.
+    max_gap_age_sec: float = 900.0
+    max_gap_count: int = 1000
+    # Persist a cursor's state row only when it is this far ahead of the next
+    # uncommitted cursor. 0 = historical behaviour (one row per block).
+    state_persist_window: int = 0
 
 @dataclass
 class ClientRuntime:
@@ -194,6 +200,9 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
         watermark_state_topic=topic_map.watermark_state,
         flush_interval_ms=checkpoint_cfg.flush_interval_ms,
         commit_batch_size=checkpoint_cfg.commit_batch_size,
+        max_gap_age_sec=checkpoint_cfg.max_gap_age_sec,
+        max_gap_count=checkpoint_cfg.max_gap_count,
+        state_persist_window=checkpoint_cfg.state_persist_window,
     )
     
     entities = cfg.entities

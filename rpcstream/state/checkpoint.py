@@ -542,6 +542,16 @@ class KafkaWatermarkStateReader:
                     identity=self.identity,
                     error=value.get("error"),
                 )
+                # Drop anything at or below the commit watermark while reading
+                # rather than materialising the whole topic and pruning after.
+                # Both consumers (_hydrate_state_records and
+                # merge_external_state_records) skip these cursors anyway, so
+                # this is pure peak-memory avoidance: a cold start against a
+                # large watermark_state topic used to retain every cursor in
+                # _records_by_key (observed 687,491 entries) only for the
+                # pruning pass to immediately discard them again.
+                if committed_cursor is not None and record.cursor <= committed_cursor:
+                    continue
                 old = self._records_by_key.get(key)
                 self._records_by_key[key] = record
                 if old is None or old.updated_at_ms != record.updated_at_ms:
@@ -700,6 +710,9 @@ class WatermarkManager:
         commit_batch_size: int = 100,
         flush_on_advance: bool = True,
         state_refresh_interval_ms: int = 1000,
+        max_gap_age_sec: float = 900.0,
+        max_gap_count: int = 1000,
+        state_persist_window: int = 0,
         logger=None,
         meter=None,
     ):
@@ -714,8 +727,14 @@ class WatermarkManager:
         self.commit_batch_size = commit_batch_size
         self.logger = logger
         self.flush_on_advance = flush_on_advance
+        self.max_gap_age_sec = max(0.0, float(max_gap_age_sec))
+        self.max_gap_count = max(0, int(max_gap_count))
+        self.state_persist_window = max(0, int(state_persist_window))
         self._completed = set()
         self._failed = set()
+        # First time each failed cursor was observed (monotonic clock). Drives
+        # the unresolved-gap age bound; see _resolve_expired_gaps_locked.
+        self._failed_since: dict[int, float] = {}
         self._next_cursor = None if initial_cursor is None else initial_cursor + 1
         self._dirty = False
         self._running = False
@@ -799,6 +818,15 @@ class WatermarkManager:
                 return True
             if self._next_cursor is None:
                 return False
+            # Window: only persist a state row for a cursor that is genuinely
+            # far ahead of the next uncommitted one. Persisting every
+            # out-of-order completion wrote ~1 row per processed block (plus a
+            # tombstone for each on commit), growing the watermark_state topic
+            # by ~2 records/block forever. The in-process _completed set
+            # already covers the in-flight window, so records inside it add
+            # nothing that isn't re-derivable from the checkpoint.
+            if self.state_persist_window > 0:
+                return cursor > self._next_cursor + self.state_persist_window
             return cursor > self._next_cursor
 
     def _preview_advance_locked(self, completed: set[int]) -> int | None:
@@ -820,14 +848,22 @@ class WatermarkManager:
             return
 
         for cursor, record in sorted(state_records.items()):
-            self._state_versions[cursor] = (record.updated_at_ms, record.status)
+            # Skip BEFORE recording the version. Recording first (as this used
+            # to) re-materialised every already-committed cursor into
+            # _state_versions, so a cold start against a large watermark_state
+            # topic parked the entire topic's cursor set in memory (observed:
+            # 687,491 entries) even though every one of them was immediately
+            # skippable.
             if self.cursor is not None and cursor <= self.cursor:
                 continue
+            self._state_versions[cursor] = (record.updated_at_ms, record.status)
             if record.status == "completed":
                 self._completed.add(cursor)
                 self._failed.discard(cursor)
+                self._failed_since.pop(cursor, None)
             elif record.status == "failed":
                 self._failed.add(cursor)
+                self._failed_since.setdefault(cursor, time.monotonic())
 
         self._advance_locked()
         self._refresh_metrics()
@@ -865,11 +901,87 @@ class WatermarkManager:
                 }
         return advanced_cursor
 
+    def _resolve_expired_gaps_locked(self, now: float | None = None) -> list[int]:
+        """Force-resolve gaps that have stayed unresolved too long.
+
+        MUST be called with self._lock held. Every call site already holds it
+        (mark_failed, merge_external_state_records, the refresh loop).
+
+        A single cursor that never succeeds pins the contiguous watermark
+        permanently: _advance_locked walks _next_cursor only while that cursor
+        is present in _completed, so everything above the gap piles up in
+        _completed / _state_versions and the persisted checkpoint stops
+        advancing. Live incident: 41 permanently failed cursors pinned the
+        watermark for 3.3 days while the engine kept ingesting at chain rate;
+        RSS grew ~112 MB/day until the container OOMKilled, after which every
+        restart replayed the entire stale range and OOMKilled again within
+        ~86s (the cold start alone blew the old 512Mi limit).
+
+        Resolved cursors are marked completed so the contiguous walk can pass
+        them, and are logged plus counted as an explicit, alertable data hole
+        instead of wedging the pipeline. Backfill the logged range with the
+        backfill / DLQ-replay tooling afterwards.
+        """
+        if not self._failed:
+            return []
+        if self.max_gap_count <= 0 and self.max_gap_age_sec <= 0:
+            return []
+
+        now = time.monotonic() if now is None else now
+        candidates: set[int] = set()
+
+        # Count bound: shed the OLDEST gaps until the set is back in budget.
+        if self.max_gap_count > 0 and len(self._failed) > self.max_gap_count:
+            overflow = len(self._failed) - self.max_gap_count
+            candidates.update(sorted(self._failed)[:overflow])
+
+        # Age bound: any gap first observed longer ago than the limit.
+        if self.max_gap_age_sec > 0:
+            cutoff = now - self.max_gap_age_sec
+            candidates.update(
+                cursor
+                for cursor, first_seen in self._failed_since.items()
+                if first_seen <= cutoff
+            )
+
+        if not candidates:
+            return []
+
+        resolved = sorted(candidates)
+        for cursor in resolved:
+            self._failed.discard(cursor)
+            self._failed_since.pop(cursor, None)
+            # Treat as consumed so the contiguous walk can move past it.
+            if self.cursor is None or cursor > self.cursor:
+                self._completed.add(cursor)
+
+        if self.logger:
+            self.logger.warn(
+                "watermark.gap_forced_resolved",
+                forced=len(resolved),
+                oldest=resolved[0],
+                newest=resolved[-1],
+                remaining_gaps=len(self._failed),
+                max_gap_age_sec=self.max_gap_age_sec,
+                max_gap_count=self.max_gap_count,
+                note="cursors skipped as an accepted data hole; backfill this range if required",
+            )
+        self.metrics.record_gap_forced_resolved(len(resolved))
+        self._advance_locked()
+        self._refresh_metrics()
+        return resolved
+
     async def mark_failed(self, cursor: int, error: str | None = None) -> None:
         async with self._lock:
             if self.cursor is not None and cursor <= self.cursor:
                 return
             self._failed.add(cursor)
+            self._failed_since.setdefault(cursor, time.monotonic())
+            # A gap that never resolves pins the watermark forever, which is
+            # what grows every advance-released structure without bound. Apply
+            # the age/count bound here too so a fresh failure can't be the one
+            # that wedges an otherwise healthy pipeline.
+            self._resolve_expired_gaps_locked()
             self._refresh_metrics()
         self.metrics.record_cursor_failed()
         if self.logger:
@@ -886,20 +998,24 @@ class WatermarkManager:
         async with self._lock:
             advanced_watermark = None
             for cursor, record in sorted(state_records.items()):
+                # Skip before touching _state_versions: see _hydrate_state_records.
+                if self.cursor is not None and cursor <= self.cursor:
+                    continue
                 previous = self._state_versions.get(cursor)
                 current_version = (record.updated_at_ms, record.status)
                 if previous is not None and current_version <= previous:
                     continue
                 self._state_versions[cursor] = current_version
 
-                if self.cursor is not None and cursor <= self.cursor:
-                    continue
                 if record.status == "completed":
                     self._completed.add(cursor)
                     self._failed.discard(cursor)
+                    self._failed_since.pop(cursor, None)
                 elif record.status == "failed":
                     self._failed.add(cursor)
+                    self._failed_since.setdefault(cursor, time.monotonic())
 
+            self._resolve_expired_gaps_locked()
             advanced_watermark = self._advance_locked()
             self._refresh_metrics()
             return advanced_watermark
@@ -921,10 +1037,20 @@ class WatermarkManager:
 
     def _refresh_metrics(self) -> None:
         oldest_gap = min(self._failed) if self._failed else None
+        oldest_gap_age_sec = None
+        if oldest_gap is not None:
+            first_seen = self._failed_since.get(oldest_gap)
+            if first_seen is not None:
+                oldest_gap_age_sec = max(0.0, time.monotonic() - first_seen)
         self.metrics.update(
             commit_cursor=self.cursor,
             gap_count=len(self._failed),
             oldest_gap=oldest_gap,
+            oldest_gap_age_sec=oldest_gap_age_sec,
+            # Advance-released bookkeeping, surfaced so a pinned watermark is
+            # visible as growth instead of only as unexplained RSS.
+            pending_completed=len(self._completed),
+            state_versions=len(self._state_versions),
         )
 
     async def mark_completed_run(self) -> None:
@@ -1029,6 +1155,18 @@ class WatermarkManager:
                     self.logger.warn(
                         "watermark.external_state_refresh_failed",
                         topic=getattr(self.state_reader, "topic", None),
+                        error=str(exc),
+                    )
+            # Run the gap bound even on an idle refresh tick, so a watermark
+            # pinned by an old gap is released by the clock rather than only
+            # when new external state happens to arrive.
+            try:
+                async with self._lock:
+                    self._resolve_expired_gaps_locked()
+            except Exception as exc:
+                if self.logger is not None:
+                    self.logger.warn(
+                        "watermark.gap_resolve_failed",
                         error=str(exc),
                     )
             await asyncio.sleep(self.state_refresh_interval)

@@ -899,6 +899,24 @@ class IngestionEngine:
 
         return 1.0
 
+    def _release_cursor_diagnostics(self, cursor) -> None:
+        """Drop the per-cursor diagnostic state written by _run_one.
+
+        These dicts are keyed by block number and grow without bound in
+        long-running pipelines (17.5 k entries/hour on BSC -> OOMKilled after
+        ~22h), so every path that runs _run_one must release its entry. Kept as
+        one helper because doing it inline at each call site is exactly how
+        retry_dlq_record ended up leaking: it calls _finalize_checkpoint
+        directly and so never ran the release that lives in
+        _finalize_and_release_gate's finally block.
+
+        The benchmark path calls _finalize_checkpoint directly and reads the
+        dicts before this point, so it is unaffected (it releases nothing).
+        """
+        self._cursor_phase_timings.pop(cursor, None)
+        self._cursor_observations.pop(cursor, None)
+        self._cursor_delivery_summaries.pop(cursor, None)
+
     async def _finalize_and_release_gate(
         self,
         gate: asyncio.Semaphore,
@@ -924,14 +942,7 @@ class IngestionEngine:
                 )
         finally:
             gate.release()
-            # Release per-cursor diagnostic state. These dicts are keyed by
-            # block number and grow without bound in long-running pipelines
-            # (17.5 k entries/hour on BSC → OOMKilled after ~22h). The
-            # benchmark path calls _finalize_checkpoint directly and reads
-            # the dicts before this point, so it is unaffected.
-            self._cursor_phase_timings.pop(cursor, None)
-            self._cursor_observations.pop(cursor, None)
-            self._cursor_delivery_summaries.pop(cursor, None)
+            self._release_cursor_diagnostics(cursor)
 
     async def _finalize_checkpoint(
         self,
@@ -1255,6 +1266,12 @@ class IngestionEngine:
             )
             return success
         finally:
+            # This path calls _finalize_checkpoint directly (it has no sink
+            # gate to release), so it must release the per-cursor diagnostics
+            # itself -- otherwise every retried DLQ cursor leaks one entry in
+            # _cursor_phase_timings / _cursor_observations /
+            # _cursor_delivery_summaries for the life of the process.
+            self._release_cursor_diagnostics(record.get("cursor"))
             self._active_dlq_record = previous
 
     async def mark_dlq_resolved(self, record: dict) -> None:
