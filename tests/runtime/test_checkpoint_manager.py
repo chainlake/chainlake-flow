@@ -993,6 +993,54 @@ def test_pending_hole_is_shed_when_completed_set_exceeds_bound():
     asyncio.run(run())
 
 
+def test_pending_hole_skips_the_whole_unavailable_region_in_one_step():
+    """Derived sat with the watermark at 119,315,828 while its input only went
+    back to ~119,320,421 (the rest was gone to topic retention), so a
+    one-cursor-at-a-time skip emitted thousands of forced=1 events. The region
+    must be skipped in a single step."""
+
+    from opentelemetry.sdk.metrics import MeterProvider as SDKMeterProvider
+    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+
+    async def run():
+        sink = MemoryStore()
+        reader = InMemoryMetricReader()
+        provider = SDKMeterProvider(metric_readers=[reader])
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=999,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+            max_pending_completed=2,
+            meter=provider.get_meter("rpcstream.watermark"),
+        )
+
+        await manager.mark_emitted(1000)
+        # 1000..1499 are unavailable; only 1500+ can ever be processed.
+        for cursor in (1500, 1501, 1502):
+            await manager.mark_completed(cursor)
+
+        assert manager.cursor == 1502, "watermark must jump to the real frontier"
+        assert manager._completed == set()
+
+        reader.collect()
+        data = reader.get_metrics_data()
+        for rm in data.resource_metrics:
+            for sm in rm.scope_metrics:
+                for metric in sm.metrics:
+                    if metric.name == "rpcstream_watermark_gap_forced_resolved_total":
+                        return sum(dp.value for dp in metric.data.data_points)
+        return None
+
+    # 1000..1499 skipped = 500 cursors, reported as one event.
+    assert asyncio.run(run()) == 500
+
+
 def test_pending_hole_bound_can_be_disabled():
     async def run():
         sink = MemoryStore()

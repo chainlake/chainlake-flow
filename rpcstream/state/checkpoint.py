@@ -944,9 +944,10 @@ class WatermarkManager:
         # cannot see it -- yet it blocks the contiguous walk identically.
         hole = self._resolve_pending_hole_locked()
         if hole is not None:
-            forced_total += 1
-            oldest_forced = hole
-            newest_forced = hole
+            first_skipped, last_skipped = hole
+            forced_total += last_skipped - first_skipped + 1
+            oldest_forced = first_skipped
+            newest_forced = last_skipped
 
         # --- Bound 2: expired gaps ------------------------------------------
         candidates: set[int] = set()
@@ -1005,32 +1006,43 @@ class WatermarkManager:
         self._refresh_metrics()
         return resolved
 
-    def _resolve_pending_hole_locked(self) -> int | None:
-        """Skip the cursor blocking the contiguous walk when the pending set
-        has grown past max_pending_completed.
+    def _resolve_pending_hole_locked(self) -> tuple[int, int] | None:
+        """Skip the hole region in front of the contiguous walk when the
+        pending set has grown past max_pending_completed.
 
-        Counterpart of the gap bounds for a cursor that never completes at all.
-        Almost every cursor in the pending set really was processed -- only the
-        one blocking cursor is skipped -- so advancing here moves the watermark
-        to the true contiguous completion frontier, which is also what releases
-        _completed / _state_versions and stops requires_cursor_state() from
-        returning True for every new cursor (the reason watermark_state kept
-        growing while the watermark was pinned).
+        Counterpart of the gap bounds for cursors that never complete at all
+        (never emitted, or -- as measured on the derived pipeline -- simply
+        unavailable because the input data they refer to has already been
+        deleted by topic retention). Almost every cursor in the pending set
+        really was processed, so the walk is moved to the lowest pending cursor
+        and the region below it is skipped in one step.
 
-        Returns the skipped cursor, or None when nothing was done. MUST be
-        called with self._lock held.
+        Skipping one cursor at a time would also work, but it turns a single
+        unavailable region into thousands of forced-resolve events and needs
+        the pending set to be refilled before each step. Observed live: derived
+        sat with the watermark at 119,315,828 while its input only went back to
+        ~119,320,421, emitting one forced=1 event per block.
+
+        Returns the skipped inclusive range, or None when nothing was done.
+        MUST be called with self._lock held.
         """
         if self.max_pending_completed <= 0:
             return None
         if len(self._completed) <= self.max_pending_completed:
             return None
-        if self._next_cursor is None:
+        if self._next_cursor is None or not self._completed:
             return None
 
-        cursor = self._next_cursor
-        # Treat as consumed so the walk can advance past it.
-        self._completed.add(cursor)
-        return cursor
+        frontier = min(self._completed)
+        first_skipped = self._next_cursor
+        if frontier <= first_skipped:
+            return None
+
+        # Everything in [first_skipped, frontier) was never completed and never
+        # will be; jump the walk to the lowest cursor that actually completed so
+        # _advance_locked can consume the contiguous run from there.
+        self._next_cursor = frontier
+        return first_skipped, frontier - 1
 
     async def mark_failed(self, cursor: int, error: str | None = None) -> None:
         async with self._lock:
