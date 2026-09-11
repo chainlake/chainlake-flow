@@ -949,3 +949,74 @@ def test_merge_external_state_skips_committed_cursors():
         await manager.stop(status="completed")
 
     asyncio.run(run())
+
+
+def test_pending_hole_is_shed_when_completed_set_exceeds_bound():
+    """A cursor that never completes at all is invisible to the _failed bounds
+    (gap_count stays 0) yet blocks the contiguous walk identically. Observed
+    live on the derived pipeline: pending_completed grew to 11,858 while the
+    watermark sat pinned, which kept requires_cursor_state() true for every new
+    cursor and wrote ~10 rows/s into watermark_state forever."""
+
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+            max_pending_completed=3,
+        )
+
+        await manager.mark_emitted(100)
+        # 100 never completes (the hole); 101..103 complete out of order.
+        for cursor in (101, 102, 103):
+            await manager.mark_completed(cursor)
+
+        assert manager.cursor == 99
+        assert manager._failed == set(), "a hole is not a failure"
+        assert len(manager._completed) == 3
+
+        # The 4th pending cursor exceeds the bound -> the hole is skipped and
+        # the watermark jumps to the true contiguous completion frontier.
+        await manager.mark_completed(104)
+        assert manager.cursor == 104
+        assert manager._completed == set()
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())
+
+
+def test_pending_hole_bound_can_be_disabled():
+    async def run():
+        sink = MemoryStore()
+        manager = WatermarkManager(
+            sink=sink,
+            topic="checkpoint-topic",
+            state_topic="watermark-state-topic",
+            identity=_identity(),
+            initial_cursor=99,
+            flush_interval_ms=10000,
+            commit_batch_size=100,
+            max_gap_age_sec=0,
+            max_gap_count=0,
+            max_pending_completed=0,
+        )
+
+        await manager.mark_emitted(100)
+        for cursor in (101, 102, 103, 104):
+            await manager.mark_completed(cursor)
+
+        # Bound disabled: the hole is never shed, so nothing above it commits.
+        assert manager.cursor == 99
+        assert len(manager._completed) == 4
+
+        await manager.stop(status="completed")
+
+    asyncio.run(run())

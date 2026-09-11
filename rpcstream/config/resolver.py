@@ -37,6 +37,7 @@ class CheckpointRuntime:
     # Unresolved-gap policy; see CheckpointConfig for the rationale.
     max_gap_age_sec: float = 900.0
     max_gap_count: int = 1000
+    max_pending_completed: int = 0
     # Persist a cursor's state row only when it is this far ahead of the next
     # uncommitted cursor. 0 = historical behaviour (one row per block).
     state_persist_window: int = 0
@@ -202,6 +203,7 @@ def resolve(cfg, adapter=None) -> RuntimeConfig:
         commit_batch_size=checkpoint_cfg.commit_batch_size,
         max_gap_age_sec=checkpoint_cfg.max_gap_age_sec,
         max_gap_count=checkpoint_cfg.max_gap_count,
+        max_pending_completed=checkpoint_cfg.max_pending_completed,
         state_persist_window=checkpoint_cfg.state_persist_window,
     )
     

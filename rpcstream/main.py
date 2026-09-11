@@ -399,6 +399,7 @@ async def run_pipeline(*, config_path: str | None = None, config=None):
             commit_batch_size=runtime.checkpoint.commit_batch_size,
             max_gap_age_sec=runtime.checkpoint.max_gap_age_sec,
             max_gap_count=runtime.checkpoint.max_gap_count,
+            max_pending_completed=runtime.checkpoint.max_pending_completed,
             state_persist_window=runtime.checkpoint.state_persist_window,
             flush_on_advance=not runtime.kafka.eos_enabled,
             logger=logger,

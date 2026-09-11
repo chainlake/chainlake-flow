@@ -217,6 +217,23 @@ class CheckpointConfig(BaseModel):
     max_gap_age_sec: float = 900.0
     max_gap_count: int = 1000
 
+    # Bound on cursors that completed but cannot be committed because the walk
+    # is blocked by a cursor that will never complete at all -- a *hole*, not a
+    # failure, so it never appears in _failed and the gap bounds above don't
+    # see it. Observed live on the derived pipeline: gap_count stayed 0 while
+    # _completed grew to 11,858 entries and the watermark sat pinned at
+    # 119,315,828, which in turn made requires_cursor_state() true for every
+    # new cursor and wrote ~10 rows/s into watermark_state forever (the reason
+    # that topic kept growing after the canonical side was already at 0).
+    #
+    # When the pending set exceeds this, the blocking cursor is treated as
+    # consumed so the watermark jumps to the true contiguous completion
+    # frontier (almost all of those cursors really were processed -- only the
+    # one hole is skipped) and the range is logged as an accepted data hole.
+    #
+    # 0 disables the bound.
+    max_pending_completed: int = 0
+
     # Only persist a per-cursor `completed` state row (and its later tombstone)
     # when the cursor is more than this many blocks ahead of the next
     # uncommitted cursor. 0 keeps the historical behaviour (persist whenever
@@ -234,6 +251,8 @@ class CheckpointConfig(BaseModel):
             raise ValueError("checkpoint.max_gap_age_sec must be >= 0")
         if self.max_gap_count < 0:
             raise ValueError("checkpoint.max_gap_count must be >= 0")
+        if self.max_pending_completed < 0:
+            raise ValueError("checkpoint.max_pending_completed must be >= 0")
         if self.state_persist_window < 0:
             raise ValueError("checkpoint.state_persist_window must be >= 0")
         return self

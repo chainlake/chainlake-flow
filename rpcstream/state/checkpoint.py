@@ -712,6 +712,7 @@ class WatermarkManager:
         state_refresh_interval_ms: int = 1000,
         max_gap_age_sec: float = 900.0,
         max_gap_count: int = 1000,
+        max_pending_completed: int = 0,
         state_persist_window: int = 0,
         logger=None,
         meter=None,
@@ -729,6 +730,7 @@ class WatermarkManager:
         self.flush_on_advance = flush_on_advance
         self.max_gap_age_sec = max(0.0, float(max_gap_age_sec))
         self.max_gap_count = max(0, int(max_gap_count))
+        self.max_pending_completed = max(0, int(max_pending_completed))
         self.state_persist_window = max(0, int(state_persist_window))
         self._completed = set()
         self._failed = set()
@@ -790,11 +792,20 @@ class WatermarkManager:
             if self.cursor is not None and cursor <= self.cursor:
                 return None
 
+            previous_cursor = self.cursor
             self._completed.add(cursor)
             self._failed.discard(cursor)
-            advanced = self._advance_locked()
+            self._failed_since.pop(cursor, None)
+            # Apply the bounds here as well: this is where _completed grows, so
+            # a cursor that never completes at all (a hole, which is never
+            # recorded in _failed) would otherwise accumulate with nothing
+            # around to shed it.
+            self._resolve_expired_gaps_locked()
+            self._advance_locked()
             self._refresh_metrics()
-            return advanced
+            # The advance may already have happened inside the bounds above, so
+            # report the cursor the watermark actually moved to.
+            return self.cursor if self.cursor != previous_cursor else None
 
     async def preview_completed(self, cursor: int) -> int | None:
         async with self._lock:
@@ -922,54 +933,104 @@ class WatermarkManager:
         instead of wedging the pipeline. Backfill the logged range with the
         backfill / DLQ-replay tooling afterwards.
         """
-        if not self._failed:
-            return []
-        if self.max_gap_count <= 0 and self.max_gap_age_sec <= 0:
-            return []
-
         now = time.monotonic() if now is None else now
+        forced_total = 0
+        oldest_forced = None
+        newest_forced = None
+
+        # --- Bound 1: the blocking cursor is a *hole*, not a failure --------
+        # A cursor that never completes at all (never emitted, or skipped by
+        # the cursor source) never enters _failed, so the gap bounds below
+        # cannot see it -- yet it blocks the contiguous walk identically.
+        hole = self._resolve_pending_hole_locked()
+        if hole is not None:
+            forced_total += 1
+            oldest_forced = hole
+            newest_forced = hole
+
+        # --- Bound 2: expired gaps ------------------------------------------
         candidates: set[int] = set()
+        if self._failed and (self.max_gap_count > 0 or self.max_gap_age_sec > 0):
+            # Count bound: shed the OLDEST gaps until the set is back in budget.
+            if self.max_gap_count > 0 and len(self._failed) > self.max_gap_count:
+                overflow = len(self._failed) - self.max_gap_count
+                candidates.update(sorted(self._failed)[:overflow])
 
-        # Count bound: shed the OLDEST gaps until the set is back in budget.
-        if self.max_gap_count > 0 and len(self._failed) > self.max_gap_count:
-            overflow = len(self._failed) - self.max_gap_count
-            candidates.update(sorted(self._failed)[:overflow])
+            # Age bound: any gap first observed longer ago than the limit.
+            if self.max_gap_age_sec > 0:
+                cutoff = now - self.max_gap_age_sec
+                candidates.update(
+                    cursor
+                    for cursor, first_seen in self._failed_since.items()
+                    if first_seen <= cutoff
+                )
 
-        # Age bound: any gap first observed longer ago than the limit.
-        if self.max_gap_age_sec > 0:
-            cutoff = now - self.max_gap_age_sec
-            candidates.update(
-                cursor
-                for cursor, first_seen in self._failed_since.items()
-                if first_seen <= cutoff
+        resolved: list[int] = []
+        if candidates:
+            resolved = sorted(candidates)
+            for cursor in resolved:
+                self._failed.discard(cursor)
+                self._failed_since.pop(cursor, None)
+                # Treat as consumed so the contiguous walk can move past it.
+                if self.cursor is None or cursor > self.cursor:
+                    self._completed.add(cursor)
+            forced_total += len(resolved)
+            oldest_forced = (
+                resolved[0] if oldest_forced is None
+                else min(oldest_forced, resolved[0])
+            )
+            newest_forced = (
+                resolved[-1] if newest_forced is None
+                else max(newest_forced, resolved[-1])
             )
 
-        if not candidates:
+        if not forced_total:
             return []
-
-        resolved = sorted(candidates)
-        for cursor in resolved:
-            self._failed.discard(cursor)
-            self._failed_since.pop(cursor, None)
-            # Treat as consumed so the contiguous walk can move past it.
-            if self.cursor is None or cursor > self.cursor:
-                self._completed.add(cursor)
 
         if self.logger:
             self.logger.warn(
                 "watermark.gap_forced_resolved",
-                forced=len(resolved),
-                oldest=resolved[0],
-                newest=resolved[-1],
+                forced=forced_total,
+                oldest=oldest_forced,
+                newest=newest_forced,
                 remaining_gaps=len(self._failed),
+                pending_completed=len(self._completed),
                 max_gap_age_sec=self.max_gap_age_sec,
                 max_gap_count=self.max_gap_count,
+                max_pending_completed=self.max_pending_completed,
                 note="cursors skipped as an accepted data hole; backfill this range if required",
             )
-        self.metrics.record_gap_forced_resolved(len(resolved))
+        self.metrics.record_gap_forced_resolved(forced_total)
         self._advance_locked()
         self._refresh_metrics()
         return resolved
+
+    def _resolve_pending_hole_locked(self) -> int | None:
+        """Skip the cursor blocking the contiguous walk when the pending set
+        has grown past max_pending_completed.
+
+        Counterpart of the gap bounds for a cursor that never completes at all.
+        Almost every cursor in the pending set really was processed -- only the
+        one blocking cursor is skipped -- so advancing here moves the watermark
+        to the true contiguous completion frontier, which is also what releases
+        _completed / _state_versions and stops requires_cursor_state() from
+        returning True for every new cursor (the reason watermark_state kept
+        growing while the watermark was pinned).
+
+        Returns the skipped cursor, or None when nothing was done. MUST be
+        called with self._lock held.
+        """
+        if self.max_pending_completed <= 0:
+            return None
+        if len(self._completed) <= self.max_pending_completed:
+            return None
+        if self._next_cursor is None:
+            return None
+
+        cursor = self._next_cursor
+        # Treat as consumed so the walk can advance past it.
+        self._completed.add(cursor)
+        return cursor
 
     async def mark_failed(self, cursor: int, error: str | None = None) -> None:
         async with self._lock:
